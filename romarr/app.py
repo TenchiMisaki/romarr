@@ -7750,8 +7750,13 @@ def make_handler(service: ROMarr):
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 with service._metadata_lock:
+                    previous_settings = deepcopy(service.store.settings)
                     service.store.settings.update(settings)
-                    service.store.save()
+                    try:
+                        service.store.save(raise_on_error=True)
+                    except OSError:
+                        service.store.settings = previous_settings
+                        raise
                     service.reload_metadata()
                     service.reload_clients()
                     service.reload_libraries()

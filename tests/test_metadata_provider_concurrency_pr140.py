@@ -5,12 +5,14 @@ All HTTP tests use a loopback ephemeral port. No third-party provider is called.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import threading
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
+from unittest.mock import Mock
 
 import pytest
 
@@ -61,6 +63,40 @@ def assert_consistent(service):
     assert service.metadata.providers == providers
     assert service._metadata_provider_snapshot == providers
     assert len(service.metadata_revision) == 32
+
+
+@pytest.mark.parametrize("failure_point", ["mkstemp", "replace"])
+def test_restore_write_failure_rolls_back_settings(tmp_path, monkeypatch, failure_point):
+    """A failed restore preserves durable settings and all active backends."""
+    service = new_service(tmp_path)
+    service.store.save()
+    original_settings = deepcopy(service.store.settings)
+    original_bytes = service.store.path.read_bytes()
+    backup = make_backup({
+        **original_settings,
+        "library_path": str(tmp_path / "restored-roms"),
+        "metadata_providers": [{"type": "rawg", "enable": False}],
+        "restore_only_setting": {"nested": [1, 2]},
+    }, include_secrets=True)
+    reloads = []
+    for name in ("reload_metadata", "reload_clients", "reload_libraries"):
+        reload = Mock()
+        monkeypatch.setattr(service, name, reload)
+        reloads.append(reload)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Synthetic restore-write failure")
+
+    target = store_module.tempfile if failure_point == "mkstemp" else store_module.os
+    monkeypatch.setattr(target, failure_point, fail_write)
+    with loopback_api(service) as request:
+        status, result = request("/api/v1/restore", "POST", backup)
+    assert status == 500
+    assert result["error"] == "OSError: Synthetic restore-write failure"
+    assert service.store.settings == original_settings
+    assert service.store.path.read_bytes() == original_bytes
+    for reload in reloads:
+        reload.assert_not_called()
 
 
 def test_provider_reload_noop_and_nested_change(tmp_path):
