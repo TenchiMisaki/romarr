@@ -327,3 +327,8 @@ UI-01 and UI-02 have reached upstream merge and release; retain their prior unco
 **Status and verification:** This dated pointer is documentation only. PR #4 remains **draft/open/backlog, not merged**, with the originally accepted UI-01/UI-02 progress and the historical rest of the roadmap unchanged. Fork/upstream main matched at `a41b8bd` in the read-only audit. No live Docker, Proxmox, production, preview, fork `main`, protected Homelab reference, browser screenshot or CodeRabbit action was performed by this update. **GITHUB PREVIEW: NOT VERIFIED** by connector readback.
 
 **Future-session rule:** Check the latest PR #6 for Update-page-specific data/acceptance changes *before* editing that screen under this broader UI initiative. Cross-reference new related child PRs in both backlogs only when independently verified; do not mark the broad UI audit or the Update system completed based on a planning PR or unmerged feature branch.
+
+
+### 13.1 Additional read-only branch-divergence finding
+
+**Verification at this audit:** Although fork `main` and upstream `main` were identical at `a41b8bd`, the *separate old draft planning branch* `notes/ui-consistency-roadmap` was **6 commits ahead and 18 commits behind** fork `main` under the GitHub comparison API. The resulting PR changed-file set nevertheless remained **one added documentation Markdown file** and no application code. This historical branch divergence **does not imply that fork `main` itself is divergent**. Retain this draft as a backlog record; do not force-push, silently rebase, retarget or merge it just to eliminate the comparison counts. Before any future conversion/publication, independently re-evaluate the exact branch ancestry, approved content and current base.
