@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1110" viewBox="0 0 1440 1110" role="img" aria-label="Proposed ROMarr System Update page; not a live screenshot"><title>Proposed ROMarr System Update page — illustrative, not actual live data</title>
+<rect x="0" y="0" width="1440" height="1110" rx="0" fill="#12141a"/>
+<rect x="0" y="0" width="222" height="1110" rx="0" fill="#0d0f14"/>
+<path d="M222 0L222 1110" stroke="#282e3a"/>
+<path d="M0 60L222 60" stroke="#282e3a"/>
+<text x="18" y="40" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="23" fill="#e8eaf0" font-weight="750">ROM</text>
+<text x="74" y="40" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="23" fill="#f2a33c" font-weight="750">arr</text>
+<text x="18" y="87" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">▦</text>
+<text x="49" y="87" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="500">Library</text>
+<text x="194" y="87" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌄</text>
+<text x="18" y="137" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">⌕</text>
+<text x="49" y="137" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="500">Wanted</text>
+<text x="194" y="137" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌄</text>
+<text x="18" y="187" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">◷</text>
+<text x="49" y="187" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="500">Activity</text>
+<text x="194" y="187" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌄</text>
+<text x="18" y="237" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">⬡</text>
+<text x="49" y="237" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="500">Hub</text>
+<text x="194" y="237" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌄</text>
+<text x="18" y="287" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">⚙</text>
+<text x="49" y="287" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="500">Settings</text>
+<text x="194" y="287" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌄</text>
+<text x="18" y="337" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#89909f" font-weight="400">▤</text>
+<text x="49" y="337" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="650">System</text>
+<text x="194" y="337" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="14" fill="#89909f" font-weight="400">⌃</text>
+<text x="36" y="378" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Status</text>
+<text x="36" y="413" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Stats</text>
+<rect x="10" y="426" width="202" height="33" rx="7" fill="#332719"/>
+<rect x="11" y="428" width="3" height="29" rx="1" fill="#f2a33c"/>
+<text x="36" y="448" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#f2a33c" font-weight="650">Update</text>
+<text x="36" y="483" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Platforms</text>
+<text x="36" y="518" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Collections</text>
+<text x="36" y="553" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Manual Import</text>
+<text x="36" y="588" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Tasks</text>
+<text x="36" y="623" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13.5" fill="#b4bbca" font-weight="400">Logs</text>
+<path d="M0 1002L222 1002" stroke="#282e3a"/>
+<text x="20" y="1031" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#b4bbca" font-weight="650">Appearance</text>
+<rect x="16" y="1047" width="190" height="44" rx="7" fill="#212734"/>
+<text x="46" y="1075" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#e8eaf0" font-weight="650" text-anchor="middle">Dark</text>
+<text x="103" y="1075" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400" text-anchor="middle">Light</text>
+<text x="160" y="1075" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400" text-anchor="middle">Warm</text>
+<rect x="222" y="0" width="1218" height="60" rx="0" fill="#151820"/>
+<path d="M222 60L1440 60" stroke="#282e3a"/>
+<text x="248" y="37" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="19" fill="#e8eaf0" font-weight="650">Update</text>
+<rect x="1240" y="17" width="174" height="25" rx="12" fill="#302717"/>
+<text x="1327" y="34" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#f2a33c" font-weight="650" text-anchor="middle">PROPOSED MOCKUP</text>
+<rect x="248" y="84" width="1166" height="223" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
+<rect x="269" y="103" width="3" height="18" rx="1.5" fill="#f2a33c"/>
+<text x="284" y="118" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">This install</text>
+<rect x="268" y="128" width="362" height="106" rx="10" fill="#12141a" stroke="#282e3a" stroke-width="1"/>
+<rect x="648" y="128" width="362" height="106" rx="10" fill="#12141a" stroke="#282e3a" stroke-width="1"/>
+<rect x="1028" y="128" width="362" height="106" rx="10" fill="#12141a" stroke="#282e3a" stroke-width="1"/>
+<text x="286" y="174" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="27" fill="#e8eaf0" font-weight="650">1.8.1</text>
+<text x="286" y="197" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400">Running</text>
+<rect x="358" y="180" width="113" height="25" rx="12" fill="#4b381e"/>
+<text x="414.5" y="197" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#f2a33c" font-weight="650" text-anchor="middle">DEVELOPMENT</text>
+<text x="665" y="174" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="27" fill="#e8eaf0" font-weight="650">1.8.1</text>
+<text x="665" y="197" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400">Latest on GitHub</text>
+<text x="1046" y="174" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="27" fill="#e8eaf0" font-weight="650">no</text>
+<text x="1046" y="197" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400">Update available</text>
+<text x="269" y="259" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Install shape:</text>
+<text x="365" y="259" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#e8eaf0" font-weight="500">container image (updates come from the host)</text>
+<text x="269" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Build:</text>
+<text x="309" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#e8eaf0" font-weight="600">Development</text>
+<text x="441" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400">•</text>
+<text x="454" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Branch:</text>
+<text x="510" y="286" font-family="Consolas,monospace" font-size="12.5" fill="#e8eaf0" font-weight="500">main</text>
+<text x="572" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12" fill="#89909f" font-weight="400">•</text>
+<text x="585" y="286" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Commit:</text>
+<text x="648" y="286" font-family="Consolas,monospace" font-size="12.5" fill="#e8eaf0" font-weight="500">a41b8bd</text>
+<rect x="248" y="325" width="1166" height="318" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
+<rect x="269" y="344" width="3" height="18" rx="1.5" fill="#f2a33c"/>
+<text x="284" y="359" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">Automatic updates</text>
+<text x="269" y="382" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Settings live under Settings → General; this page shows status and actions. Docker image updates happen on the host.</text>
+<rect x="268" y="401" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
+<text x="287" y="426" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Daily update check</text>
+<rect x="841" y="408" width="50" height="25" rx="12" fill="#23432f"/>
+<text x="866" y="425" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#79e1a4" font-weight="650" text-anchor="middle">ON</text>
+<rect x="268" y="440" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
+<text x="287" y="465" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Auto-apply ROMarr updates</text>
+<rect x="841" y="447" width="195" height="25" rx="12" fill="#30343e"/>
+<text x="938.5" y="464" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#d0d3dd" font-weight="650" text-anchor="middle">Not supported in Docker</text>
+<rect x="268" y="479" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
+<text x="287" y="504" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Channel</text>
+<text x="847" y="504" font-family="Consolas,monospace" font-size="13" fill="#e8eaf0" font-weight="550">stable</text>
+<rect x="268" y="518" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
+<text x="287" y="543" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Auto-update ROM Hub plugins</text>
+<rect x="841" y="525" width="50" height="25" rx="12" fill="#30343e"/>
+<text x="866" y="542" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#b4bbca" font-weight="650" text-anchor="middle">off</text>
+<path d="M823 401L823 557" stroke="#282e3a"/>
+<rect x="269" y="579" width="113" height="36" rx="6" fill="#212734" stroke="#3b4454" stroke-width="1"/>
+<text x="325.5" y="602" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="600" text-anchor="middle">Check now</text>
+<rect x="390" y="579" width="180" height="36" rx="6" fill="#212734" stroke="#3b4454" stroke-width="1"/>
+<text x="480" y="602" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="600" text-anchor="middle">Update plugins now</text>
+<rect x="248" y="661" width="1166" height="165" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
+<rect x="269" y="680" width="3" height="18" rx="1.5" fill="#f2a33c"/>
+<text x="284" y="695" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">How to update this container</text>
+<text x="269" y="720" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">ROMarr runs from an image. The existing deployment configuration must be used to update it from the Docker host.</text>
+<rect x="268" y="736" width="1124" height="67" rx="7" fill="#12141a" stroke="#323a47" stroke-width="1"/>
+<text x="286" y="759" font-family="Consolas,monospace" font-size="12.2" fill="#c6cad4" font-weight="400">Use the existing Docker deployment or host-side updater; verify the image source and chosen tag.</text>
+<text x="286" y="784" font-family="Consolas,monospace" font-size="12.2" fill="#c6cad4" font-weight="400">Preserve volumes, credentials, ports, and rollback information. Do not delete/recreate blindly.</text>
+<rect x="248" y="844" width="1166" height="188" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
+<rect x="269" y="863" width="3" height="18" rx="1.5" fill="#f2a33c"/>
+<text x="284" y="878" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">ROM Hub plugins</text>
+<text x="269" y="899" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">This section appears only when ROM Hub plugins are installed.</text>
+<rect x="268" y="916" width="1124" height="43" rx="0" fill="#212734" stroke="#282e3a" stroke-width="1"/>
+<text x="285" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Plugin</text>
+<text x="510" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Source</text>
+<text x="817" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Ref</text>
+<text x="1111" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Commit</text>
+<rect x="268" y="959" width="1124" height="52" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
+<text x="285" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Sample plugin</text>
+<text x="510" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">source repository</text>
+<text x="817" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">tracked ref</text>
+<text x="1111" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">revision</text>
+</svg>
