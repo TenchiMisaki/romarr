@@ -1,6 +1,8 @@
 **Documentation-only backlog / technical continuation record. DRAFT — DO NOT MERGE.**
 
 Preserve the planned ROMarr UI consistency initiative so a future session can resume without relying on conversation memory. Header/sidebar alignment comes first, followed by a comprehensive page audit and small, independently verified cleanup changes. This record does not implement or deploy the initiative.
+**Current progress (November 9, 2026 PST):** UI-01 desktop header/divider and UI-02 inactive Add New Filter have since been browser-previewed and implemented together in a separate, unmerged [fork PR #5](https://github.com/TenchiMisaki/romarr/pull/5). The historical observations and proposed separate-PR sequence below are preserved as originally written; **§11 is the latest status and supersedes older "unmeasured / no implementation PR" statements.** No deployed-code or automated-test PASS is claimed.
+
 
 ## 1. Authorization, scope and provenance
 
@@ -204,3 +206,69 @@ Application code changes: NONE. Production/preview operations: NONE. Runtime tes
 - **Tests:** Validation performed: **source and repository-state inspection only**. Python/Node syntax/pytest/Chromium/browser measurements/real hardware/preview/production: **NOT TESTED**.
 - **GitHub Preview:** **NOT VERIFIED** unless actual Write and Preview tabs are subsequently inspected. API read-back and Markdown file equality alone are not rendered Preview evidence.
 - **Change boundaries:** This update is expected to change only the versioned Markdown backlog file and its matching draft PR body. Do not merge, convert draft, close, retarget to upstream, trigger CodeRabbit, change production or preview, or edit protected homelab references under this authorization.
+
+## 11. Browser measurements and implementation progress — November 9, 2026 PST
+
+**Status amendment / authority:** The original §1–§10 investigation remains preserved as dated evidence. In this later session the owner explicitly approved (a) testing the UI in the development browser, (b) creating a focused fork implementation PR, (c) combining the two small top-bar corrections in that existing implementation PR, and (d) updating this backlog. This is **not** approval to merge the fork PR, promote upstream, modify running containers or change protected homelab references. Where prior §10 said measurements were unavailable, no implementation PR existed, or UI-01 and UI-02 must be separate, the **newer observed results and owner decision below supersede that planning status**, without retroactively changing the earlier audit.
+
+### 11.1 Reproduced desktop and mobile baseline
+
+Measurements were reported from a Chromium-based development browser on November 9, 2026 PST using read-only DOM geometry scripts. They represent the **running development preview at the time**, not a confirmed match to GitHub's latest source SHA. Public backlog details intentionally omit the private lab address, node identity and service configuration.
+
+| Layout / page | CSS viewport | Sidebar brand height | Main top-bar height | Divider offset (brand bottom minus top bottom) | Global Filter |
+| --- | --- | ---: | ---: | ---: | --- |
+| Desktop — Games (`#library`) | 1920 × 911 | 65px | 62.50px | +2.50px | Visible |
+| Desktop — Settings / Metadata (`#metadata`) | 1920 × 911 | 65px | 53.34px | +11.66px | Hidden |
+| Narrow responsive layout — Games | 500 × 575 | 65px | 58.59px | +6.41px | Visible |
+| Narrow responsive layout — Settings / Metadata | 500 × 575 | 65px | 58.59px | +6.41px | Hidden |
+
+For both desktop pages the computed border colors differed: `#brand` = `rgb(31, 37, 48)` / `--line-soft`, whereas `#top` = `rgb(40, 46, 58)` / `--line`. Desktop top-bar height depends on whether the filter is rendered. At widths ≤700px the sidebar is a slide-out drawer, not a permanent connected desktop rail, so the 6.41px narrow-layout offset **does not itself establish a user-visible divider defect**. Initial measurements at 1920px after manually shrinking a Chrome window were misleading because the inspector still reported its original 1920px tab; corrected narrow-window measurements subsequently confirmed `mobileLayout:true` at 500px. This is a desktop responsive test, **not physical-phone validation**.
+
+### 11.2 Temporary browser-only fixes and observed results
+
+**Header/divider UI-01 experiment:** A temporary `<style>` element inserted through the developer console applied this desktop-only rule:
+
+```css
+@media (min-width: 821px) {
+  #top {
+    min-height: 65px;
+    border-bottom-color: var(--line-soft);
+  }
+}
+```
+
+The script validated that the test was running on the intended development-origin page, was on Games, and that the 65px brand baseline matched before applying the style. Results:
+
+| Desktop route | Original offset | Post-override offset | Post-override border colors |
+| --- | ---: | ---: | --- |
+| Games (`#library`) | 2.50px | **0px — PASS** | Match |
+| Settings / General (`#general`) | Not measured before | **0px — PASS** | Match |
+| Settings / Metadata (`#metadata`) | 11.66px | **0px — PASS** | Match |
+
+The CSS test applied only within that browser document, was not persisted, and would disappear on refresh. No running application files or containers were updated by the browser test. Existing global `box-sizing:border-box` includes padding and border in the 65px min-height. This is **browser geometry evidence for the experimental override**, not execution of the later Git commit or proof of stress/responsive accessibility.
+
+**Add New global Filter UI-02 experiment:** At `#add`, another temporary browser script changed only the DOM's `#search` visibility using the existing `hide` class. The reported `RESULT_JSON` showed `globalFilterBefore:true`, `globalFilterAfter:false`, `dedicatedGameFormPreserved:true`, `gameInputPresent:true`, `platformSelectPresent:true`, and `searchButtonPresent:true`; script reported **PASS**. This confirmed that hiding the global Filter did not remove the separate **Game**, **Platform**, and **Search & Grab** form elements. **No actual game request, indexer search, API submission, or Games → Add New → Games regression was executed.** Refresh restores the original page state.
+
+Source-level explanation: `go(page)` had allowed `#search` on both `library` and `add`, while the global Filter `oninput` handler returns immediately unless the route is `library`. Add New independently uses `#g-name`, `#g-plat` and `#g-go`. The owner elected to hide the inactive shared Filter on Add New instead of assigning it new functionality.
+
+### 11.3 Current combined implementation: fork PR #5 (separate from this draft backlog)
+
+- **PR:** [TenchiMisaki/romarr#5 — Fix top header alignment and inactive Add New filter](https://github.com/TenchiMisaki/romarr/pull/5).
+- **PR type and scope:** Non-draft **fork-to-fork-main implementation PR**, open/unmerged at last check. Its source branch is `fix/desktop-header-divider-alignment`, based on personal-fork `main` commit `041a367cedeb1c4b66365a9daea6a095cc753d55`. This backlog remains a separate, **draft documentation-only** PR.
+- **Combined implementation head:** `131fcc616912f74d89f63b2381cc9ba7bd907ce6` (after initial header-only commit `8aa8f716be37e4c1769f21060a140be3d5f3ff2e`). **One modified file:** `romarr/ui.py`, exactly **3 additions / 1 deletion** versus fork main, in two scoped source locations.
+- **Header CSS:** adds the desktop-scoped media query above and an explanatory comment; retains existing mobile CSS and its drawer behavior.
+- **Filter routing:** replaces `$('#search').classList.toggle('hide', !['library','add'].includes(page));` with `$('#search').classList.toggle('hide', page !== 'library');`. The global Filter remains shown only on Games. The Add New dedicated request form and the underlying global search input handler are unchanged.
+- **Reason for combining:** The owner initially preferred separate submissions, but after both browser previews opted for **one small cohesive top-bar correction PR**. It is a tightly scoped exception to the earlier separate-PR roadmap, **not** a general rule to group unrelated UI fixes.
+- **CodeRabbit:** the header-only commit `8aa8f716` received a completed review reporting **no actionable comments**. Its result **cannot** be promoted to the combined head. At this backlog-update check the CodeRabbit check for `131fcc6169` was **completed with success status; inspect comments/threads for actual findings**; recheck the exact-head check, full current comment body and review threads. A successful check only proves the review finished, not that no findings exist.
+- **GitHub verification for combined head:** PR title/base/head and source diff independently read back. No upstream PR or deployment was performed by this branch update. Exact GitHub rendered **Write/Preview** remains **NOT VERIFIED**.
+- **Tests:** browser-only experiments above **PASS within their stated scope**; committed-source syntax/pytest/Chromium/real running-app tests remain **NOT TESTED**. The deployed development source revision is not verified to equal this GitHub commit.
+
+### 11.4 Remaining work and safe resumption order
+
+1. **Finish combined PR #5 before upstream proposal.** Recheck its exact head SHA and CodeRabbit completion; inspect all inline threads and comments for actual actionable suggestions. Resolve real problems only via a separately authorized revision and repeat exact-head review. Do not merge or submit upstream by implication.
+2. **Run focused source and UI tests on the combined committed revision** without assuming browser preview is equivalent: verify no Python/HTML/JS syntax break, Games filter still updates Games, Add New has no visible inactive global Filter, its dedicated game form works through non-destructive navigation and input checks, back-navigation preserves/clears state as intended, desktop dividers remain aligned when input visibility changes, and no breakpoint regression around 700/701/820/821px or long-title/zoom stress. Do not execute real game requests during a layout test. Record actual test commands/versions/results only when run.
+3. **Keep runtime APPLY gated:** Current homelab reference `10` documents the independent five-minute preview recovery watchdog as **NOT INSTALLED/ACCEPTED**. A fork PR and browser-only DOM override do not authorize or prove a live container patch. Production must remain untouched. Verify precise preview source/backup/hash/recovery protections before any later owner-approved deployment.
+4. **Resume the wider 32-route UI audit** from §10.2–§10.6. Next priorities: UI-04 semantic keyboard/accessibility behavior; UI-03 page-top action/filter/card spacing patterns; UI-05 breakpoint/clipping; UI-06 wide-table overflow (still a hypothesis until measured); UI-07 scrolling/short viewport behavior; detailed route-by-route checks thereafter. Use small separate future changes, actual visual/browser evidence, focused tests and a justified exception list rather than a wholesale redesign.
+5. **Maintain documentation integrity:** this draft backlog PR description and this Markdown companion should be kept **byte-for-byte synchronized**. Update current status with dated amendments rather than erasing the original source-only audit. Any new upstream operation, staging work, merge or protected homelab reference publication needs its own explicit scope and approval.
+
+**Evidence status at this update:** GitHub fork branch/source/PR diffs were read back; browser observations were supplied by the owner in-session; no local syntax/test runner or live container was executed by this backlog update. Project Knowledge and OneDrive copies were not changed. **GITHUB PREVIEW: NOT VERIFIED.**
