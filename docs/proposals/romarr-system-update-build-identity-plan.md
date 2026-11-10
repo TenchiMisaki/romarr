@@ -131,3 +131,74 @@ This is **not an upstream ROMarr self-update PR** and is not authorized by this 
 | 2026-11-10 | Scope of this PR: two new files, documentation/illustrative SVG only | MUST VERIFY AFTER PUBLICATION |
 
 **Status:** Parent plan/backlog only. Source changes, GitHub upstream contribution, runtime validation, deployed updates, protected Homelab reference publication and private host-side automation are **NOT PERFORMED**. **Recovery:** leave this draft unmerged; if a factual error is found, correct only through a separately authorized dated Markdown/PR-body update while preserving prior evidence.
+
+
+---
+
+## 2026-11-10 audit supplement — lessons from the earlier fork review and Sidebar v26 validation
+
+> **Latest dated supplement.** This section supersedes earlier statements that no child implementation branch exists, while preserving the original November 10 baseline findings and five-PR plan above. No change to approved visual layout, code deployment policy, owner-manual implementation PR creation, or private recovery boundary.
+
+### A. Current implementation progress and source identity
+
+- **PR 1 implementation candidate exists on an isolated fork branch**: [`feature/romarr-build-provenance-pr1`](https://github.com/TenchiMisaki/romarr/tree/feature/romarr-build-provenance-pr1), head [`631933ccb57fa257b3b92bbdc0ec66be46a77a00`](https://github.com/TenchiMisaki/romarr/commit/631933ccb57fa257b3b92bbdc0ec66be46a77a00), based on `a41b8bdeb3b52fa42dd12a16df14b84f3f037541`. Six files changed: `.github/workflows/docker.yml`, both Dockerfiles, `romarr/app.py`, new `romarr/build_info.py`, and new `tests/test_build_info.py`. Fork/upstream `main` still matched at the pinned base during this audit. **No non-draft PR was found for this implementation branch, and no merge/deployment is claimed.**
+- Static independent source readback finds two `get_build_info(VERSION)` API additions, each Dockerfile generating an optional `_build_info.py`, four pairs of CI build inputs (standard/browser × smoke/push), and build-identity smoke statements in both image workflows. The new unit-test file defines **10 test functions**, not 10 independently executed passes. **Actual full pytest, real Docker image build/boot, authenticated API behavior, CodeRabbit and browser rendering remain NOT TESTED by this audit.** The prior conversation reported eight isolated focused checks, but no reproducible test-run artifact or exact environment was independently collected here; do not promote that report to full-suite PASS.
+- **Expected intermediate behavior:** PR 1 records development source provenance but intentionally preserves an **unknown release version** for non-tag builds. It does **not** yet replace the `0.0.0+unknown` Running tile or alter update eligibility. PR 2 and PR 4 remain necessary, and their changes must not pretend every developer revision is an official release.
+- **PR source identity caveat:** for a GitHub `pull_request` workflow, `github.sha` may identify the synthetic tested merge commit (`refs/pull/.../merge`) rather than the contributor head commit. That is valid **built-image provenance** but must not be mislabeled as the author's branch HEAD. Proposed future API/UI tests should explicitly distinguish tested revision, base/head and ref type.
+- The neighboring [UI-consistency backlog PR #4](https://github.com/TenchiMisaki/romarr/pull/4) remains the owner of global/header/sidebar, responsive and accessibility consistency. This PR #6 owns **Update-domain version/status semantics and minimal Update-page markup**; a dated cross-reference was requested for PR #4. Avoid a second global redesign or duplicate implementation of existing UI-01/UI-02 fixes.
+
+### B. Reusable findings from previous fork audits — not blanket source-test proof
+
+- Prior [fork review PR #1](https://github.com/TenchiMisaki/romarr/pull/1) and [upstream PR #140](https://github.com/BlizzHacker/romarr/pull/140) exposed persistence-failure behavior, stale-result/ordering issues and lock boundaries under concurrency. Their specific Metadata and library defects **do not imply ROMarr's updater has the same defect**. Reuse the audit **method** (inspect actual interleavings and durable-state failure paths), not its fixes or previous PASS counts.
+- The owner's prior Sidebar v26 validation report dated November 6 enumerated 283 tracked files and surveyed 51 Python package modules at **older upstream `3ba7105`**; 103 scripted local checks were reported for that sidebar candidate, and live patched-app/full-suite/Safari verification was expressly absent. That is historical **scope/coverage evidence**, not a fresh full-code or current Update-page test at `a41b8bd`.
+- Fork [backlog PR #4](https://github.com/TenchiMisaki/romarr/pull/4) and [official UI PR #145](https://github.com/BlizzHacker/romarr/pull/145) demonstrate the value of testing the actual committed DOM at desktop/mobile widths. UI-01/UI-02 are already merged/released; the System → Update page must retain its own current existing card and button structures.
+- CodeRabbit's green GitHub check means review completion, **not** zero actionable comments. The correct gate is final **exact head** + all issue comments/threads + actual applicable tests + independent upstream lifecycle verification. Backlog drafts are not auto-reviewed by default; do not convert this planning PR to non-draft merely to solicit the bot.
+
+### C. Expanded audit of update concurrency — source-derived risk, not reproduced failure
+
+**Call paths on the pinned `a41b8bd` source:**
+
+1. `ROMarr.__init__` registers scheduled `UpdateCheck` at 86,400 seconds and starts the Scheduler thread (`romarr/app.py`). `romarr/scheduler.py` serializes only its own scheduled jobs; it does not serialize independent HTTP command requests against the same operation.
+2. HTTP `POST /api/v1/command` invokes `ROMarr.run_command('UpdateCheck')` → `check_update()`; the UI's **Check now** uses this endpoint. A user with `auto_update=true` can implicitly invoke `apply_update()` in that path. Separate `ApplyUpdate` command can also invoke `apply_update()`.
+3. `apply_update()` takes `self._lock` for a queue snapshot/busy test, **releases it before** `selfupdate.launch()`, and has no demonstrated cross-call single-flight/in-progress guard.
+4. `selfupdate.launch()` writes a fixed `.romarr-selfupdate.sh`, truncates a fixed `.romarr-selfupdate.log`, and starts a detached process. Overlapping launches could rewrite a script/log another process is about to consume. This is a **plausible correctness/safety race from the source interleaving**, not a runtime-reproduced incident.
+
+**Required addition to PR 3 (do not create PR 6):** introduce an update-specific **single-flight gate** spanning decision, launch and detached completion/restart, with explicit already-running/deferred reporting, tested atomic ownership/cleanup, and no shared script/log overwrite. Consider safe cross-process coordination across restart instead of relying only on an in-memory mutex. Preserve the existing import/download queue guard, non-force target identity, and clean-worktree/rollback requirements. Do not use a generic blanket lock that blocks normal API requests or silently retries unsafe launches.
+
+**Concurrence and fault-injection matrix to add before promotion:**
+
+| Case | Required result | Current evidence |
+|---|---|---|
+| Two simultaneous `ApplyUpdate` POSTs | At most one detached launch; second receives accurate already-running/deferred response; no overlapping script/log edits | PROPOSED / NOT TESTED |
+| Scheduled `UpdateCheck` racing with manual **Check now** | No duplicate GitHub/apply/notify side effects; manual check remains read-only | PROPOSED / NOT TESTED |
+| Scheduled stable update racing with explicit `ApplyUpdate` | One verified target and durable update attempt; no duplicate restart | PROPOSED / NOT TESTED |
+| Update script launched, service restarts, another request arrives | Cross-process ownership either persists safely or resets only after verified terminal state | PROPOSED / NOT TESTED |
+| Failure writing update script or log; failed `Popen` | No false started status; no orphaned busy flag or accidental retry | PROPOSED / NOT TESTED |
+| Failed fetch/ff-merge/pip/service restart/health | No destructive operator-state rollback, preserve evidence, clear and testable recovery | PROPOSED / NOT TESTED |
+| GitHub 403/429/network error with prior successful cached status | Distinguish last **successful** comparison from new **failed** check; never falsely show current | PROPOSED / NOT TESTED |
+| Branch/revision from PR merge ref vs contributor head | Expose exactly the built SHA/ref; never infer head from merge-ref metadata | PROPOSED / NOT TESTED |
+
+**Further source-observed status caveat:** `check_update()` persists the latest-tag/update Boolean without an explicit last-check success/error result, and it may notify/apply after a network request has completed. The PR 2 data model should define an ordering/single-flight rule for both refreshes and side effects so an older request cannot overwrite a newer result. Do not equate a local mutex with proof that no stale network result can arrive later.
+
+### D. Acceptance and evidence amendments
+
+- [ ] **PR 1:** Before submitting/promotion, actually run the committed regression suite at its exact head, boot both standard and browser image variants, inspect generated `_build_info.py`, verify OCI revisions and the actual authenticated Status/Update JSON; include release tag, branch build, PR merge ref and legacy-image cases. No earlier synthesized or isolated check substitutes for those execution results.
+- [ ] **PR 2:** Make manual **Check now** non-mutating; ensure latest successful check, last attempt failure, unknown version and stale cache are distinct and concurrency-safe. Stable release comparison and nightly commit discovery have separate testable source identities.
+- [ ] **PR 3:** Single-flight updater coordination and deterministic two-request/failure interleaving tests are mandatory alongside existing branch/worktree, ff-only, rollback, restart and health gates. This remains a separate source/Git install change, not Docker auto-apply.
+- [ ] **PR 4:** Reuse shared component styling and the Sidebar v26 test *method* (not older snapshots/tests) for keyboard, theme, responsive layout, escaping, plugin/log conditional sections and three-tile layout. Cross-reference the independent general UI backlog PR #4, without replacing its ownership.
+- [ ] **Review gates:** Before any code promotion, recheck source HEAD/ancestry, run focused + applicable integration tests and image checks, create the implementation PR by owner manual non-draft step, inspect CodeRabbit actual comments/threads after completion, and independently verify final SHA. Human browser preview, deployed image digest and Docker host-side updater are separate gates.
+- [ ] **No application/production/host authorization:** This supplement authorizes/records **documentation updates only**; fork default branch, implementation branch code, upstream publication and private Docker production/preview remain unchanged unless separately approved.
+
+### E. Dated verification status at this supplement
+
+| Scope | Result |
+|---|---|
+| Fork/upstream default refs | Read-only **IDENTICAL (0/0)** at `a41b8bd` during this audit |
+| Backlog planning PR #6 and UI backlog #4 | Draft/open; planned dated Markdown + PR-body synchronization and independent readback |
+| Existing isolated PR 1 candidate | `631933c`; six-file source diff and test definitions inspected; **NOT** submitted as a non-draft fork PR |
+| Update concurrency and last-check semantics | Static flow/interleaving reviewed; runtime reproduction **NOT TESTED** |
+| Full pytest, both Docker builds, CodeRabbit, live app, mobile UI, restart/recovery | **NOT TESTED** in this audit |
+| Project Knowledge/OneDrive/public upstream | **NOT MODIFIED**; protected publication requires separate approval |
+| GitHub Write/Preview of rendered GFM | **NOT VERIFIED** via API |
+
+**Next safe continuation:** re-read the newest PR #6 body and Markdown first; then the cross-linked PR #4 and exact implementation branch `631933c`; audit/test the first PR with real image and API execution before assuming the UI has the data it needs. Keep this parent draft unmerged and preserve all original dated evidence above.
