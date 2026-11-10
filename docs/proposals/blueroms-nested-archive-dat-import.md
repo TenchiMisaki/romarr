@@ -1,3 +1,9 @@
+> **ROMarr ZIP-import backlog — DRAFT, DO NOT MERGE.**
+> This PR contains the complete investigation of multiple ZIP files in one download, ZIP-inside-ZIP support, DAT-verified game selection, and safe import. Read the full content below to resume the investigation. The same content is versioned in [the companion Markdown file](https://github.com/TenchiMisaki/romarr/blob/notes/blueroms-multi-archive-dat-import/docs/proposals/blueroms-nested-archive-dat-import.md).
+> **No ZIP-import functionality has been implemented or tested by this PR.**
+
+---
+
 # Future investigation: BlueRoms multi-archive discovery and DAT-verified import
 
 > **Status:** Deferred investigation and feature-design handoff — **not an upstream issue, confirmed current bug, implemented fix, or tested enhancement**.
@@ -138,3 +144,15 @@ When the owner asks to resume:
 6. Only after successful, documented reproduction and fix validation decide whether to prepare a **separate upstream issue or PR**. This internal document is not that publication.
 
 **Current disposition:** Deferred / future research. **Code modification: NONE. Runtime testing: NONE. Upstream issue/PR created for this proposal: NONE.**
+
+## 9. November 9, 2026 PST — Related upstream 7z/RAR extraction issue #144 (watch)
+
+**Related issue to follow:** [BlizzHacker/romarr #144 — 7z/RAR member extraction fails when filenames contain glob metacharacters](https://github.com/BlizzHacker/romarr/issues/144). **Status when checked November 9 PST: OPEN.** This is a separate upstream issue reported by another contributor, **not** an issue created by this fork backlog, an implemented fix, or proof of an installed change. No issue comments had been posted at that check.
+
+**Reported behavior and proposed cause, not independently reproduced here:** ROMarr's `_BsdtarSource` in `romarr/library.py` reportedly lists archive members successfully but passes a literal member path to `bsdtar -xOf` for `read`, `copy`, and `hash`. For 7z/RAR, `bsdtar` interprets characters such as `[`, `]`, `*`, `?`, and backslashes as glob syntax, so bracketed Switch release names like `Game [010012101468C000][v0][US].nsp` may fail to extract despite appearing in the listing. The reporter proposes escaping archive-member names before passing them as extraction patterns. The report describes ordinary ZIP access through Python `zipfile` as unaffected; verify actual code and fixes on the current revision before reusing that conclusion.
+
+**Relationship to this backlog:** Issue #144 concerns *extracting a member already discovered in one 7z/RAR archive*; PR #3 concerns *discovering and selecting ROMs across multiple sibling ZIPs and literal archive-inside-archive inputs*, then validating the actual bytes and requested title. Resolving #144 alone does **not** establish sibling-ZIP discovery, nested ZIP traversal, DAT verification, or request-aware import. Conversely, a nested-archive implementation must not reintroduce member-name failures in its 7z/RAR paths. Keep the two issues separate; do not close this backlog merely because #144 closes.
+
+**Watch / follow-up criteria:** On resumption, inspect upstream issue #144's state, maintainer responses, linked PRs/commits, merges, tagged releases and any verified release behavior. Distinguish issue closure from a merged patch, tagged release, published Docker image, or live successful import. When a candidate fix is available, inspect exact source changes and add synthetic 7z/RAR members with literal brackets and other glob metacharacters to the import regression matrix. Test `read`, `copy`, and `hash` and, when supported, nested-archive handling, without exposing ROM payloads or changing production. Do not adopt a suggested escape function without verifying how `bsdtar` treats the literal patterns and affected filenames. This relationship is tracked for investigation only; any future implementation, upstream comment, branch write or merge requires its own authorization.
+
+**Change scope for this amendment:** Documentation-only cross-reference and watch criteria. **ROMarr code changed: NONE. Tests executed: NONE. User library/deployment changed: NONE. GitHub issue #144 independently reproduced: NO.**
