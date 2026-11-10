@@ -2,7 +2,9 @@
 
 > **Status:** Deferred investigation and feature-design handoff — **not an upstream issue, confirmed current bug, implemented fix, or tested enhancement**.
 >
-> **Purpose:** Retain enough context for a future assistant/developer session to resume without reconstructing the October–November 2026 discussions. This is a personal-fork working note, **not a maintainer-facing submission**. The fork is public: do not append credentials, private paths, download URLs, user-specific infrastructure data, or copyrighted ROM payloads.
+> **Purpose:** Preserve the full technical investigation of ROMarr ZIP import behavior for a future assistant/developer to resume without reconstructing the original discussions. This is a personal-fork working note, **not a maintainer-facing submission**. The fork is public: do not append credentials, private paths, download URLs, user-specific infrastructure data, or copyrighted ROM payloads.
+>
+> **Investigation scope:** Multiple sibling ZIP archives and ZIP-inside-ZIP inputs, selecting the requested ROM, DAT-verifying actual bytes, and safely importing the correct game. No unrelated process or application changes are proposed.
 
 **Prepared:** 2026-11-09  
 **Personal fork:** [TenchiMisaki/romarr](https://github.com/TenchiMisaki/romarr)  
@@ -110,7 +112,7 @@ All cases are **NOT TESTED for this feature** until a future session collects ac
 | M | Duplicate destination, repeated sweep/restart, changed source | No overwrite, duplicate import, or stale intent reuse |
 | N | Traversal, unsafe symlink, decompression-bomb and resource-limit fixture | Fail closed without unsafe writes |
 
-**Suggested evaluation sequence:** (1) Pin exact current upstream revision, (2) reproduce historical sibling-ZIP behavior with synthetic files on unmodified source, (3) reproduce literal nested-ZIP behavior separately, (4) collect sanitized BlueRoms layout and actual import logs under approved testing, (5) implement the smallest source change in an isolated branch/worktree, (6) rerun focused regressions, CodeRabbit and explicit runtime acceptance only under the owner's protected preview workflow.
+**Suggested evaluation sequence:** (1) Pin exact current upstream revision, (2) reproduce historical sibling-ZIP behavior with synthetic files on unmodified source, (3) reproduce literal nested-ZIP behavior separately, (4) collect sanitized BlueRoms layout and actual import logs under approved testing, (5) implement the smallest source change in an isolated branch/worktree, (6) rerun focused regressions, review the final code, and validate actual ZIP import behavior only in an approved isolated test environment with verified rollback.
 
 ## 7. Evidence to collect when this is resumed
 
@@ -120,7 +122,7 @@ All cases are **NOT TESTED for this feature** until a future session collects ac
 - DAT catalog name/version and expected title, actual status, checksum verdict, identity resolution and original request.
 - Full result statuses/reasons, affected paths sanitized, whether any media/destination was actually changed, and exact test/review outcomes.
 - Source revision/commit, tests and fixtures, existing behavior comparison, regressions and CodeRabbit finding dispositions.
-- Explicit recovery status if authorized preview code is temporarily applied.
+- If a ZIP-import test build is deployed in an isolated preview, capture the exact revision, backup verification, rollback readiness, results, and final restored or retained state.
 
 **Don't conflate** ZIP CRC integrity, successful DAT lookup, correct requested-game identity and actual playable library import: each is a different acceptance check.
 
@@ -128,11 +130,11 @@ All cases are **NOT TESTED for this feature** until a future session collects ac
 
 When the owner asks to resume:
 
-1. Re-read the current Homelab Project index and relevant `10`/`50`/`70` references, this note and newer evidence; verify source freshness.
+1. Read this full ZIP-import investigation, its pinned ROMarr source links, related upstream issues/PRs, test matrix, and any newer evidence. Reconfirm the actual current repository and test-environment revisions before reusing prior findings.
 2. Check whether upstream now supports sibling archives, nested ZIPs and request-aware DAT validation. Determine the actual remaining gap; revise scope if upstream implemented it.
-3. Produce a read-only reproduction plan before changing any code, media or services.
+3. Produce a read-only reproduction plan using synthetic ZIP files before changing ROMarr code, completed download content, library files, or running services.
 4. Use BlueRoms **as the real-world example** and synthetic archives for safe reproducible tests. Do not assume BlueRoms must still serve the same archive layout.
-5. Develop only after approval on an isolated fork branch; preserve the active upstream contributor PR, fork `main` and production environment. Any live preview source APPLY requires current proven backup, independent five-minute recovery and immediate Revert Now safeguards.
+5. Develop only after separate owner approval on an isolated branch, preserving the active contributor PR, fork `main`, original downloads, library data, and production ROMarr. Never change a live preview without verifying the exact test target, independent backup, functioning rollback plan, and the required five-minute rollback safeguard; do not assume this safeguard has already been installed or tested.
 6. Only after successful, documented reproduction and fix validation decide whether to prepare a **separate upstream issue or PR**. This internal document is not that publication.
 
 **Current disposition:** Deferred / future research. **Code modification: NONE. Runtime testing: NONE. Upstream issue/PR created for this proposal: NONE.**
