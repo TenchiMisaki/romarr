@@ -1,7 +1,7 @@
 **Documentation-only backlog / technical continuation record. DRAFT — DO NOT MERGE.**
 
 Preserve the planned ROMarr UI consistency initiative so a future session can resume without relying on conversation memory. Header/sidebar alignment comes first, followed by a comprehensive page audit and small, independently verified cleanup changes. This record does not implement or deploy the initiative.
-**Current progress (November 9, 2026 PST):** UI-01 desktop header/divider and UI-02 inactive Add New Filter have since been browser-previewed and implemented together in a separate, unmerged [fork PR #5](https://github.com/TenchiMisaki/romarr/pull/5). The historical observations and proposed separate-PR sequence below are preserved as originally written; **§11 is the latest status and supersedes older "unmeasured / no implementation PR" statements.** No deployed-code or automated-test PASS is claimed.
+**Latest status (November 10, 2026 PST):** UI-01 (desktop header/divider alignment) and UI-02 (hide the inactive global Filter on Add New) were accepted upstream via [ROMarr PR #145](https://github.com/BlizzHacker/romarr/pull/145), merged at `a41b8bdeb3b52fa42dd12a16df14b84f3f037541`, and included in the official [v1.8.1 release](https://github.com/BlizzHacker/romarr/releases/tag/v1.8.1). The release notes credit `@TenchiMisaki` and report production deployment. The owner separately reports the change live; the owner's CT107 Docker revision was **not** independently inspected. Fork implementation [PR #5](https://github.com/TenchiMisaki/romarr/pull/5) is now closed/merged following safe fork-main synchronization. **The broader UI consistency audit remains open; this documentation-only Backlog PR stays draft/open.** See §12.\n\n**Current progress (November 9, 2026 PST):** UI-01 desktop header/divider and UI-02 inactive Add New Filter have since been browser-previewed and implemented together in a separate, unmerged [fork PR #5](https://github.com/TenchiMisaki/romarr/pull/5). The historical observations and proposed separate-PR sequence below are preserved as originally written; **§11 is the latest status and supersedes older "unmeasured / no implementation PR" statements.** No deployed-code or automated-test PASS is claimed.
 
 
 ## 1. Authorization, scope and provenance
@@ -278,3 +278,37 @@ Source-level explanation: `go(page)` had allowed `#search` on both `library` and
 **New verified evidence, after the preceding §11.3 check:** The CodeRabbit GitHub check on combined fork PR #5 head `131fcc616912f74d89f63b2381cc9ba7bd907ce6` completed with conclusion **success** at `2026-11-10T03:33:40Z` (November 9, 2026 PST). GitHub's CodeRabbit [review comment](https://github.com/TenchiMisaki/romarr/pull/5#issuecomment-6757992099) explicitly states **“No actionable comments were generated in the recent review.”** Its embedded coverage metadata identifies the same exact head SHA, and a separate read of PR #5's review threads found **zero threads**. Therefore: **exact-head CodeRabbit review complete, no actionable findings observed in this review**. This supersedes the earlier “review still requires inspection” status, without erasing its dated evidence. It does **not** certify automated tests, all possible issues, upstream acceptance, deployment, or a future amended commit.
 
 **Next gate:** Focused source/runtime-independent testing of the actual combined committed revision remains pending; do not treat the earlier browser-only experiments as executed-code PASS. Validate navigation/filter behavior, relevant responsive boundaries, long titles/zoom and no-script/accessibility cases where practical; separately authorize any protected preview deployment, upstream submission or merge. PR #5 and this backlog PR remain **open and unmerged** at this check.
+
+## 12. First UI Improvements Merged Upstream and Released — November 10, 2026 (America/Los_Angeles)
+
+**Latest disposition:** The initial two scoped UI improvements, UI-01 and UI-02, are **MERGED UPSTREAM and INCLUDED IN THE OFFICIAL v1.8.1 RELEASE**. This supersedes the earlier *open/unmerged, not submitted, and not released* statements in §§5, 10, and 11 **as of the milestones below**; those historical observations and their evidence remain preserved. The wider 32-route UI consistency work is **not completed**.
+
+### 12.1 Independently confirmed publication and ancestry
+
+| Milestone | Verified evidence | Scope |
+|---|---|---|
+| Initial fork implementation | [Fork PR #5](https://github.com/TenchiMisaki/romarr/pull/5), final contributor head `09845c28073b16493aa0ab112ad234d5e9dcc7c4` | Two cohesive UI changes in `romarr/ui.py`, separate from this draft backlog |
+| Official acceptance | [Upstream PR #145](https://github.com/BlizzHacker/romarr/pull/145) **merged** by `BlizzHacker` on November 9, 2026 at 22:13 PST (November 10, 06:13 UTC) | Official `main` merge commit `a41b8bdeb3b52fa42dd12a16df14b84f3f037541` |
+| Personal-fork reconciliation | [Fork-sync workflow run 42769987481](https://github.com/TenchiMisaki/romarr-fork-sync/actions/runs/42769987481) | Safe non-force fast-forward of fork `main` to `a41b8bd`; upstream/fork `main` observed identical. Fork PR #5 then reported **merged** at November 9, 22:39 PST because its base contained the upstream merge; this is **not** a second upstream PR |
+| Official release | [ROMarr v1.8.1](https://github.com/BlizzHacker/romarr/releases/tag/v1.8.1), published November 10, 2026 at 05:22 PST (13:22 UTC) | GitHub comparison of `a41b8bd` and tag `v1.8.1` reported **identical** at the check. Release notes explicitly credit `@TenchiMisaki` for #145 |
+
+### 12.2 The first two implemented fixes
+
+- **UI-01 — Completed for its scoped desktop change:** At desktop widths **821px and above**, sidebar branding and the main header use matching 60px heights and divider color. Mobile and broader responsive acceptance remain separate testing scopes.
+- **UI-02 — Completed for its scoped route behavior:** The global top **Filter** appears on **Games** only and is hidden on **Add New**, where it had no filtering action. Add New's dedicated Game, Platform and Search & Grab controls remain separate.
+- **Out of scope for this implementation:** The general 32-route consistency audit, other page spacing/control issues, accessibility review, clipping and scrolling concerns, comprehensive mobile testing and any broader redesign. Do not treat the two merged fixes as completion of those tasks.
+
+### 12.3 Evidence and deployment boundaries
+
+**Direct GitHub verification:** Official PR #145 merge, fork PR #5 merged state, matching upstream/fork default-branch tips, and GitHub release/tag comparison were checked. The maintainer's **v1.8.1 release notes report** a green full test suite (approximately 2,300 tests) and deployment/verification on the maintainer's production install. Those are **maintainer-reported release statements**, not tests independently rerun for this backlog amendment.
+
+**Owner report:** The owner confirms that the contributed change is live. This is recorded separately from GitHub's source merge and the maintainer's deployment report. The specific installed ROMarr Docker image digest, code revision and behavior on the owner's `pve-garage/CT107` have **NOT been independently checked**. Do not claim that an upstream merge, a release, or this documentation change updated the owner's container. Earlier scoped browser previews and CodeRabbit evidence in §11 remain dated; they are not retroactively a final-release runtime test.
+
+**No operational mutation:** This update changes only the documentation record. It does not modify ROMarr source, either default branch, the release, production/preview containers, release tags, or any protected Homelab references.
+
+### 12.4 Remaining backlog and next resumption
+
+UI-01 and UI-02 have reached upstream merge and release; retain their prior uncompleted checkboxes in §5 as **historical planning**, superseded by this newer status. Continue the main UI consistency initiative from §10's original 32-route source inventory, refreshing against the actual current upstream source before new work. Prioritize source-grounded follow-up areas UI-03 (page/control spacing), UI-04 (keyboard/accessibility), UI-05 (responsive widths/clipping), UI-06 (table overflow), and UI-07 (scrolling/short viewport); none is marked fixed or runtime-verified by PR #145.
+
+**Backlog lifecycle:** Keep [this PR #4](https://github.com/TenchiMisaki/romarr/pull/4) **draft, open, labeled `backlog`**, on `notes/ui-consistency-roadmap` with base `TenchiMisaki/romarr:main`. Do not merge, close, remove its label, change its base, or modify an implementation branch simply to record this milestone. The PR description and `docs/proposals/ui-consistency-roadmap.md` are intended to remain exactly synchronized. `GITHUB PREVIEW: NOT VERIFIED` unless the owner later checks GitHub's rendered Write/Preview.
+
