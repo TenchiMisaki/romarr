@@ -361,6 +361,20 @@ def test_digital_installer_selection_ignores_parent_archive_name():
     assert selected.primary == "setup.exe"
 
 
+def test_digital_exact_setup_outranks_asset_updater():
+    """'AssetUpdater' embeds the substring 'setup' but is not the installer."""
+    selected = _digital_set(["AssetUpdater.exe", "setup.exe"])
+    assert selected is not None
+    assert selected.primary == "setup.exe"
+
+
+def test_digital_delimited_setup_fallback():
+    """A delimited setup variant can outrank an unrelated helper executable."""
+    selected = _digital_set(["AssetUpdater.exe", "install/setup-01.exe"])
+    assert selected is not None
+    assert selected.primary == "install/setup-01.exe"
+
+
 def test_digital_relative_path_collision_fails_closed(tmp_path):
     """A file cannot also be a directory; preserve the original source."""
     outer = zip_bytes({
@@ -376,6 +390,38 @@ def test_digital_relative_path_collision_fails_closed(tmp_path):
     assert "colliding set member paths" in result.reason
     assert download.read_bytes() == outer
     assert not (library / "win" / "Installer" / "setup.exe").exists()
+
+
+def test_digital_equivalent_relative_paths_fail_before_copy(tmp_path):
+    """Aliases such as assets/. must never overwrite one staged file."""
+    outer = zip_bytes({
+        "setup.exe": b"installer",
+        "assets/config.dat": b"expected config",
+        "assets/./config.dat": b"malicious alias",
+    })
+    download = tmp_path / "Installer.zip"
+    download.write_bytes(outer)
+    library = tmp_path / "library"
+    result, = import_rom(download, resolve("win"), library)
+    assert not result.ok
+    assert "colliding set member paths" in result.reason
+    assert download.read_bytes() == outer
+    assert not (library / "win" / "Installer" / "setup.exe").exists()
+
+
+def test_digital_relative_path_normalizes_without_collision(tmp_path):
+    """A single dot-segment member keeps its directory, with no alias."""
+    outer = zip_bytes({
+        "setup.exe": b"installer",
+        "assets/./config.dat": b"config",
+    })
+    download = tmp_path / "Installer.zip"
+    download.write_bytes(outer)
+    library = tmp_path / "library"
+    result, = import_rom(download, resolve("win"), library)
+    assert result.ok, result.reason
+    assert (result.destination / "assets/config.dat").read_bytes() == b"config"
+    assert download.read_bytes() == outer
 
 
 def test_mame_archive_remains_the_playable_rom(tmp_path):
