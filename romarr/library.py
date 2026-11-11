@@ -472,7 +472,11 @@ class _NestedZipSource(_Source):
         return leaf.size if leaf else None
 
     def rom_sets(self, platform):
-        """Select playable sets independently for each nested ZIP container."""
+        """Keep complete digital installers, but isolate each disc archive."""
+        if platform.media == "digital":
+            # A PC installer can span outer and inner ZIPs: setup.exe may
+            # depend on .bin files in either container. Preserve one set.
+            return pick_all_rom_sets(self.names(), platform, read=self.read)
         groups = {}
         for name in self.names():
             groups.setdefault(self.group_key(name), []).append(name)
