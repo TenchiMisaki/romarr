@@ -320,6 +320,35 @@ def test_ambiguous_zip_eocd_in_comment_fails_before_parse(tmp_path):
     assert not library.exists()
 
 
+def test_nested_windows_installer_is_one_complete_set(tmp_path):
+    """Keep setup.exe and data from outer and inner ZIPs in one directory."""
+    outer = zip_bytes({
+        "setup.exe": b"installer executable",
+        "data.zip": zip_bytes({
+            "game-data1.bin": b"payload one",
+            "game-data2.bin": b"payload two",
+        }),
+    })
+    download = tmp_path / "Installer.zip"
+    download.write_bytes(outer)
+    library = tmp_path / "library"
+    preview = preview_import(download, resolve("win"), library)
+
+    assert len(preview["items"]) == 1
+    item = preview["items"][0]
+    assert item["primary"] == "setup.exe"
+    assert set(item["members"]) == {
+        "setup.exe", "data.zip/game-data1.bin", "data.zip/game-data2.bin"}
+    assert item["selected"]
+    result, = import_rom(download, resolve("win"), library,
+                         selected_primaries=["setup.exe"])
+    assert result.ok, result.reason
+    assert (result.destination / "setup.exe").read_bytes() == b"installer executable"
+    assert (result.destination / "game-data1.bin").read_bytes() == b"payload one"
+    assert (result.destination / "game-data2.bin").read_bytes() == b"payload two"
+    assert download.read_bytes() == outer
+
+
 def test_mame_archive_remains_the_playable_rom(tmp_path):
     """MAME's archive-is-the-ROM policy wins over nested ZIP discovery."""
     platform = resolve("mame")
