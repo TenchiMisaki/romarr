@@ -628,7 +628,12 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
             # verification. Only ZIPs containing another ZIP need an index.
             nested = any(info.filename.lower().endswith(".zip")
                          for info in archive.infolist() if not info.is_dir())
-        return _NestedZipSource(download) if nested else _ZipSource(download)
+        # A nested ZIP may be a required Windows installer payload. Keep it
+        # intact, rather than silently converting its contents into unrelated
+        # files. Cartridge and disc platforms still inspect nested ZIP layers.
+        return (_NestedZipSource(download)
+                if nested and (platform is None or platform.media != "digital")
+                else _ZipSource(download))
     if download.is_file() and suffix in ARCHIVE_SUFFIXES:
         tool = bsdtar_path()
         if tool is None:
@@ -935,27 +940,48 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
         try:
             with tempfile.TemporaryDirectory(prefix=".romarr-import-", dir=target_dir) as staging:
                 staged_dir = Path(staging)
+                # Digital installers must retain their internal path layout,
+                # including subdirectories with data/configuration files.
+                # Other multi-file ROMs retain their established flat layout.
                 written: dict[str, str] = {}
+                folded: dict[str, str] = {}
                 for member in chosen.members:
-                    name = Path(member.replace("\\", "/")).name
-                    if not is_safe_name(name, staged_dir):
+                    relative = (member.replace("\\", "/") if platform.media == "digital"
+                                else Path(member.replace("\\", "/")).name)
+                    path = Path(relative)
+                    if (not is_safe_name(relative, staged_dir)
+                            or path.is_absolute() or ".." in path.parts):
                         raise ValueError(f"unsafe set member: {member!r}")
-                    if name in written:
-                        raise ValueError(f"two files in this download are both called {name!r} ({written[name]} and {member}); refusing to guess which one the game needs")
-                    source.copy(member, staged_dir / name)
-                    if (staged_dir / name).stat().st_size == 0:
+                    key = relative.casefold()
+                    if key in folded or any(
+                            key.startswith(other + "/") or other.startswith(key + "/")
+                            for other in folded):
+                        raise ValueError(
+                            f"colliding set member paths: {folded.get(key, relative)!r} and {member!r}")
+                    folded[key] = member
+                    written[relative] = member
+                for name, member in written.items():
+                    staged_member = staged_dir / name
+                    staged_member.parent.mkdir(parents=True, exist_ok=True)
+                    source.copy(member, staged_member)
+                    if staged_member.stat().st_size == 0:
                         raise ValueError(f"empty set member: {member!r}")
-                    written[name] = member
-                total_set_size = sum(p.stat().st_size for p in staged_dir.iterdir())
+                total_set_size = sum((staged_dir / name).stat().st_size for name in written)
                 if platform.slug in ("ps2", "ngc", "xbox") and total_set_size < 8 * 1024 * 1024:
                     raise ValueError(f"too small to be a {platform.name} disc image ({total_set_size // (1024*1024)}MB < 8MB)")
                 destination.mkdir(parents=True, exist_ok=True)
                 for name in written:
                     final = destination / name
+                    if not is_safe_name(name, destination):
+                        raise ValueError(f"unsafe destination path: {name!r}")
+                    if final.exists() and final.is_dir():
+                        raise ValueError(f"destination requires a file but is a directory: {final}")
                     if final.exists() and final.stat().st_size == 0:
                         raise ValueError(f"existing zero-byte destination needs inspection: {final}")
                 for name in written:
-                    _publish_staged(staged_dir / name, destination / name, overwrite)
+                    final = destination / name
+                    final.parent.mkdir(parents=True, exist_ok=True)
+                    _publish_staged(staged_dir / name, final, overwrite)
         except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
             results.append(ImportResult(False, destination, f"set copy/extraction or publication failed: {exc}; reconcile any completed members before retrying"))
             continue
