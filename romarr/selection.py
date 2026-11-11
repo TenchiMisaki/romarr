@@ -900,8 +900,10 @@ def _digital_set(filenames: list[str]) -> RomSet | None:
     """
     if not filenames:
         return None
-    exes = [f for f in filenames if f.lower().endswith(".exe")]
-    primary = next((f for f in exes if "setup" in f.lower()),
+    exes = [f for f in filenames if _basename(f).lower().endswith(".exe")]
+    # Archive provenance is part of the displayed path, not the executable
+    # name. "setup-data.zip/helper.exe" must not outrank "setup.exe".
+    primary = next((f for f in exes if "setup" in _basename(f).lower()),
                    exes[0] if exes else filenames[0])
     return RomSet(primary, tuple(filenames))
 
