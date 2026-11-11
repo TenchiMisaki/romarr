@@ -1,6 +1,7 @@
 """Regression coverage for bounded ZIP-inside-ZIP import and review."""
 
 import io
+import struct
 import stat
 import zipfile
 
@@ -213,6 +214,43 @@ def test_nested_zip_central_directory_byte_limit_before_parse(tmp_path, monkeypa
     assert not result.ok
     assert "central-directory byte limit" in result.reason
     assert not (tmp_path / "library").exists()
+
+
+def test_outer_playlist_cannot_borrow_discs_from_inner_zip(tmp_path):
+    """A playlist outside the inner archive cannot claim its child discs."""
+    contents = zip_bytes({
+        "Game.m3u": b"Disc One.chd\n",
+        "inside.zip": zip_bytes({"Disc One.chd": b"disc one"}),
+    })
+    download = tmp_path / "outer.zip"
+    download.write_bytes(contents)
+    library = tmp_path / "library"
+    preview = preview_import(download, resolve("psx"), library)
+    assert not preview["items"]
+    result, = import_rom(download, resolve("psx"), library)
+    assert not result.ok
+    assert not library.exists()
+
+
+def test_zip64_locator_without_classic_sentinels_obeys_entry_limit(tmp_path):
+    """ZIP64 counts override ordinary EOCD even when classic values look small."""
+    inner = bytearray(zip_bytes({"Game.gb": b"game"}))
+    end = inner.rfind(b"PK\x05\x06")
+    assert end == len(inner) - 22
+    size = struct.unpack_from("<I", inner, end + 12)[0]
+    offset = struct.unpack_from("<I", inner, end + 16)[0]
+    zip64 = struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45,
+                        0, 0, nested_zip.MAX_ZIP_MEMBERS + 1,
+                        nested_zip.MAX_ZIP_MEMBERS + 1, size, offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    crafted = inner[:end] + zip64 + locator + inner[end:]
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": crafted}))
+    library = tmp_path / "library"
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert "member-count limit" in result.reason
+    assert not library.exists()
 
 
 def test_mame_archive_remains_the_playable_rom(tmp_path):
