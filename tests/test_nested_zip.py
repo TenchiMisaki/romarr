@@ -375,6 +375,22 @@ def test_digital_delimited_setup_fallback():
     assert selected.primary == "install/setup-01.exe"
 
 
+
+def test_digital_numbered_setup_outranks_uninstaller():
+    """Recognize setup32/setup64 filenames without preferring an uninstaller."""
+    for candidate in ("setup32.exe", "setup64.exe", "install/setup64.exe"):
+        selected = _digital_set(["uninstall.exe", "AssetUpdater.exe", candidate])
+        assert selected is not None
+        assert selected.primary == candidate
+
+
+def test_digital_numbered_setup_keeps_delimiter_boundary():
+    """A setup token inside another executable name is not the installer."""
+    selected = _digital_set(["AssetUpdater.exe", "game-setup64.exe"])
+    assert selected is not None
+    assert selected.primary == "game-setup64.exe"
+
+
 def test_digital_relative_path_collision_fails_closed(tmp_path):
     """A file cannot also be a directory; preserve the original source."""
     outer = zip_bytes({

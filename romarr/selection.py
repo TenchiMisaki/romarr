@@ -902,13 +902,13 @@ def _digital_set(filenames: list[str]) -> RomSet | None:
         return None
     exes = [f for f in filenames if _basename(f).lower().endswith(".exe")]
     # Exact setup.exe wins regardless of archive provenance or member order.
-    # Fall back to a delimited installer label (setup-1.exe), never a
-    # substring inside an unrelated executable such as AssetUpdater.exe.
+    # Fall back to a delimited installer label (setup-1.exe) or a
+    # numbered setup name (setup64.exe), not AssetUpdater.exe.
     primary = next((f for f in exes if _basename(f).casefold() == "setup.exe"), None)
     if primary is None:
         primary = next(
             (f for f in exes if re.search(
-                r"(?<![a-z0-9])setup(?![a-z0-9])", _stem(f).casefold())),
+                r"(?<![a-z0-9])setup(?:[0-9]+)?(?![a-z0-9])", _stem(f).casefold())),
             exes[0] if exes else filenames[0])
     return RomSet(primary, tuple(filenames))
 
