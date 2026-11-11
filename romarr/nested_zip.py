@@ -7,6 +7,7 @@ archive and use ROMarr's existing streaming hash/copy implementation.
 from __future__ import annotations
 
 import stat
+import struct
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -22,7 +23,70 @@ MAX_FINAL_MEMBER_BYTES = 64 * 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 128 * 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 10_000
 MAX_DESCRIPTOR_BYTES = 2 * 1024 * 1024
+MAX_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 COPY_CHUNK = 1024 * 1024
+
+
+def check_zip_central_directory(path: Path) -> None:
+    """Bound ZIP directory size and entries before ZipFile allocates ZipInfo.
+
+    Verify the end record (including ZIP64 when needed), cap directory bytes,
+    and count central headers independently of the untrusted declared count.
+    """
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        size = stream.tell()
+        tail_size = min(size, 65_557)
+        stream.seek(size - tail_size)
+        tail = stream.read(tail_size)
+        end = None
+        for offset in range(tail_size - 22, -1, -1):
+            if tail[offset:offset + 4] != b"PK\x05\x06":
+                continue
+            if offset + 22 + struct.unpack_from("<H", tail, offset + 20)[0] == tail_size:
+                end = size - tail_size + offset
+                break
+        if end is None:
+            raise ValueError("ZIP end-of-central-directory record missing")
+        disk, directory_disk, disk_entries, entries, central_bytes, central_offset, _ = struct.unpack_from(
+            "<HHHHIIH", tail, offset + 4)
+        if disk or directory_disk:
+            raise ValueError("multi-volume ZIP is not supported")
+        if (disk_entries == 0xFFFF or entries == 0xFFFF
+                or central_bytes == 0xFFFFFFFF or central_offset == 0xFFFFFFFF):
+            if end < 20:
+                raise ValueError("ZIP64 locator missing")
+            stream.seek(end - 20)
+            locator = stream.read(20)
+            if len(locator) != 20 or locator[:4] != b"PK\x06\x07":
+                raise ValueError("ZIP64 locator missing")
+            locator_disk, record_at, disk_count = struct.unpack_from("<IQI", locator, 4)
+            if locator_disk or disk_count != 1 or record_at + 56 > end - 20:
+                raise ValueError("invalid ZIP64 locator")
+            stream.seek(record_at)
+            record = stream.read(56)
+            if len(record) != 56 or record[:4] != b"PK\x06\x06":
+                raise ValueError("invalid ZIP64 end-of-central-directory record")
+            record_bytes, _, _, disk, directory_disk, disk_entries, entries, central_bytes, _ = struct.unpack_from(
+                "<QHHIIQQQQ", record, 4)
+            if record_bytes < 44 or disk or directory_disk:
+                raise ValueError("unsupported ZIP64 directory")
+            directory_end = record_at
+        else:
+            directory_end = end
+        if disk_entries != entries:
+            raise ValueError("inconsistent ZIP directory entry count")
+        if entries > MAX_ZIP_MEMBERS:
+            raise ValueError("nested ZIP member-count limit exceeded")
+        if central_bytes > MAX_CENTRAL_DIRECTORY_BYTES:
+            raise ValueError("ZIP central-directory byte limit exceeded")
+        if central_bytes > directory_end or directory_end > size:
+            raise ValueError("invalid ZIP central-directory bounds")
+        stream.seek(directory_end - central_bytes)
+        directory = stream.read(central_bytes)
+        if (len(directory) != central_bytes
+                or directory.count(b"PK\x01\x02") > MAX_ZIP_MEMBERS):
+            raise ValueError("ZIP central-directory entry limit exceeded")
 
 
 @dataclass(frozen=True)
@@ -63,13 +127,14 @@ class NestedZipIndex:
 
     def _scan(self, path: Path, prefix: str, depth: int) -> None:
         """Index one ZIP without mixing leaf members from different ZIPs."""
+        check_zip_central_directory(path)
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
-                if info.is_dir():
-                    continue
                 self._examined += 1
                 if self._examined > MAX_ZIP_MEMBERS:
                     raise ValueError("nested ZIP member-count limit exceeded")
+                if info.is_dir():
+                    continue
                 name = info.filename
                 parts = PurePosixPath(name)
                 if (not name or "\\" in name or ":" in name or "\x00" in name
