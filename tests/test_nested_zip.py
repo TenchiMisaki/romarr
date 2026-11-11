@@ -117,6 +117,22 @@ def test_nested_zip_fails_before_library_publication(tmp_path, monkeypatch, viol
     assert not library.exists()
 
 
+def test_duplicate_inner_zip_container_names_fail_closed(tmp_path):
+    """Two containers with the same name must not merge unrelated ROM sources."""
+    download = tmp_path / "outer.zip"
+    original_inner = zip_bytes({"Game.gb": b"game"})
+    with zipfile.ZipFile(download, "w") as outer:
+        outer.writestr("inner.zip", original_inner)
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            outer.writestr("inner.zip", zip_bytes({"Other.gb": b"other"}))
+    library = tmp_path / "library"
+
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert "duplicate nested ZIP member" in result.reason
+    assert not library.exists()
+
+
 def test_mame_archive_remains_the_playable_rom(tmp_path):
     """MAME's archive-is-the-ROM policy wins over nested ZIP discovery."""
     platform = resolve("mame")
