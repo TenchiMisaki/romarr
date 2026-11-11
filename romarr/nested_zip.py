@@ -52,12 +52,17 @@ def check_zip_central_directory(path: Path) -> None:
             "<HHHHIIH", tail, offset + 4)
         if disk or directory_disk:
             raise ValueError("multi-volume ZIP is not supported")
-        if (disk_entries == 0xFFFF or entries == 0xFFFF
-                or central_bytes == 0xFFFFFFFF or central_offset == 0xFFFFFFFF):
-            if end < 20:
-                raise ValueError("ZIP64 locator missing")
+        # CPython follows a ZIP64 locator even when classic EOCD fields do
+        # not carry ZIP64 sentinel values. Mirror that selection here or a
+        # forged small classic entry count could bypass the preflight.
+        locator = b""
+        if end >= 20:
             stream.seek(end - 20)
             locator = stream.read(20)
+        zip64_required = (disk_entries == 0xFFFF or entries == 0xFFFF
+                          or central_bytes == 0xFFFFFFFF
+                          or central_offset == 0xFFFFFFFF)
+        if locator[:4] == b"PK\x06\x07" or zip64_required:
             if len(locator) != 20 or locator[:4] != b"PK\x06\x07":
                 raise ValueError("ZIP64 locator missing")
             locator_disk, record_at, disk_count = struct.unpack_from("<IQI", locator, 4)
