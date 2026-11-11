@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .dat import BAD_DUMP, UNKNOWN, VERIFIED, Match, hash_bytes, hash_stream
 from .platforms import Platform, resolve, romm_fs_slug
-from .nested_zip import NestedZipIndex
+from .nested_zip import NestedZipIndex, check_zip_central_directory
 from .selection import pick_all_rom_sets, pick_rom_set
 
 log = logging.getLogger(__name__)
@@ -396,6 +396,41 @@ class _PathSource(_Source):
         self.transfers[name] = self.last_transfer
 
 
+def _complete_nested_zip_sets(sets, read):
+    """Discard playlists lacking any required disc in their own ZIP container.
+
+    A playlist may be listed in one ZIP while discs live in another. The
+    archive separation needed for safe track grouping means that cannot be
+    imported as a complete game; do not publish an unplayable playlist.
+    """
+    accepted = []
+    for game in sets:
+        if not game.primary.lower().endswith(".m3u"):
+            accepted.append(game)
+            continue
+        try:
+            raw = read(game.primary)
+        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile):
+            raw = None
+        if raw is None:
+            log.warning("skipping unreadable nested ZIP playlist %r", game.primary)
+            continue
+        contents = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else str(raw)
+        requested = [line.strip() for line in contents.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#")]
+        present = {Path(name.replace("\\", "/")).name.casefold()
+                   for name in game.members if name != game.primary}
+        valid = bool(requested) and all(
+            name not in (".", "..") and "/" not in name
+            and "\\" not in name and ":" not in name
+            and name.casefold() in present for name in requested)
+        if valid:
+            accepted.append(game)
+        else:
+            log.warning("skipping incomplete nested ZIP playlist %r", game.primary)
+    return accepted
+
+
 class _NestedZipSource(_Source):
     """Present nested ZIP members through the existing streaming ZIP readers.
 
@@ -436,8 +471,9 @@ class _NestedZipSource(_Source):
         groups = {}
         for name in self.names():
             groups.setdefault(self.group_key(name), []).append(name)
-        return [game for names in groups.values()
-                for game in pick_all_rom_sets(names, platform, read=self.read)]
+        selected = [game for names in groups.values()
+                    for game in pick_all_rom_sets(names, platform, read=self.read)]
+        return _complete_nested_zip_sets(selected, self.read)
 
     def read(self, name):
         """Read a small descriptor using the member's original ZIP source."""
@@ -501,8 +537,13 @@ class _DirectorySource(_PathSource):
             key = ((source, source.group_key(member))
                    if isinstance(source, _NestedZipSource) else source)
             groups.setdefault(key, []).append(name)
-        return [group for names in groups.values()
-                for group in pick_all_rom_sets(names, platform, read=self.read)]
+        selected = []
+        for key, names in groups.items():
+            games = pick_all_rom_sets(names, platform, read=self.read)
+            if isinstance(key, tuple) and isinstance(key[0], _NestedZipSource):
+                games = _complete_nested_zip_sets(games, self.read)
+            selected.extend(games)
+        return selected
 
     def member_size(self, name):
         """Expose nested ZIP member sizes without reading their payloads."""
@@ -570,6 +611,9 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
 
     suffix = download.suffix.lower()
     if download.is_file() and suffix in _STDLIB_ARCHIVES:
+        # ZipFile allocates all ZipInfo entries during construction. Bound the
+        # central directory before opening either flat or nested ZIP sources.
+        check_zip_central_directory(download)
         with zipfile.ZipFile(download) as archive:
             # Flat ZIPs retain their existing reader, including streaming
             # verification. Only ZIPs containing another ZIP need an index.
