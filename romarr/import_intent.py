@@ -31,6 +31,14 @@ def preview_import(download, platform, library_root, *, layout="flat", platform_
     if download.is_file() and zipfile.is_zipfile(download):
         with zipfile.ZipFile(download) as archive:
             sizes = {i.filename: i.file_size for i in archive.infolist()}
+    # A nested ZIP member is not a direct outer-ZIP entry. The source index
+    # already has its declared size; never decompress a ROM for a UI preview.
+    member_size = getattr(source, "member_size", None)
+    if member_size is not None:
+        for name in names:
+            size = member_size(name)
+            if size is not None:
+                sizes[name] = size
     token = hashlib.sha256(json.dumps([identity, names, queue_identity], sort_keys=True).encode()).hexdigest()
     ambiguous_packages = {".nsp", ".xci", ".pkg", ".cia"}
     target = platform_dir(library_root, platform, layout=layout, platform_folders=platform_folders)
