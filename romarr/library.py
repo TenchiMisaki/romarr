@@ -30,6 +30,7 @@ from pathlib import Path
 
 from .dat import BAD_DUMP, UNKNOWN, VERIFIED, Match, hash_bytes, hash_stream
 from .platforms import Platform, resolve, romm_fs_slug
+from .nested_zip import NestedZipIndex
 from .selection import pick_all_rom_sets, pick_rom_set
 
 log = logging.getLogger(__name__)
@@ -395,6 +396,67 @@ class _PathSource(_Source):
         self.transfers[name] = self.last_transfer
 
 
+class _NestedZipSource(_Source):
+    """Present nested ZIP members through the existing streaming ZIP readers.
+
+    Each inner archive owns its own ROM sets, so matching CUE/BIN names in
+    different inner archives cannot be combined into an invalid disc.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._index = NestedZipIndex(path, is_safe_name)
+        self._sources = {}
+
+    def names(self):
+        """Expose members with their full nested archive provenance."""
+        return self._index.names()
+
+    def _member_source(self, name):
+        """Resolve a qualified name to its owning ZIP reader and member."""
+        leaf = self._index.member(name)
+        if leaf is None:
+            return None, None
+        if leaf.archive_path not in self._sources:
+            self._sources[leaf.archive_path] = _ZipSource(leaf.archive_path)
+        return self._sources[leaf.archive_path], leaf
+
+    def group_key(self, name):
+        """Keep CUE/BIN sidecars inside the ZIP that actually owns them."""
+        leaf = self._index.member(name)
+        return leaf.archive_path if leaf else None
+
+    def member_size(self, name):
+        """Return a ZIP member's declared size for a review-only preview."""
+        leaf = self._index.member(name)
+        return leaf.size if leaf else None
+
+    def rom_sets(self, platform):
+        """Select playable sets independently for each nested ZIP container."""
+        groups = {}
+        for name in self.names():
+            groups.setdefault(self.group_key(name), []).append(name)
+        return [game for names in groups.values()
+                for game in pick_all_rom_sets(names, platform, read=self.read)]
+
+    def read(self, name):
+        """Read a small descriptor using the member's original ZIP source."""
+        source, leaf = self._member_source(name)
+        return source.read(leaf.member) if source else None
+
+    def hash(self, name, suffix=""):
+        """Reuse streamed ZIP hashing; never materialize a disc image."""
+        source, leaf = self._member_source(name)
+        return source.hash(leaf.member, suffix) if source else None
+
+    def copy(self, name, destination):
+        """Copy one selected leaf without changing its original download."""
+        source, leaf = self._member_source(name)
+        if source is None:
+            raise ValueError(f"nested ZIP member no longer exists: {name!r}")
+        source.copy(leaf.member, destination)
+
+
 class _DirectorySource(_PathSource):
     """Index loose files and archives, keeping ROM sets within each source."""
 
@@ -435,10 +497,20 @@ class _DirectorySource(_PathSource):
     def rom_sets(self, platform):
         """Keep companions together without joining files from different archives."""
         groups = {}
-        for name, (source, _) in self.members.items():
-            groups.setdefault(source, []).append(name)
+        for name, (source, member) in self.members.items():
+            key = ((source, source.group_key(member))
+                   if isinstance(source, _NestedZipSource) else source)
+            groups.setdefault(key, []).append(name)
         return [group for names in groups.values()
                 for group in pick_all_rom_sets(names, platform, read=self.read)]
+
+    def member_size(self, name):
+        """Expose nested ZIP member sizes without reading their payloads."""
+        entry = self.members.get(name)
+        if entry is None:
+            return None
+        source, member = entry
+        return source.member_size(member) if isinstance(source, _NestedZipSource) else None
 
     def read(self, name):
         """Read a loose file or delegate an archive member to its archive."""
@@ -498,7 +570,12 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
 
     suffix = download.suffix.lower()
     if download.is_file() and suffix in _STDLIB_ARCHIVES:
-        return _ZipSource(download)
+        with zipfile.ZipFile(download) as archive:
+            # Flat ZIPs retain their existing reader, including streaming
+            # verification. Only ZIPs containing another ZIP need an index.
+            nested = any(info.filename.lower().endswith(".zip")
+                         for info in archive.infolist() if not info.is_dir())
+        return _NestedZipSource(download) if nested else _ZipSource(download)
     if download.is_file() and suffix in ARCHIVE_SUFFIXES:
         tool = bsdtar_path()
         if tool is None:
