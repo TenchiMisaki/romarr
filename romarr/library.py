@@ -950,16 +950,21 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
                                 else Path(member.replace("\\", "/")).name)
                     path = Path(relative)
                     if (not is_safe_name(relative, staged_dir)
-                            or path.is_absolute() or ".." in path.parts):
+                            or path.is_absolute() or ".." in path.parts
+                            or path.as_posix() == "."):
                         raise ValueError(f"unsafe set member: {member!r}")
-                    key = relative.casefold()
+                    # Normalize ./ and repeated separators BEFORE checking
+                    # aliases, so different ZIP names cannot target one file.
+                    # Keep the original member for source.copy() lookup.
+                    normalized = path.as_posix()
+                    key = normalized.casefold()
                     if key in folded or any(
                             key.startswith(other + "/") or other.startswith(key + "/")
                             for other in folded):
                         raise ValueError(
-                            f"colliding set member paths: {folded.get(key, relative)!r} and {member!r}")
+                            f"colliding set member paths: {folded.get(key, normalized)!r} and {member!r}")
                     folded[key] = member
-                    written[relative] = member
+                    written[normalized] = member
                 for name, member in written.items():
                     staged_member = staged_dir / name
                     staged_member.parent.mkdir(parents=True, exist_ok=True)
