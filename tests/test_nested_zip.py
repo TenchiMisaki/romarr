@@ -226,9 +226,14 @@ def test_outer_playlist_cannot_borrow_discs_from_inner_zip(tmp_path):
     download.write_bytes(contents)
     library = tmp_path / "library"
     preview = preview_import(download, resolve("psx"), library)
-    assert not preview["items"]
-    result, = import_rom(download, resolve("psx"), library)
+    assert [item["primary"] for item in preview["items"]] == [
+        "inside.zip/Disc One.chd"]
+    # The standalone disc remains selectable. Only the incomplete playlist is
+    # refused; do not mislabel that valid disc as a failed import.
+    result, = import_rom(download, resolve("psx"), library,
+                         selected_primaries=["Game.m3u"])
     assert not result.ok
+    assert "selected import members changed" in result.reason
     assert not library.exists()
 
 
@@ -250,6 +255,68 @@ def test_zip64_locator_without_classic_sentinels_obeys_entry_limit(tmp_path):
     result, = import_rom(download, resolve("gb"), library)
     assert not result.ok
     assert "member-count limit" in result.reason
+    assert not library.exists()
+
+
+def test_nested_playlist_accepts_safe_dot_slash_reference(tmp_path):
+    """A leading ./ must resolve to a companion in the same inner ZIP."""
+    inner = zip_bytes({
+        "Game.m3u": b"./Disc One.chd\n",
+        "Disc One.chd": b"disc one",
+    })
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": inner}))
+    library = tmp_path / "library"
+    primary = "inner.zip/Game.m3u"
+
+    preview = preview_import(download, resolve("psx"), library)
+    assert [item["primary"] for item in preview["items"]] == [primary]
+    result, = import_rom(download, resolve("psx"), library,
+                         selected_primaries=[primary])
+    assert result.ok, result.reason
+    assert (result.destination / "Game.m3u").read_bytes() == b"./Disc One.chd\n"
+    assert (result.destination / "Disc One.chd").read_bytes() == b"disc one"
+
+
+@pytest.mark.parametrize("zip64_entries", [1, nested_zip.MAX_ZIP_MEMBERS + 1])
+def test_zip64_locator_offset_does_not_override_runtime_record(tmp_path, zip64_entries):
+    """Match Python's fixed-position ZIP64 record, not locator's claimed offset."""
+    inner = bytearray(zip_bytes({"Game.gb": b"game"}))
+    end = inner.rfind(b"PK\x05\x06")
+    central_bytes, central_offset = struct.unpack_from("<II", inner, end + 12)
+    record = struct.pack(
+        "<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+        zip64_entries, zip64_entries, central_bytes, central_offset)
+    # CPython ignores this misleading relative offset and reads the record
+    # immediately before the locator.
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, 0, 1)
+    nested = inner[:end] + record + locator + inner[end:]
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": nested}))
+    library = tmp_path / "library"
+
+    result, = import_rom(download, resolve("gb"), library)
+    if zip64_entries == 1:
+        assert result.ok, result.reason
+        assert result.destination.read_bytes() == b"game"
+    else:
+        assert not result.ok
+        assert "member-count limit" in result.reason
+        assert not library.exists()
+
+
+def test_ambiguous_zip_eocd_in_comment_fails_before_parse(tmp_path):
+    """Reject a fake EOCD in a comment that ZipFile would select instead."""
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("Game.gb", b"game")
+        archive.comment = b"comment " + b"PK\x05\x06" + b"\0" * 18 + b"tail"
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": inner.getvalue()}))
+    library = tmp_path / "library"
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert "ambiguous ZIP end-of-central-directory" in result.reason
     assert not library.exists()
 
 
