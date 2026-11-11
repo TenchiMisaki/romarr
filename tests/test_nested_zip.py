@@ -279,6 +279,26 @@ def test_nested_playlist_accepts_safe_dot_slash_reference(tmp_path):
     assert (result.destination / "Disc One.chd").read_bytes() == b"disc one"
 
 
+
+def test_zip64_valid_adjacent_locator_preserves_import(tmp_path):
+    """A standard adjacent ZIP64 record remains importable after preflight."""
+    inner = bytearray(zip_bytes({"Game.gb": b"game"}))
+    end = inner.rfind(b"PK\x05\x06")
+    assert end == len(inner) - 22
+    central_bytes, central_offset = struct.unpack_from("<II", inner, end + 12)
+    record = struct.pack(
+        "<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+        1, 1, central_bytes, central_offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    nested = inner[:end] + record + locator + inner[end:]
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": nested}))
+
+    result, = import_rom(download, resolve("gb"), tmp_path / "library")
+    assert result.ok, result.reason
+    assert result.destination.read_bytes() == b"game"
+
+
 @pytest.mark.parametrize("zip64_entries", [1, nested_zip.MAX_ZIP_MEMBERS + 1])
 def test_zip64_locator_offset_mismatch_fails_closed(tmp_path, zip64_entries):
     """Refuse a forged ZIP64 pointer that different Python versions may follow."""
