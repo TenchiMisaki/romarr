@@ -299,6 +299,48 @@ def test_zip64_valid_adjacent_locator_preserves_import(tmp_path):
     assert result.destination.read_bytes() == b"game"
 
 
+
+def test_zip64_with_prepended_data_preserves_import(tmp_path):
+    """Accept only an unambiguous prefixed ZIP64 using the adjacent record."""
+    inner = bytearray(zip_bytes({"Game.gb": b"game"}))
+    end = inner.rfind(b"PK\x05\x06")
+    assert end == len(inner) - 22
+    central_bytes, central_offset = struct.unpack_from("<II", inner, end + 12)
+    record = struct.pack(
+        "<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+        1, 1, central_bytes, central_offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    inner_with_zip64 = inner[:end] + record + locator + inner[end:]
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": b"PREFIX" + inner_with_zip64}))
+
+    result, = import_rom(download, resolve("gb"), tmp_path / "library")
+    assert result.ok, result.reason
+    assert result.destination.read_bytes() == b"game"
+
+
+def test_zip64_prefixed_locator_rejects_competing_record(tmp_path):
+    """Do not accept a prefix that looks like a second locator-target record."""
+    inner = bytearray(zip_bytes({"Game.gb": b"game"}))
+    end = inner.rfind(b"PK\x05\x06")
+    central_bytes, central_offset = struct.unpack_from("<II", inner, end + 12)
+    record = struct.pack(
+        "<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+        1, 1, central_bytes, central_offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    prefix = bytearray(end + 64)
+    prefix[end:end + 4] = b"PK\x06\x06"
+    inner_with_zip64 = inner[:end] + record + locator + inner[end:]
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": bytes(prefix) + inner_with_zip64}))
+    library = tmp_path / "library"
+
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert "ambiguous ZIP64 locator offset" in result.reason
+    assert not library.exists()
+
+
 @pytest.mark.parametrize("zip64_entries", [1, nested_zip.MAX_ZIP_MEMBERS + 1])
 def test_zip64_locator_offset_mismatch_fails_closed(tmp_path, zip64_entries):
     """Refuse a forged ZIP64 pointer that different Python versions may follow."""

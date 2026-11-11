@@ -69,13 +69,21 @@ def check_zip_central_directory(path: Path) -> None:
             locator_disk, record_at, disk_count = struct.unpack_from("<IQI", locator, 4)
             if locator_disk or disk_count != 1 or end < 76:
                 raise ValueError("invalid ZIP64 locator")
-            # Python 3.13.18 can follow the locator's offset, while
-            # older versions can fall back to the adjacent ZIP64 record.
-            # Accept only the standard adjacent layout so preflight and
-            # ZipFile cannot select different central-directory metadata.
+            # Recent Python may first consult the ZIP64 locator's offset,
+            # then fall back to the adjacent record for prepended ZIPs.
+            # Older versions read the adjacent record directly. Only allow
+            # prepend-only offsets when both readers necessarily agree.
             effective_record_at = end - 20 - 56
-            if record_at != effective_record_at:
-                raise ValueError("ZIP64 locator offset does not match adjacent record")
+            prefixed = record_at != effective_record_at
+            if prefixed:
+                if (record_at > effective_record_at
+                        or central_offset + central_bytes != record_at):
+                    raise ValueError("ZIP64 locator offset does not match adjacent record")
+                stream.seek(record_at)
+                pointed_record = stream.read(56)
+                if (len(pointed_record) != 56
+                        or pointed_record.startswith(b"PK\x06\x06")):
+                    raise ValueError("ambiguous ZIP64 locator offset")
             stream.seek(effective_record_at)
             record = stream.read(56)
             if len(record) != 56 or record[:4] != b"PK\x06\x06":
@@ -84,6 +92,8 @@ def check_zip_central_directory(path: Path) -> None:
                 "<QHHIIQQQQ", record, 4)
             if record_bytes < 44 or disk or directory_disk:
                 raise ValueError("unsupported ZIP64 directory")
+            if prefixed and record_bytes != 44:
+                raise ValueError("unsupported prefixed ZIP64 extended record")
             directory_end = effective_record_at
         else:
             directory_end = end
