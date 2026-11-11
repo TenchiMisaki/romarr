@@ -11,6 +11,7 @@ from romarr import nested_zip
 from romarr.import_intent import preview_import
 from romarr.library import _PathSource, _source_for, import_rom
 from romarr.platforms import resolve
+from romarr.selection import _digital_set
 
 
 def zip_bytes(members):
@@ -321,13 +322,16 @@ def test_ambiguous_zip_eocd_in_comment_fails_before_parse(tmp_path):
 
 
 def test_nested_windows_installer_is_one_complete_set(tmp_path):
-    """Keep setup.exe and data from outer and inner ZIPs in one directory."""
+    """Retain installer ZIP payloads and nested file paths, not extractions."""
+    payload_zip = zip_bytes({
+        "helper.exe": b"not the primary",
+        "game-data1.bin": b"payload one",
+        "game-data2.bin": b"payload two",
+    })
     outer = zip_bytes({
+        "setup-data.zip": payload_zip,
         "setup.exe": b"installer executable",
-        "data.zip": zip_bytes({
-            "game-data1.bin": b"payload one",
-            "game-data2.bin": b"payload two",
-        }),
+        "assets/config.dat": b"keep this subdirectory",
     })
     download = tmp_path / "Installer.zip"
     download.write_bytes(outer)
@@ -338,15 +342,40 @@ def test_nested_windows_installer_is_one_complete_set(tmp_path):
     item = preview["items"][0]
     assert item["primary"] == "setup.exe"
     assert set(item["members"]) == {
-        "setup.exe", "data.zip/game-data1.bin", "data.zip/game-data2.bin"}
+        "setup-data.zip", "setup.exe", "assets/config.dat"}
     assert item["selected"]
     result, = import_rom(download, resolve("win"), library,
                          selected_primaries=["setup.exe"])
     assert result.ok, result.reason
     assert (result.destination / "setup.exe").read_bytes() == b"installer executable"
-    assert (result.destination / "game-data1.bin").read_bytes() == b"payload one"
-    assert (result.destination / "game-data2.bin").read_bytes() == b"payload two"
+    assert (result.destination / "setup-data.zip").read_bytes() == payload_zip
+    assert (result.destination / "assets/config.dat").read_bytes() == b"keep this subdirectory"
+    assert not (result.destination / "helper.exe").exists()
     assert download.read_bytes() == outer
+
+
+def test_digital_installer_selection_ignores_parent_archive_name():
+    """A directory containing 'setup' cannot promote an unrelated helper."""
+    selected = _digital_set(["setup-data.zip/helper.exe", "setup.exe"])
+    assert selected is not None
+    assert selected.primary == "setup.exe"
+
+
+def test_digital_relative_path_collision_fails_closed(tmp_path):
+    """A file cannot also be a directory; preserve the original source."""
+    outer = zip_bytes({
+        "setup.exe": b"installer",
+        "assets": b"file not folder",
+        "assets/config.dat": b"config",
+    })
+    download = tmp_path / "Installer.zip"
+    download.write_bytes(outer)
+    library = tmp_path / "library"
+    result, = import_rom(download, resolve("win"), library)
+    assert not result.ok
+    assert "colliding set member paths" in result.reason
+    assert download.read_bytes() == outer
+    assert not (library / "win" / "Installer" / "setup.exe").exists()
 
 
 def test_mame_archive_remains_the_playable_rom(tmp_path):
