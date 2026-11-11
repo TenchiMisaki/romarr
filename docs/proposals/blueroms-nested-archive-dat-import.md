@@ -2,6 +2,9 @@
 > This PR contains the complete investigation of multiple ZIP files in one download, ZIP-inside-ZIP support, DAT-verified game selection, and safe import. Read the full content below to resume the investigation. The same content is versioned in [the companion Markdown file](https://github.com/TenchiMisaki/romarr/blob/notes/blueroms-multi-archive-dat-import/docs/proposals/blueroms-nested-archive-dat-import.md).
 > **No ZIP-import functionality has been implemented or tested by this PR.**
 
+
+> **Latest related upstream work (Nov 10, 2026):** [PR #146](https://github.com/BlizzHacker/romarr/pull/146) proposes support for archives found *in download folders*, addressing the original sibling-ZIP discovery case. Literal ZIP-inside-ZIP traversal and request-aware game identification remain separate, unverified backlog work; see §10. This backlog PR is still draft/documentation-only.
+
 ---
 
 # Future investigation: BlueRoms multi-archive discovery and DAT-verified import
@@ -156,3 +159,41 @@ When the owner asks to resume:
 **Watch / follow-up criteria:** On resumption, inspect upstream issue #144's state, maintainer responses, linked PRs/commits, merges, tagged releases and any verified release behavior. Distinguish issue closure from a merged patch, tagged release, published Docker image, or live successful import. When a candidate fix is available, inspect exact source changes and add synthetic 7z/RAR members with literal brackets and other glob metacharacters to the import regression matrix. Test `read`, `copy`, and `hash` and, when supported, nested-archive handling, without exposing ROM payloads or changing production. Do not adopt a suggested escape function without verifying how `bsdtar` treats the literal patterns and affected filenames. This relationship is tracked for investigation only; any future implementation, upstream comment, branch write or merge requires its own authorization.
 
 **Change scope for this amendment:** Documentation-only cross-reference and watch criteria. **ROMarr code changed: NONE. Tests executed: NONE. User library/deployment changed: NONE. GitHub issue #144 independently reproduced: NO.**
+
+## 10. November 10, 2026 PST — Upstream PR #146 overlap and remaining backlog
+
+**Status of this record:** Documentation-only amendment. This personal-fork PR #3 remains a **draft, unmerged backlog**, not an implementation or upstream contribution. Original November 9 BlueRoms observations, hypotheses, source anchors and full test matrix above are retained as dated evidence. New source evidence below comes from a read-only inspection of the current upstream PR, **not** tests against installed ROMarr or an independent execution of the proposed patch.
+
+### Upstream work now in progress
+
+- [BlizzHacker/romarr PR #146 — Import archives found in download directories](https://github.com/BlizzHacker/romarr/pull/146), authored by \`dgmora\`, was **OPEN / NOT MERGED** at the November 10 readback. Inspected contributor head: \`2946a02a9b8c9fd9bec4f424dd6156a98d0b86af\`; base upstream \`main\` at \`a41b8bdeb3b52fa42dd12a16df14b84f3f037541\`. It is a proposed code change, **not a released or installed fix**.
+- The reproduction uses a completed *Crazy Taxi (USA)* Dreamcast torrent whose directory contains \`Crazy Taxi (USA).7z\` alongside images, padding, metadata, and HTML. Previously ROMarr reported no Dreamcast ROM among 25 files and that an archive inside the download directory could not be imported. The contributor reports a successful import with the patch; this is **contributor-reported**, not independently reproduced here.
+- The patch adds \`_DirectorySource\` in \`romarr/library.py\` to index loose files and **ZIP, 7z, and RAR archives located under a completed download directory**, retaining their per-archive member identity. Preview and import use \`source.rom_sets(platform)\`, including separate grouping of archive sources; import pre-plans destination conflicts, keeps originals for seeding, and rejects observed source-inspection/path-escape failures. Existing platform \`archive_is_the_rom\` and whole digital-installer handling are intentionally preserved.
+- Added tests in \`tests/test_directory_archives.py\` and \`tests/test_disc_import.py\` cover supported archive types, multi-file CUE/BIN sets, separate source identities, loose/archived selection, destination collisions, unreadable archives and symlink escape. The contributor reported **188 focused tests passing with 2 platform-specific skips**; no tests, full suite, actual Docker build, live preview, or real release acceptance were performed for this backlog amendment.
+- CodeRabbit raised review suggestions, including repeated archive listing cost, edge-case source-name collisions and other correctness/quality questions. One original destination-collision thread was marked resolved after further tests; some review threads remained unresolved on the inspected head. These are **suggestions/potential defects**, not verified bugs or evidence of full acceptance. Recheck the exact current review threads before proposing fixes.
+
+### Precise overlap with this backlog
+
+| Earlier backlog test/requirement | PR #146 status at inspected head | Remaining action |
+|---|---|---|
+| **A:** Single direct ZIP in a download | Existing behavior / regression to preserve | Verify after any upstream merge and installed release |
+| **B:** Multiple sibling ZIPs in a completed folder, or directory containing an archive plus other files | **Addressed by the proposed PR #146 source logic**, including subdirectory discovery | Avoid duplicate implementation; verify merged behavior against synthetic and real sanitized layouts |
+| **C–D:** Literal outer ZIP containing an inner ZIP and deeper archive nesting | **NOT IMPLEMENTED by PR #146**: it enumerates archives found as filesystem entries, not archives embedded as members of another archive | Retain separate depth-limited nested-archive feature and resource-abuse tests |
+| **E, G:** Multiple candidate games and DAT-valid ROM for the **wrong requested title** | Existing source grouping/selection and DAT verification are reused; **no independently established request-title identity check** was added | Keep request-aware identity, ambiguity and selection acceptance work |
+| **F, H, I:** DAT verification, UNKNOWN, corrupt/bad-dump distinction | Existing verification machinery reused; not a new independent verifier | Retain correctness tests at a pinned merged/released version |
+| **J–M:** Platform exceptions, multi-track sets, selected download boundaries and destination safety | Some targeted logic/tests added, but not a blanket end-to-end guarantee | Retain focused regression/acceptance tests; avoid duplicating verified coverage |
+| **N:** Symlink, member-path, nested size/depth and decompression-bomb limits | Path-containment checks added for filesystem sources; **nested extraction and full resource limits remain unproved** | Retain bounded-depth, expanded-byte, file-count, processing-time and memory safeguards |
+
+**Important distinction:** PR #146's title and description use “archives found in download directories.” A \`.zip\` located beneath a **filesystem directory** is not the same as an **inner \`.zip\` stored as a member of an outer \`.zip\`**. Do not mark literal ZIP-inside-ZIP complete or report the original four sibling Sonic ZIPs as nested ZIP-within-ZIP. The historical BlueRoms observations in §2 remain the original evidence, not a fresh November 10 reproduction.
+
+**Related issue #144:** [Upstream issue #144](https://github.com/BlizzHacker/romarr/issues/144) was **closed** at this November 10 check. Its 7z/RAR *member-name glob metacharacter* extraction issue is distinct from both directory archive discovery and ZIP-inside-ZIP recursion. Recheck implementation/release status before claiming the extraction issue is solved in an installed version.
+
+### Updated next-session sequence and non-duplication gate
+
+1. Read this entire draft PR and identical companion Markdown. Pin fresh \`BlizzHacker/romarr:main\`, fork \`main\`, active PR #146 state/head/review, related #144 status, tagged release, relevant current source and actual deployed revision separately.
+2. **If #146 is open:** do not open a competing upstream issue/PR for sibling archives. Assess its actual review resolution and tests without changing the contributor's PR; retain case B as **proposed, not shipped**. If merged, rerun cases A/B and relevant J–M against the actual merged and installed build before narrowing or closing those cases.
+3. Reproduce **case C: literal ZIP-inside-ZIP** independently using harmless synthetic inner/outer archives, and inspect whether current source now traverses archive members recursively. Do not infer behavior merely from the word “nested” in a PR description.
+4. Retain **requested-title match vs DAT-valid-content match** as a separate acceptance requirement. A valid DAT match for a different game must not automatically fulfill a requested title. Preserve UNKNOWN when DAT proof is absent and honor selected/partial-download boundaries.
+5. Only after checking whether upstream already addresses these remaining gaps, propose the smallest separate change with explicit owner permission. Use bounded archive traversal, safe member handling, regression tests, fork review/CodeRabbit gate and the established preview recovery requirements; **no automatic code or production changes**.
+
+**Amendment scope:** PR #3 narrative and versioned companion proposal only. **ROMarr code modified: NO. Test execution: NONE. Docker/library/download changes: NONE. PR #146 merged/released/installed: NO at inspection.** Public GitHub PR #3 description and the companion Markdown must be read back as exactly identical after this update.
