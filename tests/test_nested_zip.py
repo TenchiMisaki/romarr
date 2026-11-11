@@ -137,7 +137,7 @@ def test_duplicate_inner_zip_container_names_fail_closed(tmp_path):
 def test_missing_nested_playlist_disc_never_publishes(tmp_path, directory_download):
     """A nested playlist lacking any referenced disc is not a valid game."""
     inner = zip_bytes({
-        "Game.m3u": b"Disc One.chd\\nDisc Two.chd\\n",
+        "Game.m3u": b"Disc One.chd\nDisc Two.chd\n",
         "Disc One.chd": b"one",
     })
     outer = zip_bytes({"inner.zip": inner})
@@ -163,7 +163,7 @@ def test_missing_nested_playlist_disc_never_publishes(tmp_path, directory_downlo
 def test_complete_nested_playlist_keeps_both_discs(tmp_path, directory_download):
     """A complete same-archive playlist remains selectable and playable."""
     inner = zip_bytes({
-        "Game.m3u": b"Disc One.chd\\nDisc Two.chd\\n",
+        "Game.m3u": b"Disc One.chd\nDisc Two.chd\n",
         "Disc One.chd": b"disc one",
         "Disc Two.chd": b"disc two",
     })
@@ -185,7 +185,7 @@ def test_complete_nested_playlist_keeps_both_discs(tmp_path, directory_download)
     result, = import_rom(download, resolve("psx"), library,
                          selected_primaries=[primary])
     assert result.ok, result.reason
-    assert (result.destination / "Game.m3u").read_bytes() == b"Disc One.chd\\nDisc Two.chd\\n"
+    assert (result.destination / "Game.m3u").read_bytes() == b"Disc One.chd\nDisc Two.chd\n"
     assert (result.destination / "Disc One.chd").read_bytes() == b"disc one"
     assert (result.destination / "Disc Two.chd").read_bytes() == b"disc two"
 
@@ -205,7 +205,7 @@ def test_nested_zip_directory_entries_are_counted(tmp_path, monkeypatch):
 
 def test_nested_zip_central_directory_byte_limit_before_parse(tmp_path, monkeypatch):
     """Reject oversized directory bytes before ZipFile builds member records."""
-    monkeypatch.setattr(nested_zip, "MAX_CENTRAL_DIRECTORY_BYTES", 64)
+    monkeypatch.setattr(nested_zip, "MAX_CENTRAL_DIRECTORY_BYTES", 32)
     inner = zip_bytes({"Game.gb": b"game"})
     download = tmp_path / "outer.zip"
     download.write_bytes(zip_bytes({"inner.zip": inner}))
