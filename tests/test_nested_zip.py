@@ -391,6 +391,22 @@ def test_digital_numbered_setup_keeps_delimiter_boundary():
     assert selected.primary == "game-setup64.exe"
 
 
+
+def test_digital_architecture_suffix_setup_outranks_uninstaller():
+    """Windows setupx86/setupx64 should beat unrelated executables."""
+    for candidate in ("setupx86.exe", "setupx64.exe", "install/setupx64.exe"):
+        selected = _digital_set(["uninstall.exe", "AssetUpdater.exe", candidate])
+        assert selected is not None
+        assert selected.primary == candidate
+
+
+def test_digital_architecture_setup_suffix_requires_name_boundary():
+    """Do not treat setupx64helper.exe as a setupx64 installer."""
+    selected = _digital_set(["setupx64helper.exe", "install/setup-01.exe"])
+    assert selected is not None
+    assert selected.primary == "install/setup-01.exe"
+
+
 def test_digital_relative_path_collision_fails_closed(tmp_path):
     """A file cannot also be a directory; preserve the original source."""
     outer = zip_bytes({
