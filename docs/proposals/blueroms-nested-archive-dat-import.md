@@ -3,7 +3,9 @@
 > **No ZIP-import functionality has been implemented or tested by this PR.**
 
 
-> **Latest related upstream work (Nov 10, 2026):** [PR #146](https://github.com/BlizzHacker/romarr/pull/146) proposes support for archives found *in download folders*, addressing the original sibling-ZIP discovery case. Literal ZIP-inside-ZIP traversal and request-aware game identification remain separate, unverified backlog work; see §10. This backlog PR is still draft/documentation-only.
+> **Current verified status (Nov 11, 2026 PST):** [Upstream PR #146](https://github.com/BlizzHacker/romarr/pull/146) is **MERGED** into official `main` at [`c816161`](https://github.com/BlizzHacker/romarr/commit/c816161e53da1c173aca483aedac6e05d45118bb). It implements discovery/import of ZIP, 7z and RAR archives present as files inside completed download directories (including multiple sibling archives). It is **NOT in tagged v1.8.1**, and installed/production behavior is **NOT TESTED**. Literal **ZIP-as-a-member-of-another-ZIP** traversal and independent requested-title matching remain **OPEN**. See §11.
+
+> **Historical assessment at Nov 10, 2026:** [PR #146](https://github.com/BlizzHacker/romarr/pull/146) proposes support for archives found *in download folders*, addressing the original sibling-ZIP discovery case. Literal ZIP-inside-ZIP traversal and request-aware game identification remain separate, unverified backlog work; see §10. This backlog PR is still draft/documentation-only.
 
 ---
 
@@ -197,3 +199,48 @@ When the owner asks to resume:
 5. Only after checking whether upstream already addresses these remaining gaps, propose the smallest separate change with explicit owner permission. Use bounded archive traversal, safe member handling, regression tests, fork review/CodeRabbit gate and the established preview recovery requirements; **no automatic code or production changes**.
 
 **Amendment scope:** PR #3 narrative and versioned companion proposal only. **ROMarr code modified: NO. Test execution: NONE. Docker/library/download changes: NONE. PR #146 merged/released/installed: NO at inspection.** Public GitHub PR #3 description and the companion Markdown must be read back as exactly identical after this update.
+
+## 11. November 11, 2026 PST — Upstream PR #146 merged; source-level sibling-archive fix verified, remaining scope preserved
+
+**Status of this record:** Verified read-only GitHub/source update to this **OPEN / DRAFT** personal-fork backlog; it is still **documentation-only**. This section supersedes the *then-open / proposed* PR #146 status reported in §10 without erasing that November 10 source-review history. No new ROMarr code, tests, release, Docker deployment, production configuration, download, library file, or upstream PR was changed by this backlog documentation amendment.
+
+### 11.1 Official merge, source revision and release boundary
+
+- [Official ROMarr PR #146 — Import archives found in download directories](https://github.com/BlizzHacker/romarr/pull/146) is **CLOSED / MERGED**, merged **2026-11-11 09:49:56 UTC (01:49:56 PST)**. Final contributor head: [`7ed9fca85afbb103f38e60b6499162c9173e9259`](https://github.com/BlizzHacker/romarr/commit/7ed9fca85afbb103f38e60b6499162c9173e9259); upstream merge commit: [`c816161e53da1c173aca483aedac6e05d45118bb`](https://github.com/BlizzHacker/romarr/commit/c816161e53da1c173aca483aedac6e05d45118bb).
+- At this readback, official `BlizzHacker/romarr:main` was `c75e49381f036f6a985691e223ddc0926c094549`. Its `romarr/library.py` Git blob `70fd347c115f4f4052280d9b6d1b37acbac334fc` contains the merged `_DirectorySource` implementation. The post-merge `main` comparison did not modify that file after PR #146.
+- Latest published GitHub release independently returned [`v1.8.1`](https://github.com/BlizzHacker/romarr/releases/tag/v1.8.1), published **2026-11-10 13:22:22 UTC (05:22:22 PST)**, **before** PR #146. Its `romarr/library.py` Git blob `9b8d650a5e30484d791be4018201df0a3b391588` **does not have `_DirectorySource`**. Thus **MERGED IN SOURCE: YES; INCLUDED IN v1.8.1: NO; TAGGED POST-MERGE RELEASE: NOT OBSERVED; INSTALLED/IMAGE DIGEST: NOT TESTED**. A merged patch is not an automatic tagged release or CT107 Docker update.
+- The eight fetched PR #146 CodeRabbit inline review threads are all marked resolved. This is **review-thread status**, not proof of a full CI PASS, an independent end-to-end import PASS, or absence of defects. The contributor's real *Crazy Taxi (USA)* import success remains **contributor-reported** and distinct from owner-site testing.
+
+### 11.2 Actual merged code behavior and limits
+
+- [`romarr/library.py`](https://github.com/BlizzHacker/romarr/blob/c816161e53da1c173aca483aedac6e05d45118bb/romarr/library.py) introduces `_DirectorySource(_PathSource)`. Its constructor walks **filesystem entries** under the completed download using `path.rglob("*")`, opens eligible ZIP, 7z and RAR **files on disk** through existing archive readers, and maps each archive member to its owning source. The source's `rom_sets(platform)` groups members by owner so equal-named disc tracks from separate archives are not mixed; `read`, `hash` and `copy` delegate to the correct source.
+- `_source_for` now chooses `_DirectorySource` for eligible download directories while preserving `archive_is_the_rom` and digital-installer exceptions. The preview and import paths use the same `source.rom_sets(platform)` selection. Destination preflight detects selected-name collisions before publishing, and the patch includes path-containment, unreadable-archive and duplicate-member protections.
+- **The implementation does not recursively open an archive file found as a member of another archive.** Its discovery iterates filesystem entries and then member names of those entries; it does not feed an inner `.zip` member's bytes back into `_source_for` for another archive-reading layer. A directory containing `subfolder/game.zip` is **not** the same structure as `outer.zip` containing `inner.zip` containing `game.md`. Literal ZIP-inside-ZIP and deeper levels (cases C–D) remain **NOT IMPLEMENTED by this merged path**.
+- No independent automatic comparison of **the DAT-identified title** against **the user's requested title** is established by this change. Valid DAT verification alone does not prove the imported game satisfies the request. Multiple legitimate candidates may still require the existing review selection; never claim one-request/one-correct-title automatic fulfillment as solved.
+- Existing No-Intro/Redump `verify_set`, UNKNOWN/bad-dump distinction, platform exceptions and selected-client boundaries must continue to be exercised at the merged revision. The patch does **not** demonstrate bounded recursive extraction limits for inner ZIPs, decompression-bomb protection at multiple nesting levels, or user-site acceptance.
+
+### 11.3 Regression evidence and backlog test disposition
+
+Committed [`tests/test_directory_archives.py`](https://github.com/BlizzHacker/romarr/blob/c816161e53da1c173aca483aedac6e05d45118bb/tests/test_directory_archives.py) covers archive-in-directory ZIP/7z/RAR discovery; multi-track CUE/BIN import; multiple sibling archives and loose-ROM review; duplicate/case-insensitive destination conflicts; preserving original downloads; unreadable archives; and symlink escape. This review **inspected tests and code but executed no pytest, Docker import, ROM bytes, BlueRoms download, or production validation**. The November 10 contributor-reported **188 focused PASS / 2 skips** in §10 remains a prior reported test outcome, not a new independent run or a full-suite certification.
+
+| Original cases from §6 | New status after PR #146 merge | Required next evidence |
+|---|---|---|
+| **A** one download folder / one ZIP | Existing direct archive path retained; regression behavior not live accepted here | Run a synthetic regression on a pinned merged build |
+| **B** multiple sibling ZIPs, archive plus other loose files | **IMPLEMENTED IN UPSTREAM SOURCE**; targeted committed tests cover this flow | Confirm merged-build tests, then the owner-observed Sonic layout after a release/approved isolated test |
+| **C–D** outer ZIP containing inner ZIP, deeper levels | **OPEN / NOT IMPLEMENTED by PR #146** | Separate bounded recursion design; harmless nested synthetic ZIP fixtures and security tests |
+| **E, G** multiple real games; DAT-valid but wrong requested title | **OPEN / NOT FULLY VERIFIED**; source grouping/review exists, independent request-title guarantee not shown | Request-intent identity checks and ambiguous/wrong-title regressions |
+| **F, H, I** DAT verification, UNKNOWN and corrupt data | Existing machinery reused; **NOT INDEPENDENTLY RETESTED here** | Exact-revision verification/error-path regressions |
+| **J–M** special platforms, multi-track sets, partial selections, destinations, retries | Relevant merged checks/tests exist for several paths; **PARTIAL SOURCE/TEST COVERAGE** | Exercise untested client-identity, retry, collision, policy and platform cases |
+| **N** traversal/symlink and nested resource-abuse bounds | Directory path guards and symlink tests present; **nested depth/size/time/CPU limits OPEN** | Resource and path-traversal adversarial fixtures for any future recursion |
+
+**Separate issue:** [Official issue #144](https://github.com/BlizzHacker/romarr/issues/144) is now **CLOSED**. That 7z/RAR filename-globbing extraction concern is independent of both filesystem sibling-archive discovery and literal ZIP-inside-ZIP traversal. Do not merge its acceptance criteria with those for #146 or claim a live installed fix solely from issue closure.
+
+### 11.4 Next-session continuation and stop conditions
+
+1. Start by reading this full PR description and matching Markdown, current project `00`, `10`, `50`, `70`, then freshly compare official/fork `main`, the latest tagged release/image and the actual intended **test** installation. No automatic contributor-branch refresh or production deployment.
+2. **Do not reimplement the already merged sibling-archive discovery**. Reuse `_DirectorySource` and its committed tests at a pinned source revision; inspect any new post-merge changes before assuming equivalence. Run harmless synthetic cases A/B and preservation/ambiguity controls on an appropriately isolated, authorized environment. Only after obtaining a build containing #146 should the historical four-Sonic-folder behavior be checked; release/install status remains a separate gate.
+3. Investigate **literal `outer.zip` → `inner.zip` → ROM** and additional nesting independently. Enforce explicit depth, expanded-byte, file-count, CPU/time and containment bounds, avoid unbounded in-memory disc extraction, preserve original torrent/download assets, and keep archive-as-ROM platform behavior.
+4. Independently test DAT-verification-versus-requested-title matching with one correct, multiple correct, wrong-title DAT-valid and UNKNOWN candidates, respecting the existing review/partial-download import intent. Uncertain matches should remain reviewable, not silently fulfilled.
+5. Before any new implementation or public upstream report, check newly merged fixes/issues and follow current fork-only staging, exact-head tests and CodeRabbit/owner approval procedures. Current action is **STATUS DOCUMENTATION ONLY**; there is no authorization here to deploy or change production.
+
+**Result at this November 11 documentation milestone:** **UPSTREAM MERGE: PASS (GitHub readback); MAIN SOURCE IMPLEMENTATION: PRESENT; TAGGED v1.8.1 INCLUSION: NO; INSTALLED BEHAVIOR: NOT TESTED; FULL BACKLOG: OPEN; DOCS-ONLY FORK UPDATE: intended.** This amendment does not assert full-suite success, run new code tests, or close/merge this draft backlog.
