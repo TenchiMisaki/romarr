@@ -49,6 +49,7 @@ class NestedZipIndex:
         self._inner_count = 0
         self._staged_bytes = 0
         self._examined = 0
+        self._seen: set[str] = set()
         self._expanded_bytes = 0
         try:
             self._scan(outer, "", 1)
@@ -89,8 +90,9 @@ class NestedZipIndex:
                 if (info.file_size and info.compress_size == 0) or (
                         info.compress_size and info.file_size > MAX_COMPRESSION_RATIO * info.compress_size):
                     raise ValueError(f"nested ZIP compression ratio limit exceeded: {qualified!r}")
-                if qualified in self.members:
+                if qualified in self._seen:
                     raise ValueError(f"duplicate nested ZIP member: {qualified!r}")
+                self._seen.add(qualified)
                 if name.lower().endswith(".zip"):
                     if depth >= MAX_ZIP_LAYERS:
                         raise ValueError(f"nested ZIP depth limit exceeded: {qualified!r}")
