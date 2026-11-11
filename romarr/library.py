@@ -420,10 +420,15 @@ def _complete_nested_zip_sets(sets, read):
                      if line.strip() and not line.lstrip().startswith("#")]
         present = {Path(name.replace("\\", "/")).name.casefold()
                    for name in game.members if name != game.primary}
-        valid = bool(requested) and all(
-            name not in (".", "..") and "/" not in name
+        # "./Disc.chd" is a safe same-directory playlist reference, and
+        # _playlist_members already resolves it. Do not allow subfolders,
+        # traversal, absolute paths or cross-archive companion borrowing.
+        normalized = [name[2:] if name.startswith("./") else name
+                      for name in requested]
+        valid = bool(normalized) and all(
+            name not in ("", ".", "..") and "/" not in name
             and "\\" not in name and ":" not in name
-            and name.casefold() in present for name in requested)
+            and name.casefold() in present for name in normalized)
         if valid:
             accepted.append(game)
         else:
