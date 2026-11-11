@@ -133,6 +133,88 @@ def test_duplicate_inner_zip_container_names_fail_closed(tmp_path):
     assert not library.exists()
 
 
+@pytest.mark.parametrize("directory_download", [False, True])
+def test_missing_nested_playlist_disc_never_publishes(tmp_path, directory_download):
+    """A nested playlist lacking any referenced disc is not a valid game."""
+    inner = zip_bytes({
+        "Game.m3u": b"Disc One.chd\\nDisc Two.chd\\n",
+        "Disc One.chd": b"one",
+    })
+    outer = zip_bytes({"inner.zip": inner})
+    library = tmp_path / "library"
+    if directory_download:
+        download = tmp_path / "download"
+        download.mkdir()
+        (download / "outer.zip").write_bytes(outer)
+        (download / "art.jpg").write_bytes(b"art")
+    else:
+        download = tmp_path / "outer.zip"
+        download.write_bytes(outer)
+
+    preview = preview_import(download, resolve("psx"), library)
+    assert not preview["items"]
+    result, = import_rom(download, resolve("psx"), library)
+    assert not result.ok
+    assert "no " in result.reason
+    assert not library.exists()
+
+
+@pytest.mark.parametrize("directory_download", [False, True])
+def test_complete_nested_playlist_keeps_both_discs(tmp_path, directory_download):
+    """A complete same-archive playlist remains selectable and playable."""
+    inner = zip_bytes({
+        "Game.m3u": b"Disc One.chd\\nDisc Two.chd\\n",
+        "Disc One.chd": b"disc one",
+        "Disc Two.chd": b"disc two",
+    })
+    outer = zip_bytes({"inner.zip": inner})
+    library = tmp_path / "library"
+    if directory_download:
+        download = tmp_path / "download"
+        download.mkdir()
+        (download / "outer.zip").write_bytes(outer)
+        (download / "art.jpg").write_bytes(b"art")
+        primary = "outer.zip/inner.zip/Game.m3u"
+    else:
+        download = tmp_path / "outer.zip"
+        download.write_bytes(outer)
+        primary = "inner.zip/Game.m3u"
+
+    preview = preview_import(download, resolve("psx"), library)
+    assert [item["primary"] for item in preview["items"]] == [primary]
+    result, = import_rom(download, resolve("psx"), library,
+                         selected_primaries=[primary])
+    assert result.ok, result.reason
+    assert (result.destination / "Game.m3u").read_bytes() == b"Disc One.chd\\nDisc Two.chd\\n"
+    assert (result.destination / "Disc One.chd").read_bytes() == b"disc one"
+    assert (result.destination / "Disc Two.chd").read_bytes() == b"disc two"
+
+
+def test_nested_zip_directory_entries_are_counted(tmp_path, monkeypatch):
+    """Directories count toward the ZIP entry limit, not only files."""
+    monkeypatch.setattr(nested_zip, "MAX_ZIP_MEMBERS", 3)
+    inner = zip_bytes({"a/": b"", "b/": b"", "Game.gb": b"game"})
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": inner}))
+    # The outer ZIP entry adds one; the inner ZIP adds three more.
+    result, = import_rom(download, resolve("gb"), tmp_path / "library")
+    assert not result.ok
+    assert "member-count limit" in result.reason
+    assert not (tmp_path / "library").exists()
+
+
+def test_nested_zip_central_directory_byte_limit_before_parse(tmp_path, monkeypatch):
+    """Reject oversized directory bytes before ZipFile builds member records."""
+    monkeypatch.setattr(nested_zip, "MAX_CENTRAL_DIRECTORY_BYTES", 64)
+    inner = zip_bytes({"Game.gb": b"game"})
+    download = tmp_path / "outer.zip"
+    download.write_bytes(zip_bytes({"inner.zip": inner}))
+    result, = import_rom(download, resolve("gb"), tmp_path / "library")
+    assert not result.ok
+    assert "central-directory byte limit" in result.reason
+    assert not (tmp_path / "library").exists()
+
+
 def test_mame_archive_remains_the_playable_rom(tmp_path):
     """MAME's archive-is-the-ROM policy wins over nested ZIP discovery."""
     platform = resolve("mame")
