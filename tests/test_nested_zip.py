@@ -43,6 +43,51 @@ def test_nested_zip_preview_and_import_preserve_original(tmp_path):
     assert result.import_method == "extracted"
 
 
+def test_nested_zip_gameboy_ignores_executable_and_imports_rom(tmp_path):
+    """Select a Game Boy ROM, never an executable stored beside it."""
+    game = b"game bytes"
+    original = zip_bytes({"inner.zip": zip_bytes({
+        "Game.gb": game,
+        "setup.exe": b"not a Game Boy ROM",
+    })})
+    download = tmp_path / "download.zip"
+    download.write_bytes(original)
+    library = tmp_path / "library"
+
+    preview = preview_import(download, resolve("gb"), library)
+    assert [item["primary"] for item in preview["items"]] == ["inner.zip/Game.gb"]
+    assert preview["extras"] == ["inner.zip/setup.exe"]
+
+    result, = import_rom(download, resolve("gb"), library,
+                         selected_primaries=["inner.zip/Game.gb"])
+    assert result.ok, result.reason
+    assert result.destination.name == "Game.gb"
+    assert result.destination.read_bytes() == game
+    assert not any(path.suffix.lower() == ".exe" for path in library.rglob("*") if path.is_file())
+    assert download.read_bytes() == original
+
+
+def test_nested_zip_gameboy_rejects_executable_only(tmp_path):
+    """No approved Game Boy extension means no preview choice or import."""
+    original = zip_bytes({"inner.zip": zip_bytes({
+        "setup.exe": b"not a Game Boy ROM",
+    })})
+    download = tmp_path / "download.zip"
+    download.write_bytes(original)
+    library = tmp_path / "library"
+
+    preview = preview_import(download, resolve("gb"), library)
+    assert preview["items"] == []
+    assert preview["extras"] == ["inner.zip/setup.exe"]
+
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert result.destination is None
+    assert "no Game Boy ROM" in result.reason
+    assert not library.exists()
+    assert download.read_bytes() == original
+
+
 def test_nested_zip_disc_in_directory_preserves_tracks_and_art(tmp_path):
     """Retain a disc's CUE/BIN companions when ZIPs are nested in a folder."""
     download = tmp_path / "download"
