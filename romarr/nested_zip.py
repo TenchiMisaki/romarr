@@ -69,10 +69,13 @@ def check_zip_central_directory(path: Path) -> None:
             locator_disk, record_at, disk_count = struct.unpack_from("<IQI", locator, 4)
             if locator_disk or disk_count != 1 or end < 76:
                 raise ValueError("invalid ZIP64 locator")
-            # Python 3.11-3.13 ZipFile reads the fixed ZIP64 record
-            # immediately BEFORE the locator, regardless of locator offset.
-            # Parsing a different record lets hostile counts bypass limits.
+            # Python 3.13.18 can follow the locator's offset, while
+            # older versions can fall back to the adjacent ZIP64 record.
+            # Accept only the standard adjacent layout so preflight and
+            # ZipFile cannot select different central-directory metadata.
             effective_record_at = end - 20 - 56
+            if record_at != effective_record_at:
+                raise ValueError("ZIP64 locator offset does not match adjacent record")
             stream.seek(effective_record_at)
             record = stream.read(56)
             if len(record) != 56 or record[:4] != b"PK\x06\x06":
