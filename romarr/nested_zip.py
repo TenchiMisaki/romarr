@@ -39,15 +39,16 @@ def check_zip_central_directory(path: Path) -> None:
         tail_size = min(size, 65_557)
         stream.seek(size - tail_size)
         tail = stream.read(tail_size)
-        end = None
-        for offset in range(tail_size - 22, -1, -1):
-            if tail[offset:offset + 4] != b"PK\x05\x06":
-                continue
-            if offset + 22 + struct.unpack_from("<H", tail, offset + 20)[0] == tail_size:
-                end = size - tail_size + offset
-                break
-        if end is None:
+        # ZipFile uses the last EOCD signature even when its declared ZIP
+        # comment length does not reach EOF. Select the same signature, but
+        # refuse inconsistent comments rather than preflight a different EOCD.
+        offset = tail.rfind(b"PK\x05\x06")
+        if offset < 0 or offset + 22 > tail_size:
             raise ValueError("ZIP end-of-central-directory record missing")
+        comment_length = struct.unpack_from("<H", tail, offset + 20)[0]
+        if offset + 22 + comment_length != tail_size:
+            raise ValueError("ambiguous ZIP end-of-central-directory record")
+        end = size - tail_size + offset
         disk, directory_disk, disk_entries, entries, central_bytes, central_offset, _ = struct.unpack_from(
             "<HHHHIIH", tail, offset + 4)
         if disk or directory_disk:
@@ -66,9 +67,13 @@ def check_zip_central_directory(path: Path) -> None:
             if len(locator) != 20 or locator[:4] != b"PK\x06\x07":
                 raise ValueError("ZIP64 locator missing")
             locator_disk, record_at, disk_count = struct.unpack_from("<IQI", locator, 4)
-            if locator_disk or disk_count != 1 or record_at + 56 > end - 20:
+            if locator_disk or disk_count != 1 or end < 76:
                 raise ValueError("invalid ZIP64 locator")
-            stream.seek(record_at)
+            # Python 3.11-3.13 ZipFile reads the fixed ZIP64 record
+            # immediately BEFORE the locator, regardless of locator offset.
+            # Parsing a different record lets hostile counts bypass limits.
+            effective_record_at = end - 20 - 56
+            stream.seek(effective_record_at)
             record = stream.read(56)
             if len(record) != 56 or record[:4] != b"PK\x06\x06":
                 raise ValueError("invalid ZIP64 end-of-central-directory record")
@@ -76,7 +81,7 @@ def check_zip_central_directory(path: Path) -> None:
                 "<QHHIIQQQQ", record, 4)
             if record_bytes < 44 or disk or directory_disk:
                 raise ValueError("unsupported ZIP64 directory")
-            directory_end = record_at
+            directory_end = effective_record_at
         else:
             directory_end = end
         if disk_entries != entries:
@@ -89,9 +94,27 @@ def check_zip_central_directory(path: Path) -> None:
             raise ValueError("invalid ZIP central-directory bounds")
         stream.seek(directory_end - central_bytes)
         directory = stream.read(central_bytes)
-        if (len(directory) != central_bytes
-                or directory.count(b"PK\x01\x02") > MAX_ZIP_MEMBERS):
-            raise ValueError("ZIP central-directory entry limit exceeded")
+        if len(directory) != central_bytes:
+            raise ValueError("truncated ZIP central directory")
+        # ZIP headers have 46 fixed bytes followed by three length-prefixed
+        # fields. Count actual headers, not a forged EOCD count or signatures
+        # inside filenames/comments, before ZipFile allocates ZipInfo objects.
+        position = 0
+        observed = 0
+        while position < len(directory):
+            if (len(directory) - position < 46
+                    or directory[position:position + 4] != b"PK\x01\x02"):
+                raise ValueError("invalid ZIP central-directory header")
+            filename_len, extra_len, comment_len = struct.unpack_from(
+                "<HHH", directory, position + 28)
+            position += 46 + filename_len + extra_len + comment_len
+            if position > len(directory):
+                raise ValueError("truncated ZIP central-directory entry")
+            observed += 1
+            if observed > MAX_ZIP_MEMBERS:
+                raise ValueError("ZIP central-directory entry limit exceeded")
+        if observed != entries:
+            raise ValueError("inconsistent ZIP central-directory entry count")
 
 
 @dataclass(frozen=True)
