@@ -130,6 +130,26 @@ def check_zip_central_directory(path: Path) -> None:
             raise ValueError("inconsistent ZIP central-directory entry count")
 
 
+class StagingBudget:
+    """Bound the combined staged ZIP bytes for one download inspection."""
+
+    def __init__(self, limit=None):
+        self.limit = MAX_STAGED_BYTES if limit is None else limit
+        self.used = 0
+
+    def reserve(self, size: int) -> None:
+        """Reject an archive before it can exceed the shared disk allowance."""
+        if size < 0 or self.used + size > self.limit:
+            raise ValueError("nested ZIP download staging size limit exceeded")
+        self.used += size
+
+    def release(self, size: int) -> None:
+        """Return reservations when the owning scratch archives are removed."""
+        if size < 0 or size > self.used:
+            raise RuntimeError("nested ZIP staging reservation imbalance")
+        self.used -= size
+
+
 @dataclass(frozen=True)
 class ZipLeaf:
     """A playable candidate's original member name and owning ZIP container."""
@@ -147,12 +167,14 @@ class NestedZipIndex:
     or when the underlying TemporaryDirectory object is garbage-collected.
     """
 
-    def __init__(self, outer: Path, safe_name: Callable[[str, Path], bool]):
+    def __init__(self, outer: Path, safe_name: Callable[[str, Path], bool], staging_budget=None):
         self.members: dict[str, ZipLeaf] = {}
         self._safe_name = safe_name
         self._temp = tempfile.TemporaryDirectory(prefix="romarr-nested-zip-")
         self._inner_count = 0
         self._staged_bytes = 0
+        self._staging_budget = staging_budget
+        self._reserved_bytes = 0
         self._examined = 0
         self._seen: set[str] = set()
         self._expanded_bytes = 0
@@ -163,8 +185,11 @@ class NestedZipIndex:
             raise
 
     def close(self) -> None:
-        """Release only the scratch directory created by this index."""
+        """Release scratch data and the shared budget reservation exactly once."""
         self._temp.cleanup()
+        if self._staging_budget is not None and self._reserved_bytes:
+            self._staging_budget.release(self._reserved_bytes)
+            self._reserved_bytes = 0
 
     def _scan(self, path: Path, prefix: str, depth: int) -> None:
         """Index one ZIP without mixing leaf members from different ZIPs."""
@@ -206,6 +231,9 @@ class NestedZipIndex:
                         raise ValueError("nested ZIP archive-count limit exceeded")
                     if info.file_size > MAX_INNER_BYTES or self._staged_bytes + info.file_size > MAX_STAGED_BYTES:
                         raise ValueError(f"nested ZIP staging size limit exceeded: {qualified!r}")
+                    if self._staging_budget is not None:
+                        self._staging_budget.reserve(info.file_size)
+                        self._reserved_bytes += info.file_size
                     self._inner_count += 1
                     staged = Path(self._temp.name) / f"{self._inner_count}.zip"
                     with archive.open(info) as reader, staged.open("xb") as writer:

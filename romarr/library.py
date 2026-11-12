@@ -24,13 +24,14 @@ import threading
 import tempfile
 import time
 import zipfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
 from .dat import BAD_DUMP, UNKNOWN, VERIFIED, Match, hash_bytes, hash_stream
 from .platforms import Platform, resolve, romm_fs_slug
-from .nested_zip import NestedZipIndex, check_zip_central_directory
+from .nested_zip import NestedZipIndex, StagingBudget, check_zip_central_directory
 from .selection import pick_all_rom_sets, pick_rom_set
 
 log = logging.getLogger(__name__)
@@ -150,6 +151,10 @@ class _Source:
     three questions. `pick_rom_set` needs `read` to parse a `.cue`, and only
     something that knows the shape can provide it.
     """
+
+    def close(self) -> None:
+        """Release temporary archive state when this source owns any."""
+        return None
 
     def names(self) -> list[str]:
         raise NotImplementedError
@@ -443,10 +448,14 @@ class _NestedZipSource(_Source):
     different inner archives cannot be combined into an invalid disc.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, staging_budget=None):
         self.path = path
-        self._index = NestedZipIndex(path, is_safe_name)
+        self._index = NestedZipIndex(path, is_safe_name, staging_budget=staging_budget)
         self._sources = {}
+
+    def close(self):
+        """Close the staged inner ZIP containers used by this source."""
+        self._index.close()
 
     def names(self):
         """Expose members with their full nested archive provenance."""
@@ -509,6 +518,16 @@ class _DirectorySource(_PathSource):
         """Index each archive once and keep its members tied to their source."""
         super().__init__(path)
         self.members = {}
+        self._cleanup = ExitStack()
+        self._staging_budget = StagingBudget()
+        try:
+            self._index_sources(path)
+        except BaseException:
+            self.close()
+            raise
+
+    def _index_sources(self, path):
+        """Index a directory while sharing one temporary-staging budget."""
         root = path.resolve()
         for entry in sorted(path.rglob("*")):
             if not entry.is_file():
@@ -522,7 +541,8 @@ class _DirectorySource(_PathSource):
                 self.members[relative] = (self, relative)
                 continue
             try:
-                archive = _source_for(entry)
+                archive = _source_for(entry, staging_budget=self._staging_budget)
+                self._cleanup.callback(archive.close)
                 for member in archive.names():
                     name = relative + "/" + member
                     if name in self.members:
@@ -534,6 +554,10 @@ class _DirectorySource(_PathSource):
                 if isinstance(detail, bytes):
                     detail = detail.decode(errors="replace")
                 raise ValueError(f"cannot inspect {relative}: {detail}") from exc
+
+    def close(self):
+        """Release every owned source, even if one cleanup callback fails."""
+        self._cleanup.close()
 
     def names(self):
         """List loose paths and archive members using distinct source paths."""
@@ -591,7 +615,8 @@ class MissingArchiveTool(Exception):
     """The download is in a format no installed tool can open."""
 
 
-def _source_for(download: Path, platform: Platform | None = None) -> _Source:
+def _source_for(download: Path, platform: Platform | None = None, *,
+                staging_budget: StagingBudget | None = None) -> _Source:
     """Choose an archive, directory, or plain-file source for this platform."""
     # When the download is a directory whose only non-hidden file is an archive,
     # unwrap it so the import looks inside the selected archive (#115).
@@ -603,7 +628,7 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
                 raise ValueError(f"source escapes download directory: {single_file}")
             single_suffix = single_file.suffix.lower()
             if single_suffix in _STDLIB_ARCHIVES or single_suffix in ARCHIVE_SUFFIXES:
-                return _source_for(single_file, platform)
+                return _source_for(single_file, platform, staging_budget=staging_budget)
 
     # For MAME, FBNeo and DOSBox the archive IS the ROM: the core opens it and
     # expects its internal layout. Looking inside would pick one chip dump out
@@ -631,7 +656,7 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
         # A nested ZIP may be a required Windows installer payload. Keep it
         # intact, rather than silently converting its contents into unrelated
         # files. Cartridge and disc platforms still inspect nested ZIP layers.
-        return (_NestedZipSource(download)
+        return (_NestedZipSource(download, staging_budget=staging_budget)
                 if nested and (platform is None or platform.media != "digital")
                 else _ZipSource(download))
     if download.is_file() and suffix in ARCHIVE_SUFFIXES:
@@ -648,7 +673,11 @@ def _source_for(download: Path, platform: Platform | None = None) -> _Source:
 
 def list_candidates(download: Path) -> list[str]:
     """Every file a completed download offers, looking inside an archive if needed."""
-    return _source_for(download).names()
+    source = _source_for(download)
+    try:
+        return source.names()
+    finally:
+        source.close()
 
 
 def verify_set(source, members, dats) -> Match:
@@ -831,8 +860,28 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
         candidates = source.names()
         chosen_sets = source.rom_sets(platform)
     except (MissingArchiveTool, OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
+        if "source" in locals():
+            source.close()
         return [ImportResult(False, None, f"source inspection failed: {exc}")]
 
+    try:
+        return _import_rom_from_source(
+            source, candidates, chosen_sets, download, platform, library_root,
+            overwrite=overwrite, dats=dats, require_verified=require_verified,
+            layout=layout, translation=translation, rename=rename,
+            platform_folders=platform_folders, prefer_hardlinks=prefer_hardlinks,
+            selected_primaries=selected_primaries, bundle_routes=bundle_routes)
+    finally:
+        source.close()
+
+
+def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
+                            library_root, *, overwrite=False, dats=None,
+                            require_verified=False, layout="flat",
+                            translation=False, rename=False,
+                            platform_folders=None, prefer_hardlinks=False,
+                            selected_primaries=None, bundle_routes=None):
+    """Finish import while the validated source and its scratch ZIPs remain open."""
     if selected_primaries is not None:
         selected = set(selected_primaries)
         available = {group.primary for group in chosen_sets}

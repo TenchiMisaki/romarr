@@ -2,6 +2,7 @@
 
 import io
 import struct
+from pathlib import Path
 import stat
 import zipfile
 
@@ -86,6 +87,69 @@ def test_nested_zip_gameboy_rejects_executable_only(tmp_path):
     assert "no Game Boy ROM" in result.reason
     assert not library.exists()
     assert download.read_bytes() == original
+
+
+def test_directory_multiple_nested_zip_trees_have_one_staging_limit(tmp_path, monkeypatch):
+    """Reject two individually legal inner ZIPs exceeding one directory budget."""
+    inner_a = zip_bytes({"A.gb": b"game"})
+    inner_b = zip_bytes({"B.gb": b"game"})
+    limit = max(len(inner_a), len(inner_b)) + 1
+    assert len(inner_a) + len(inner_b) > limit
+    monkeypatch.setattr(nested_zip, "MAX_STAGED_BYTES", limit)
+    download = tmp_path / "download"
+    download.mkdir()
+    a = zip_bytes({"inner.zip": inner_a})
+    b = zip_bytes({"inner.zip": inner_b})
+    (download / "A.zip").write_bytes(a)
+    (download / "B.zip").write_bytes(b)
+    library = tmp_path / "library"
+
+    with pytest.raises(ValueError, match="download staging size limit exceeded"):
+        preview_import(download, resolve("gb"), library)
+    result, = import_rom(download, resolve("gb"), library)
+    assert not result.ok
+    assert "download staging size limit exceeded" in result.reason
+    assert not library.exists()
+    assert (download / "A.zip").read_bytes() == a
+    assert (download / "B.zip").read_bytes() == b
+
+
+def test_directory_nested_staging_closes_on_success_and_failure(tmp_path, monkeypatch):
+    """Keep good small multi-ZIP imports and clean temporary ZIPs on all exits."""
+    original_temp = nested_zip.tempfile.TemporaryDirectory
+    scratch = []
+
+    def tracked_temp(*args, **kwargs):
+        temp = original_temp(*args, **kwargs)
+        if kwargs.get("prefix") == "romarr-nested-zip-":
+            scratch.append(Path(temp.name))
+        return temp
+
+    monkeypatch.setattr(nested_zip.tempfile, "TemporaryDirectory", tracked_temp)
+    inner_a = zip_bytes({"A.gb": b"a"})
+    inner_b = zip_bytes({"B.gb": b"b"})
+    monkeypatch.setattr(nested_zip, "MAX_STAGED_BYTES", len(inner_a) + len(inner_b) + 1)
+    download = tmp_path / "download"
+    download.mkdir()
+    (download / "A.zip").write_bytes(zip_bytes({"inner.zip": inner_a}))
+    (download / "B.zip").write_bytes(zip_bytes({"inner.zip": inner_b}))
+    library = tmp_path / "library"
+
+    preview = preview_import(download, resolve("gb"), library)
+    assert {item["primary"] for item in preview["items"]} == {
+        "A.zip/inner.zip/A.gb", "B.zip/inner.zip/B.gb"}
+    result, = import_rom(download, resolve("gb"), library,
+                         selected_primaries=["B.zip/inner.zip/B.gb"])
+    assert result.ok, result.reason
+    assert result.destination.read_bytes() == b"b"
+    assert scratch and all(not path.exists() for path in scratch)
+
+    monkeypatch.setattr(nested_zip, "MAX_STAGED_BYTES", max(len(inner_a), len(inner_b)) + 1)
+    result, = import_rom(download, resolve("gb"), tmp_path / "failed")
+    assert not result.ok
+    assert "download staging size limit exceeded" in result.reason
+    assert all(not path.exists() for path in scratch)
+    assert not (tmp_path / "failed").exists()
 
 
 def test_nested_zip_disc_in_directory_preserves_tracks_and_art(tmp_path):

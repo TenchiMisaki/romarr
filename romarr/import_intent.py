@@ -15,6 +15,18 @@ def queue_identity(item):
 def preview_import(download, platform, library_root, *, layout="flat", platform_folders=None, queue_identity=None):
     """Build a reviewable preview without hashing game payloads."""
     source = _source_for(download, platform)
+    try:
+        return _preview_import_from_source(
+            source, download, platform, library_root, layout=layout,
+            platform_folders=platform_folders, queue_identity=queue_identity)
+    finally:
+        source.close()
+
+
+def _preview_import_from_source(source, download, platform, library_root, *,
+                                layout="flat", platform_folders=None,
+                                queue_identity=None):
+    """Create a preview from an owned source before its scratch files close."""
     names = source.names()
     sets = source.rom_sets(platform)
     sizes = {}
