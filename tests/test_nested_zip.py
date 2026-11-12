@@ -5,12 +5,13 @@ import struct
 from pathlib import Path
 import stat
 import zipfile
+import zlib
 
 import pytest
 
 from romarr import nested_zip
 from romarr.import_intent import preview_import
-from romarr.library import _PathSource, _source_for, import_rom
+from romarr.library import _DirectorySource, _PathSource, _source_for, import_rom
 from romarr.platforms import resolve
 from romarr.selection import _digital_set
 
@@ -122,7 +123,7 @@ def test_directory_nested_staging_closes_on_success_and_failure(tmp_path, monkey
     def tracked_temp(*args, **kwargs):
         temp = original_temp(*args, **kwargs)
         if kwargs.get("prefix") == "romarr-nested-zip-":
-            scratch.append(Path(temp.name))
+            scratch.append(temp)
         return temp
 
     monkeypatch.setattr(nested_zip.tempfile, "TemporaryDirectory", tracked_temp)
@@ -138,18 +139,49 @@ def test_directory_nested_staging_closes_on_success_and_failure(tmp_path, monkey
     preview = preview_import(download, resolve("gb"), library)
     assert {item["primary"] for item in preview["items"]} == {
         "A.zip/inner.zip/A.gb", "B.zip/inner.zip/B.gb"}
+    assert scratch and all(not Path(temp.name).exists() for temp in scratch)
     result, = import_rom(download, resolve("gb"), library,
                          selected_primaries=["B.zip/inner.zip/B.gb"])
     assert result.ok, result.reason
     assert result.destination.read_bytes() == b"b"
-    assert scratch and all(not path.exists() for path in scratch)
+    assert scratch and all(not Path(temp.name).exists() for temp in scratch)
 
     monkeypatch.setattr(nested_zip, "MAX_STAGED_BYTES", max(len(inner_a), len(inner_b)) + 1)
     result, = import_rom(download, resolve("gb"), tmp_path / "failed")
     assert not result.ok
     assert "download staging size limit exceeded" in result.reason
-    assert all(not path.exists() for path in scratch)
+    assert all(not Path(temp.name).exists() for temp in scratch)
     assert not (tmp_path / "failed").exists()
+
+
+def test_directory_unexpected_inspection_exception_closes_scratch(tmp_path, monkeypatch):
+    """An unexpected decompression error must not retain staged inner archives."""
+    original_temp = nested_zip.tempfile.TemporaryDirectory
+    owned = []
+
+    def tracked_temp(*args, **kwargs):
+        temp = original_temp(*args, **kwargs)
+        if kwargs.get("prefix") == "romarr-nested-zip-":
+            owned.append(temp)
+        return temp
+
+    monkeypatch.setattr(nested_zip.tempfile, "TemporaryDirectory", tracked_temp)
+    download = tmp_path / "download"
+    download.mkdir()
+    (download / "A.zip").write_bytes(zip_bytes({
+        "inner.zip": zip_bytes({"A.gb": b"a"}),
+    }))
+    library = tmp_path / "library"
+
+    def fail_during_inspection(_source, _platform):
+        raise zlib.error("synthetic compressed member failure")
+
+    monkeypatch.setattr(_DirectorySource, "rom_sets", fail_during_inspection)
+    with pytest.raises(zlib.error, match="synthetic compressed member failure"):
+        import_rom(download, resolve("gb"), library)
+
+    assert owned and all(not Path(temp.name).exists() for temp in owned)
+    assert not library.exists()
 
 
 def test_nested_zip_disc_in_directory_preserves_tracks_and_art(tmp_path):

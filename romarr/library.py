@@ -863,6 +863,11 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
         if "source" in locals():
             source.close()
         return [ImportResult(False, None, f"source inspection failed: {exc}")]
+    except BaseException:
+        # Preserve unexpected errors and cancellation, without leaking staged ZIPs.
+        if "source" in locals():
+            source.close()
+        raise
 
     try:
         return _import_rom_from_source(
