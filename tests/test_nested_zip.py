@@ -171,6 +171,8 @@ def test_directory_unexpected_inspection_exception_closes_scratch(tmp_path, monk
     (download / "A.zip").write_bytes(zip_bytes({
         "inner.zip": zip_bytes({"A.gb": b"a"}),
     }))
+    # Prevent the one-archive directory shortcut from bypassing _DirectorySource.
+    (download / "notes.txt").write_bytes(b"fixture companion")
     library = tmp_path / "library"
 
     def fail_during_inspection(_source, _platform):
