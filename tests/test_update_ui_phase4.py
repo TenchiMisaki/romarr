@@ -98,16 +98,23 @@ def _payload(**overrides) -> dict:
 def test_update_page_renders_each_nonavailable_verdict(state, label):
     """A false Boolean alone must never mean a successful current check."""
     html = _update(_payload(check_status={"state": state}))["html"]
-    assert "<b>" + label + "</b><span>Update available</span>" in html
-    assert "<span>Last known release</span>" in html or state == "current"
+    headings = {
+        "current": "You're up to date",
+        "never_checked": "Not checked yet",
+        "unknown": "Update status unknown",
+        "error": "Couldn't check for updates",
+    }
+    assert '<h2 id="update-status-heading">' + headings[state] + '</h2>' in html
+    assert "<dt>Last known release</dt>" in html or state == "current"
 
 
 def test_update_page_available_uses_positive_check_not_legacy_boolean():
     """A validated available state drives the tile, not a cached Boolean."""
     html = _update(_payload(check_status={"state": "available"},
                             update_available=False))["html"]
-    assert 'color:var(--warn)">yes</span>' in html
-    assert "<span>Latest on GitHub</span>" in html
+    assert '<h2 id="update-status-heading">Update available</h2>' in html
+    assert '<div class="update-version is-new">' in html
+    assert "<dt>Latest on GitHub</dt>" in html
 
 
 def test_update_page_docker_configured_is_not_effective():
@@ -135,7 +142,7 @@ def test_update_page_legacy_absence_is_honest():
     result = _update({"running_version": "0.0.0+unknown",
                       "install": {"kind": "none"}})
     html = result["html"]
-    assert "<b>unknown</b><span>Update available</span>" in html
+    assert '<h2 id="update-status-heading">Update status unknown</h2>' in html
     assert "Build identity: unverified" in html
     assert result["check_bound"]
 
@@ -152,6 +159,47 @@ def test_update_page_escapes_identity_and_preserves_optional_sections():
     assert "&lt;script&gt;" in html and "<script>" not in html
     assert "ROM Hub plugins" in html and "Last self-update log" in html
     assert 'id="up-plugins"' in html
+
+
+def test_update_page_plugin_sections_are_conditional():
+    """Keep the maintainer's plugin table and action hidden when empty."""
+    empty = _update(_payload(plugins={}))["html"]
+    assert "Auto-update ROM Hub plugins" in empty
+    assert 'id="up-plugins"' not in empty
+    assert 'id="update-plugins-heading"' not in empty
+
+    installed = _update(_payload(plugins={
+        "sample": {"source": "example/repo", "ref": "main",
+                   "commit": "abcdef1234567890"},
+    }))["html"]
+    assert 'id="up-plugins"' in installed
+    assert 'id="update-plugins-heading"' in installed
+    for heading in ("Plugin", "Source", "Ref", "Commit"):
+        assert '<th>' + heading + '</th>' in installed
+    assert "abcdef12" in installed
+
+
+def test_update_page_check_timestamp_and_disclosure_sections():
+    """Use the stored successful check, not an invented preview timestamp."""
+    state = _payload(check_status={
+        "state": "available", "last_success_at": "2026-11-13T10:30:00Z",
+    })
+    html = _update(state)["html"]
+    assert "Last successful check: 2026-11-13T10:30:00Z" in html
+    assert 'id="update-status-heading"' in html
+    assert "<summary>Build details</summary>" in html
+    assert "<summary>Updating ROMarr with Docker</summary>" in html
+    assert "Settings → General" in html
+
+
+def test_update_page_css_is_scoped_and_responsive():
+    """Reuse app theme tokens and retain narrow-screen plugin readability."""
+    css = ui.CSS
+    assert ".update-hero{" in css
+    assert ".update-plugin-table td::before" in css
+    assert "@media(max-width:440px)" in css
+    assert "var(--accent-text)" in css
+    assert "var(--surface)" in css
 
 
 def test_stats_banner_requires_real_availability_and_effective_capability():
