@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1110" viewBox="0 0 1440 1110" role="img" aria-label="Proposed ROMarr System Update page; not a live screenshot"><title>Proposed ROMarr System Update page — illustrative, not actual live data</title>
-<rect x="0" y="0" width="1440" height="1110" rx="0" fill="#12141a"/>
-<rect x="0" y="0" width="222" height="1110" rx="0" fill="#0d0f14"/>
-<path d="M222 0L222 1110" stroke="#282e3a"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="850" viewBox="0 0 1440 850" role="img" aria-label="Proposed ROMarr System Update page; not a live screenshot"><title>Proposed ROMarr System Update page — illustrative, not actual live data</title>
+<rect x="0" y="0" width="1440" height="850" rx="0" fill="#12141a"/>
+<rect x="0" y="0" width="222" height="850" rx="0" fill="#0d0f14"/>
+<path d="M222 0L222 850" stroke="#282e3a"/>
 <path d="M0 60L222 60" stroke="#282e3a"/>
 <text x="18" y="40" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="23" fill="#e8eaf0" font-weight="750">ROM</text>
 <text x="74" y="40" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="23" fill="#f2a33c" font-weight="750">arr</text>
@@ -83,15 +83,9 @@
 <rect x="268" y="479" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
 <text x="287" y="504" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Channel</text>
 <text x="847" y="504" font-family="Consolas,monospace" font-size="13" fill="#e8eaf0" font-weight="550">stable</text>
-<rect x="268" y="518" width="1123" height="39" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
-<text x="287" y="543" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="500">Auto-update ROM Hub plugins</text>
-<rect x="841" y="525" width="50" height="25" rx="12" fill="#30343e"/>
-<text x="866" y="542" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="11.8" fill="#b4bbca" font-weight="650" text-anchor="middle">off</text>
-<path d="M823 401L823 557" stroke="#282e3a"/>
+<path d="M823 401L823 518" stroke="#282e3a"/>
 <rect x="269" y="579" width="113" height="36" rx="6" fill="#212734" stroke="#3b4454" stroke-width="1"/>
 <text x="325.5" y="602" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="600" text-anchor="middle">Check now</text>
-<rect x="390" y="579" width="180" height="36" rx="6" fill="#212734" stroke="#3b4454" stroke-width="1"/>
-<text x="480" y="602" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="13" fill="#e8eaf0" font-weight="600" text-anchor="middle">Update plugins now</text>
 <rect x="248" y="661" width="1166" height="165" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
 <rect x="269" y="680" width="3" height="18" rx="1.5" fill="#f2a33c"/>
 <text x="284" y="695" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">How to update this container</text>
@@ -99,18 +93,4 @@
 <rect x="268" y="736" width="1124" height="67" rx="7" fill="#12141a" stroke="#323a47" stroke-width="1"/>
 <text x="286" y="759" font-family="Consolas,monospace" font-size="12.2" fill="#c6cad4" font-weight="400">Use the existing Docker deployment or host-side updater; verify the image source and chosen tag.</text>
 <text x="286" y="784" font-family="Consolas,monospace" font-size="12.2" fill="#c6cad4" font-weight="400">Preserve volumes, credentials, ports, and rollback information. Do not delete/recreate blindly.</text>
-<rect x="248" y="844" width="1166" height="188" rx="12" fill="#1a1d25" stroke="#2b3240" stroke-width="1"/>
-<rect x="269" y="863" width="3" height="18" rx="1.5" fill="#f2a33c"/>
-<text x="284" y="878" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="17" fill="#e8eaf0" font-weight="650">ROM Hub plugins</text>
-<text x="269" y="899" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">This section appears only when ROM Hub plugins are installed.</text>
-<rect x="268" y="916" width="1124" height="43" rx="0" fill="#212734" stroke="#282e3a" stroke-width="1"/>
-<text x="285" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Plugin</text>
-<text x="510" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Source</text>
-<text x="817" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Ref</text>
-<text x="1111" y="944" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#b4bbca" font-weight="650">Commit</text>
-<rect x="268" y="959" width="1124" height="52" rx="0" fill="#1a1d25" stroke="#282e3a" stroke-width="1"/>
-<text x="285" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">Sample plugin</text>
-<text x="510" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">source repository</text>
-<text x="817" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">tracked ref</text>
-<text x="1111" y="990" font-family="Segoe UI,Inter,Arial,sans-serif" font-size="12.5" fill="#89909f" font-weight="400">revision</text>
 </svg>
