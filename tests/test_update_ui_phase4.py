@@ -121,7 +121,7 @@ def test_update_page_docker_configured_is_not_effective():
     """A saved preference never authorizes an in-container Docker update."""
     result = _update(_payload(check_status={"state": "available"}))
     html = result["html"]
-    assert "configured only; this Docker image must be updated by its host" in html
+    assert "ROMarr cannot update its own Docker image." in html
     assert 'id="up-check"' in html and result["check_bound"]
     assert 'id="up-apply"' not in html
 
@@ -133,7 +133,7 @@ def test_update_page_git_eligible_keeps_manual_action():
         install={"kind": "git", "can_apply": True},
         settings={"auto_update": True, "auto_update_effective": True},
     ))["html"]
-    assert "effective for this installation" in html
+    assert "Installs eligible updates after a scheduled check." in html
     assert 'id="up-apply"' in html
 
 
@@ -143,7 +143,7 @@ def test_update_page_legacy_absence_is_honest():
                       "install": {"kind": "none"}})
     html = result["html"]
     assert '<h2 id="update-status-heading">Update status unknown</h2>' in html
-    assert "Build identity: unverified" in html
+    assert "Build type <b>Unknown</b>" in html
     assert result["check_bound"]
 
 
@@ -155,7 +155,7 @@ def test_update_page_escapes_identity_and_preserves_optional_sections():
         plugins={"<img>": {"source": "<script>", "ref": "main"}},
         update_log="<script>alert(1)</script>",
     ))["html"]
-    assert "&lt;img src=x&gt;" in html and "<img src=x>" not in html
+    assert "&lt;img&gt;" in html and "<img src=x>" not in html
     assert "&lt;script&gt;" in html and "<script>" not in html
     assert "ROM Hub plugins" in html and "Last self-update log" in html
     assert 'id="up-plugins"' in html
@@ -187,7 +187,8 @@ def test_update_page_check_timestamp_and_disclosure_sections():
     html = _update(state)["html"]
     assert "Last successful check: 2026-11-13T10:30:00Z" in html
     assert 'id="update-status-heading"' in html
-    assert "<summary>Build details</summary>" in html
+    assert '<th scope="col">Details</th>' in html
+    assert "Build details" not in html and "Version information" not in html
     assert "<summary>Updating ROMarr with Docker</summary>" in html
     assert "Settings → General" in html
 
@@ -197,6 +198,7 @@ def test_update_page_css_is_scoped_and_responsive():
     css = ui.CSS
     assert ".update-hero{" in css
     assert ".update-plugin-table td::before" in css
+    assert ".update-install-table" in css and "max-width:1120px" in css
     assert "@media(max-width:440px)" in css
     assert "var(--accent-text)" in css
     assert "var(--surface)" in css
@@ -305,8 +307,65 @@ def test_stats_and_status_use_same_verified_build_presentation():
     """Cross-page UI should share one escaped build-identity presenter."""
     source = ui.JS
     assert "buildIdentityLine(h.build)" in source
-    assert "buildIdentityLine(d.build)" in source
+    assert "const build=d.build||{}" in source
     assert "up.running_version===s.version?up.build:null" in source
     for marker in ("RENDER.stats=async()=>", "RENDER.status=async()=>",
                    "RENDER.update=async()=>", "RENDER.queue=async()=>"):
         assert marker in source
+
+
+def test_update_nightly_identity_and_conditional_revision():
+    """Only official main-branch provenance identifies the nightly source."""
+    sha = "a" * 40
+    nightly = {"type": "development", "source_ref": "refs/heads/main",
+               "source_revision": sha, "source_repository": "BlizzHacker/romarr"}
+    html = _update(_payload(build=nightly,
+                           settings={"update_channel": "nightly"},
+                           check_status={"state": "unknown",
+                                         "reason": "nightly_revision_not_checked"}))["html"]
+    assert "Build type <b>Nightly</b>" in html
+    assert "Source revision <code>aaaaaaaa</code>" in html
+    for other in (
+        {"type": "release", "source_ref": "refs/tags/v1.8.1",
+         "source_revision": sha, "source_repository": "BlizzHacker/romarr"},
+        {"type": "development", "source_ref": "refs/pull/21/head",
+         "source_revision": sha, "source_repository": "BlizzHacker/romarr"},
+        {"type": "development", "source_ref": "refs/heads/main",
+         "source_revision": sha, "source_repository": "TenchiMisaki/romarr"},
+    ):
+        output = _update(_payload(build=other))["html"]
+        assert "Source revision <code>" not in output
+    assert "Build type <b>Release</b>" in _update(_payload(build={
+        "type": "release", "source_ref": "refs/tags/v1.8.1",
+        "source_revision": sha, "source_repository": "BlizzHacker/romarr"}))["html"]
+
+
+def test_update_installation_table_and_plugin_button_position():
+    """Show three aligned columns and keep plugin action in its own card."""
+    html = _update(_payload(plugins={
+        "sample": {"source": "example/repo", "ref": "main", "commit": "abcdef123456"},
+    }))["html"]
+    for column in ("Setting", "Status", "Details"):
+        assert '<th scope="col">' + column + '</th>' in html
+    assert '<table class="update-install-table">' in html
+    assert html.index('id="update-plugins-heading"') < html.index('id="up-plugins"')
+    assert html.index('id="up-plugins"') < html.index('<table class="update-plugin-table">')
+    assert 'id="up-plugin-msg"' in html
+    assert 'id="up-msg"' in html
+    assert "Version information" not in html
+    empty = _update(_payload(plugins={}))["html"]
+    assert 'id="up-plugins"' not in empty and 'id="up-plugin-msg"' not in empty
+    assert 'id="up-msg"' in empty
+
+
+def test_update_nightly_does_not_fake_stable_comparison():
+    """Never show an available stable release as a nightly update verdict."""
+    html = _update(_payload(
+        build={"type": "development", "source_ref": "refs/heads/main",
+               "source_repository": "BlizzHacker/romarr",
+               "source_revision": "b" * 40},
+        settings={"update_channel": "nightly"},
+        check_status={"state": "available"},
+    ))["html"]
+    assert '<h2 id="update-status-heading">Update status unknown</h2>' in html
+    assert '<div class="update-version is-new">' not in html

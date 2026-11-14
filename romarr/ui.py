@@ -616,15 +616,15 @@ html:not(.sidebar-ready):has(#fallback-accent-4:checked){--accent:#2dd4bf;}
 html:not(.sidebar-ready):has(#fallback-accent-5:checked){--accent:#7bd88f;}
 
 /* System -> Update: v11 presentation, scoped to the existing route and theme tokens. */
-.update-view{min-width:0}
+.update-view{min-width:0;width:100%;max-width:1120px;margin:0 auto}
 .update-hero{border:1px solid var(--accent-line);border-radius:18px;
   background:radial-gradient(ellipse at 12% 5%,var(--accent-softer),transparent 65%),var(--surface);
   padding:26px 28px;margin-bottom:20px;box-shadow:var(--shadow-2),var(--edge)}
 .update-hero-heading{display:flex;align-items:center;gap:18px;min-width:0}
-.update-hero-icon{display:grid;place-items:center;width:68px;height:68px;flex:none;
+.update-hero-icon{display:grid;place-items:center;width:52px;height:52px;flex:none;
   border-radius:17px;background:var(--accent-soft);border:1px solid var(--accent-line);
   color:var(--accent-text);font-size:34px;font-weight:600}
-.update-hero h2{font-size:clamp(23px,3vw,34px);letter-spacing:-.025em;
+.update-hero h2{font-size:clamp(22px,2.4vw,28px);letter-spacing:-.025em;
   line-height:1.16;font-weight:700;overflow-wrap:anywhere}
 .update-hero-summary{margin-top:6px;font-size:13px;line-height:1.55;color:var(--fg-2)}
 .update-hero-time{margin-top:5px;color:var(--dim);font-size:12px}
@@ -723,6 +723,59 @@ html:not(.sidebar-ready):has(#fallback-accent-5:checked){--accent:#7bd88f;}
     font-size:11px;font-weight:550}
   .update-plugin-table td:last-child{border:0}
 }
+
+/* Structured installation settings and a neutral ROM Hub plugins table. */
+.update-hero-primary{min-width:0}
+.update-build-meta{display:flex;align-items:center;flex-wrap:wrap;gap:7px 20px;
+  padding:12px 2px 0;font-size:12.5px;color:var(--fg-2)}
+.update-build-meta b,.update-build-meta code{color:var(--fg)}
+.update-build-note{font-size:12px;color:var(--dim);margin-top:4px}
+.update-install-table-wrap,.update-plugin-table-wrap{border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.update-install-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px}
+.update-install-table th{padding:10px 13px;text-align:left;background:var(--surface-2);
+ color:var(--dim);font-size:11px;font-weight:700;text-transform:uppercase;
+ letter-spacing:.06em;border-bottom:1px solid var(--line)}
+.update-install-table th:nth-child(1){width:30%}
+.update-install-table th:nth-child(2){width:18%}
+.update-install-table th:nth-child(3){width:52%}
+.update-install-table td{padding:13px;vertical-align:middle;border-bottom:1px solid var(--line-soft);overflow-wrap:anywhere}
+.update-install-table tr:last-child td{border:0}
+.update-install-table td:first-child{color:var(--fg);font-weight:620}
+.update-install-table td:last-child{font-size:12.5px;color:var(--fg-2);line-height:1.5}
+.update-plugin-card{border-color:var(--line);background:var(--surface)}
+.update-plugin-heading{display:flex;align-items:center;justify-content:space-between;
+ flex-wrap:wrap;gap:12px;margin-bottom:13px}
+.update-plugin-heading h3{margin:0}
+.update-plugin-heading .btn{min-height:39px}
+.update-plugin-table{border-collapse:collapse}
+.update-plugin-table th{padding:10px 12px;background:var(--surface-2);font-size:11px;
+ text-transform:uppercase;letter-spacing:.06em;color:var(--dim);text-align:left;
+ border-bottom:1px solid var(--line)}
+.update-plugin-table td{padding:12px;border-bottom:1px solid var(--line-soft)}
+.update-plugin-table tr:last-child td{border:0}
+.update-plugin-card .update-result{margin-top:10px}
+@media(max-width:700px){
+ .update-install-table-wrap,.update-plugin-table-wrap{border:0;overflow:visible}
+ .update-install-table thead{display:none}
+ .update-install-table,.update-install-table tbody,.update-install-table tr{display:block}
+ .update-install-table tr{border:1px solid var(--line);border-radius:10px;
+  padding:6px 12px;margin-bottom:10px;background:var(--surface-2)}
+ .update-install-table td{display:grid;grid-template-columns:68px minmax(0,1fr);
+  gap:9px;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+ .update-install-table td:before{content:attr(data-label);color:var(--dim);font-size:11px}
+ .update-install-table td:last-child{border:0}
+}
+@media(max-width:440px){
+ .update-install-table tr{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:0 10px}
+ .update-install-table td{display:block;padding:8px 0}
+ .update-install-table td:before{display:none}
+ .update-install-table td:first-child{grid-column:1;align-self:center}
+ .update-install-table td:nth-child(2){grid-column:2;align-self:center}
+ .update-install-table td:last-child{grid-column:1/-1;padding-top:9px;
+  border-top:1px solid var(--line-soft);border-bottom:0}
+ .update-plugin-heading .btn{width:100%}
+}
+
 
 """
 
@@ -6129,7 +6182,23 @@ RENDER.update=async()=>{
       ||(viewVersion!==null&&pageVersion!==viewVersion))return;
   if(!d){$('#page').innerHTML='<div class="panel-note panel-warn">Could not read update status.</div>';return;}
   const inst=d.install||{}, st=d.settings||{}, check=d.check_status||{};
-  const verdict=updateVerdict(d.check_status);
+  const build=d.build||{};
+  const isNightly=build.type==='development'
+    &&build.source_ref==='refs/heads/main'
+    &&build.source_repository==='BlizzHacker/romarr'
+    &&typeof build.source_revision==='string'
+    &&/^[0-9a-f]{40}$/i.test(build.source_revision);
+  const buildType=build.type==='release'?'Release':isNightly?'Nightly'
+    :build.type==='development'?'Other build':'Unknown';
+  const buildNote=buildType==='Release'?'Built from a published release.'
+    :isNightly?'Built from ROMarr’s main branch.'
+    :buildType==='Other build'?'Built from another source revision.'
+    :'Build information is unavailable.';
+  const rawVerdict=updateVerdict(d.check_status);
+  const verdict=(build.type==='development'||(st.update_channel||'stable')!=='stable')
+      &&['available','current'].includes(rawVerdict.state)
+    ?{state:'unknown',note:'This build or channel cannot be compared with published releases.'}
+    :rawVerdict;
   const kindLabel={git:'Git / source',docker:'Docker',none:'Unknown'}[inst.kind]||inst.kind||'Unknown';
   const titles={available:'Update available',current:"You're up to date",
     never_checked:'Not checked yet',unknown:'Update status unknown',
@@ -6152,65 +6221,86 @@ RENDER.update=async()=>{
     +'<p class="update-hero-summary">'+esc(verdict.note)+'</p>'
     +'<p class="update-hero-time">'+esc(when)+'</p></div></div>'
     +'<div class="update-hero-content">'
-    +'<dl class="update-versions">'
+    +'<div class="update-hero-primary"><dl class="update-versions">'
     +'<div class="update-version"><dt>Installed version</dt><dd>'+esc(d.running_version||'unknown')+'</dd></div>'
     +'<div class="update-version'+(verdict.state==='available'?' is-new':'')+'">'
     +'<dt>'+(compared?'Latest on GitHub':'Last known release')+'</dt>'
     +'<dd>'+esc(d.latest_version||'—')+'</dd></div></dl>'
+    +'<div class="update-build-meta"><span>Build type <b>'+esc(buildType)+'</b></span>'
+    +(isNightly?'<span>Source revision <code>'+esc(build.source_revision.slice(0,8))+'</code></span>':'')
+    +'</div><p class="update-build-note">'+esc(buildNote)+'</p></div>'
     +'<div class="update-hero-actions"><button class="btn" id="up-check">Check for updates</button>'
     +(inst.can_apply?'<button class="btn ghost" id="up-apply">Update now</button>':'')
     +'<p class="update-safe-hint">Checks for updates only; does not install or restart.</p>'
+    +'<div id="up-msg" class="update-result" role="status" aria-live="polite"></div>'
     +'</div></div></section>'
     +'<section class="card update-card" aria-labelledby="update-install-heading">'
     +'<h3 id="update-install-heading">About this installation</h3>'
-    +'<dl class="update-rows">'
-    +'<div class="update-row"><dt>Installed using</dt><dd>'+state(esc(kindLabel),false)+'</dd></div>'
-    +'<div class="update-row"><dt>Update channel</dt><dd>'+state(esc(st.update_channel||'stable'),false)+'</dd></div>'
-    +'<div class="update-row"><dt>Install updates automatically</dt><dd>'+state(esc(autoState),st.auto_update_effective===true)
-    +'<span class="update-row-detail">'+esc(autoApplyDetail(st,inst))+'</span></dd></div>'
-    +'<div class="update-row"><dt>Check for updates automatically</dt><dd>'+state(st.update_check?'On':'Off',!!st.update_check)+'</dd></div>'
-    +'<div class="update-row"><dt>Auto-update ROM Hub plugins</dt><dd>'+state(st.auto_update_plugins?'On':'Off',!!st.auto_update_plugins)+'</dd></div>'
-    +'</dl><p class="update-section-note">Change automatic-update preferences under Settings → General.</p>'
-    +'<div class="update-section-actions">'
-    +(plugins.length?'<button class="btn ghost" id="up-plugins">Update plugins now</button>':'')
-    +'<div id="up-msg" class="update-result" role="status" aria-live="polite"></div>'
-    +'</div></section>'
-    +'<details class="card update-disclosure"><summary>Build details</summary>'
-    +'<div class="update-disclosure-body">'+buildIdentityLine(d.build)
-    +'<p class="help">Installation: '+esc(kindLabel)
-    +(inst.branch?' · branch '+esc(inst.branch):'')
-    +(inst.commit?' · revision '+esc(inst.commit):'')+'</p></div></details>'
+    +'<div class="update-install-table-wrap"><table class="update-install-table">'
+    +'<thead><tr><th scope="col">Setting</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead><tbody>'
+    +'<tr><td data-label="Setting">Installed using</td><td data-label="Status">'+state(esc(kindLabel),false)
+    +'</td><td data-label="Details">'+esc(inst.kind==='docker'?'Update ROMarr through your Docker host or container manager.'
+      :inst.kind==='git'?'This copy runs from source. Updates can be installed here when supported.'
+      :'ROMarr cannot tell how this copy was installed.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Update channel</td><td data-label="Status">'
+    +state(esc(st.update_channel==='nightly'?'Nightly':st.update_channel==='stable'?'Stable':'Unknown'),false)
+    +'</td><td data-label="Details">'+esc(st.update_channel==='nightly'?'Nightly update checks are not available yet.'
+      :st.update_channel==='stable'?'Checks for published ROMarr releases.'
+      :'The configured update channel could not be verified.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Install updates automatically</td><td data-label="Status">'
+    +state(esc(autoState),st.auto_update_effective===true)+'</td><td data-label="Details">'
+    +esc(inst.kind==='docker'?'ROMarr cannot update its own Docker image.'
+      :st.auto_update_effective===true?'Installs eligible updates after a scheduled check.'
+      :!st.auto_update?'ROMarr will not install updates automatically.'
+      :st.auto_update_reason==='update_check_disabled'?'Automatic update checks are turned off.'
+      :st.auto_update_reason==='nightly_revision_check_not_supported'?'Nightly automatic installation is not supported yet.'
+      :'Automatic installation is not available for this setup.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Check for updates automatically</td><td data-label="Status">'
+    +state(st.update_check===true?'On':st.update_check===false?'Off':'Unknown',st.update_check===true)
+    +'</td><td data-label="Details">'+esc(st.update_check===true?'Checks for new releases every day.'
+      :st.update_check===false?'Use Check for updates when you want to check.'
+      :'Automatic check preference is unavailable.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Auto-update ROM Hub plugins</td><td data-label="Status">'
+    +state(st.auto_update_plugins===true?'On':st.auto_update_plugins===false?'Off':'Unknown',st.auto_update_plugins===true)
+    +'</td><td data-label="Details">'+esc(st.auto_update_plugins===true?'Keeps installed plugins up to date.'
+      :st.auto_update_plugins===false?'Plugin updates are manual.'
+      :'Automatic plugin update preference is unavailable.')+'</td></tr>'
+    +'</tbody></table></div>'
+    +'<p class="update-section-note">Change automatic-update preferences under Settings → General.</p>'
+    +'</section>'
     +((d.docker_guidance||[]).length
       ?'<details class="card update-disclosure"><summary>Updating ROMarr with Docker</summary>'
        +'<div class="update-disclosure-body"><p>Use the original host deployment method and preserve its configuration and rollback materials.</p>'
        +'<pre class="update-code">'+esc(d.docker_guidance.join('\n'))+'</pre></div></details>'
       :'')
     +(plugins.length
-      ?'<section class="card update-card" aria-labelledby="update-plugins-heading">'
-       +'<h3 id="update-plugins-heading">ROM Hub plugins</h3>'
-       +'<table class="update-plugin-table"><thead><tr><th>Plugin</th><th>Source</th><th>Ref</th><th>Commit</th></tr></thead><tbody>'
+      ?'<section class="card update-card update-plugin-card" aria-labelledby="update-plugins-heading">'
+       +'<div class="update-plugin-heading"><h3 id="update-plugins-heading">ROM Hub plugins</h3>'
+       +'<button class="btn ghost" id="up-plugins">Update plugins now</button></div>'
+       +'<div class="update-plugin-table-wrap"><table class="update-plugin-table"><thead><tr><th>Plugin</th><th>Source</th><th>Ref</th><th>Commit</th></tr></thead><tbody>'
        +plugins.map(([slug,raw])=>{const info=raw||{};return '<tr><td data-label="Plugin">'+esc(slug)+'</td>'
          +'<td data-label="Source">'+esc(info.source||'—')+'</td>'
          +'<td data-label="Ref">'+esc(info.ref||'latest')+'</td>'
          +'<td data-label="Commit"><code>'+esc((info.commit||'').slice(0,8))+'</code></td></tr>';}).join('')
-       +'</tbody></table></section>'
+       +'</tbody></table></div><div id="up-plugin-msg" class="update-result" role="status" aria-live="polite"></div></section>'
       :'')
     +((d.update_log||'')
       ?'<details class="card update-disclosure"><summary>Last self-update log</summary>'
        +'<div class="update-disclosure-body"><pre class="update-code">'+esc(d.update_log)+'</pre></div></details>'
       :'')
     +'</div>';
-  const msg=$('#up-msg');
-  const say=(t,bad)=>{msg.innerHTML='<div class="panel-note '+(bad?'panel-warn':'')+'">'+esc(t)+'</div>';};
+  const say=(t,bad,name)=>{const msg=name==='PluginUpdate'?$('#up-plugin-msg'):$('#up-msg');
+    if(msg)msg.innerHTML='<div class="panel-note '+(bad?'panel-warn':'')+'">'+esc(t)+'</div>';};
   const run=(name,fn)=>async e=>{
+    const originalText=e.target.textContent;
     e.target.disabled=true; e.target.textContent='Running…';
-    say('Working…');
+    say('Working…',false,name);
     try{
       const r=await fn();
-      say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error);
+      say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error,name);
       setTimeout(()=>go('update'), r.ok&&name==='ApplyUpdate'?2500:0);
-    }catch(err){say('request failed: '+err, true);}
-    e.target.disabled=false;
+    }catch(err){say('request failed: '+err, true,name);}
+    e.target.disabled=false; e.target.textContent=originalText;
   };
   const cmd=(name)=>j('/api/v1/command',{method:'POST',
     headers:{'content-type':'application/json'},
