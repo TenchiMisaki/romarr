@@ -517,3 +517,38 @@ def test_changing_channel_after_record_does_not_reserve_notice(
     assert not notified
     assert svc.store.settings.get("_update_notified") != "1.8.2"
     assert svc.update_status()["check_status"]["state"] == "unknown"
+
+
+def test_update_status_check_runs_before_other_scheduled_jobs(tmp_path):
+    """Avoid delaying first-start update status behind slower background work."""
+    svc = _svc(tmp_path)
+    tasks = svc.scheduler.status()
+    assert tasks and tasks[0]["name"] == "UpdateCheck"
+    assert len([task for task in tasks if task["name"] == "UpdateCheck"]) == 1
+
+
+def test_channel_change_refresh_uses_manual_check_semantics(tmp_path, monkeypatch):
+    """Settings-triggered refresh must not notify, apply, or change Docker."""
+    svc = _svc(tmp_path)
+    observed = []
+
+    class InlineThread:
+        """Execute the isolated worker inline for deterministic test evidence."""
+
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            assert name == "romarr-update-status-refresh" and daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("romarr.app.threading.Thread", InlineThread)
+    monkeypatch.setattr(svc, "check_update",
+                        lambda *, manual=False: observed.append(manual)
+                        or {"ok": True, "state": "current"})
+    svc.request_informational_update_check()
+    assert observed == [True]
+
+    svc.store.settings["update_check"] = False
+    svc.request_informational_update_check()
+    assert observed == [True]
