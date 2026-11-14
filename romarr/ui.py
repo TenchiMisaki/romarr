@@ -6289,18 +6289,30 @@ RENDER.update=async()=>{
        +'<div class="update-disclosure-body"><pre class="update-code">'+esc(d.update_log)+'</pre></div></details>'
       :'')
     +'</div>';
+  const onThisUpdate=()=>(
+    (typeof activePage!=='string'||activePage==='update')
+    &&(viewVersion===null||pageVersion===viewVersion));
   const say=(t,bad,name)=>{const msg=name==='PluginUpdate'?$('#up-plugin-msg'):$('#up-msg');
     if(msg)msg.innerHTML='<div class="panel-note '+(bad?'panel-warn':'')+'">'+esc(t)+'</div>';};
   const run=(name,fn)=>async e=>{
-    const originalText=e.target.textContent;
-    e.target.disabled=true; e.target.textContent='Running…';
+    if(!onThisUpdate())return;
+    const button=e.target, originalText=button.textContent;
+    button.disabled=true; button.textContent='Running…';
     say('Working…',false,name);
     try{
       const r=await fn();
+      if(!onThisUpdate())return;
       say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error,name);
-      setTimeout(()=>go('update'), r.ok&&name==='ApplyUpdate'?2500:0);
-    }catch(err){say('request failed: '+err, true,name);}
-    e.target.disabled=false; e.target.textContent=originalText;
+      setTimeout(()=>{if(onThisUpdate())go('update');},
+        r.ok&&name==='ApplyUpdate'?2500:0);
+    }catch(err){
+      if(!onThisUpdate())return;
+      say('request failed: '+err, true,name);
+    }finally{
+      if(onThisUpdate()){
+        button.disabled=false; button.textContent=originalText;
+      }
+    }
   };
   const cmd=(name)=>j('/api/v1/command',{method:'POST',
     headers:{'content-type':'application/json'},

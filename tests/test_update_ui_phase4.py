@@ -369,3 +369,59 @@ def test_update_nightly_does_not_fake_stable_comparison():
     ))["html"]
     assert '<h2 id="update-status-heading">Update status unknown</h2>' in html
     assert '<div class="update-version is-new">' not in html
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "refresh"])
+def test_update_command_completion_ignores_stale_page(outcome):
+    """Old plugin callbacks cannot update or refresh a new page generation."""
+    start = ui.JS.index("RENDER.update=async()=>")
+    stop = ui.JS.index("RENDER.logs=async()=>", start)
+    setup = _BASE.replace(
+        "const j=async()=>data;",
+        "let activePage='update',pageVersion=1,resolveCommand,rejectCommand;"
+        "const j=(url,opts)=>opts?new Promise((resolve,reject)=>"
+        "{resolveCommand=resolve;rejectCommand=reject;}):Promise.resolve(data);",
+    ).replace(
+        "const toast=()=>{},go=()=>{},confirm=()=>false;",
+        "const toast=()=>{},refreshes=[],timers=[];"
+        "const go=page=>refreshes.push(page),confirm=()=>false;"
+        "const setTimeout=fn=>timers.push(fn);",
+    )
+    script = setup + _helpers() + ui.JS[start:stop] + """
+(async()=>{
+  await RENDER.update();
+  const old=controls['#up-plugins'];
+  const pending=old.onclick({target:old});
+  if(data.case==='refresh'){
+    resolveCommand({ok:true,message:'Old result'});
+    await pending;
+    activePage='status';pageVersion++;
+    root.innerHTML='<div>Elsewhere</div>';
+    for(const fn of timers)fn();
+    console.log(JSON.stringify({html:root.innerHTML,refreshes}));
+    return;
+  }
+  activePage='status';pageVersion++;
+  root.innerHTML='<div>Elsewhere</div>';
+  activePage='update';pageVersion++;
+  for(const key of ['#up-plugin-msg','#up-msg','#up-plugins','#up-check'])
+    delete controls[key];
+  await RENDER.update();
+  const current=$('#up-plugin-msg'),before=current.innerHTML;
+  if(data.case==='failure')rejectCommand(new Error('Old failure'));
+  else resolveCommand({ok:true,message:'Old result'});
+  await pending;
+  for(const fn of timers)fn();
+  console.log(JSON.stringify({before,after:current.innerHTML,refreshes}));
+})().catch(error=>{console.error(String(error));process.exitCode=1});
+"""
+    payload = _payload(plugins={"sample": {
+        "source": "example/repo", "ref": "main", "commit": "abcdef123456",
+    }})
+    payload["case"] = outcome
+    result = json.loads(_node(script, payload))
+    assert result["refreshes"] == []
+    if outcome == "refresh":
+        assert result["html"] == "<div>Elsewhere</div>"
+    else:
+        assert result["before"] == result["after"]
