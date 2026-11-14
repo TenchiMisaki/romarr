@@ -211,15 +211,20 @@ def test_manual_nightly_status_uses_verified_revision_and_never_applies(
     assert not invoked
 
 
-def test_scheduled_nightly_check_never_applies_or_notifies(service, monkeypatch):
+@pytest.mark.parametrize(("expected_state", "replies"), [
+    ("current", (Reply({"sha": RUNNING}),)),
+    ("available", (Reply({"sha": LATEST}), _comparison())),
+])
+def test_scheduled_nightly_check_never_applies_or_notifies(
+        service, monkeypatch, expected_state, replies):
     """An enabled daily check cannot schedule a Nightly installation."""
-    get, _ = _response_get(Reply({"sha": RUNNING}))
+    get, _ = _response_get(*replies)
     monkeypatch.setattr(requests, "get", get)
     invoked = []
     monkeypatch.setattr(service, "apply_update", lambda **k: invoked.append(k))
     monkeypatch.setattr(service, "notify", lambda *a: invoked.append(a))
     result = service.check_update(manual=False)
-    assert result["state"] == "current"
+    assert result["state"] == expected_state
     assert not invoked
 
 
