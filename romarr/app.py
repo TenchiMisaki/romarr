@@ -6449,11 +6449,25 @@ class ROMarr:
         state = str(settings.get("_update_state") or "never_checked")
         reason = str(settings.get("_update_reason") or "not_checked")
         running_revision = ""
+        running_revision_source = ""
         if channel == "nightly":
             from . import nightly, selfupdate
+            build = get_build_info(VERSION)
+            install = selfupdate.detect()
             running_revision = nightly.running_main_revision(
-                get_build_info(VERSION), selfupdate.detect(),
+                build, install,
                 startup_git_revision=self._nightly_git_start_revision)
+            if running_revision:
+                # The trusted comparison accepts official image metadata or
+                # a clean official Git HEAD pinned to service startup.
+                if (build.get("type") == "development"
+                        and build.get("source_repository") == nightly.OFFICIAL_REPOSITORY
+                        and build.get("source_ref") == nightly.MAIN_REF
+                        and str(build.get("source_revision") or "").lower()
+                        == running_revision):
+                    running_revision_source = "build"
+                elif install.kind == "git":
+                    running_revision_source = "git"
         if state not in ("never_checked", "available", "current", "unknown", "error"):
             state, reason = "unknown", "invalid_saved_status"
         elif state != "never_checked" and (
@@ -6479,6 +6493,7 @@ class ROMarr:
                            if state == "error" else ""),
             "latest_version": settings.get("_latest_version") or "",
             "running_revision": running_revision,
+            "running_revision_source": running_revision_source,
             "latest_revision": (
                 settings.get("_update_latest_revision") or ""
                 if channel == "nightly" and state in ("current", "available") else ""),
