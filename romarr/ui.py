@@ -6325,9 +6325,10 @@ RENDER.update=async()=>{
     :'Build information is unavailable.';
   const nightly=check.channel==='nightly';
   const validSha=value=>typeof value==='string'&&/^[0-9a-f]{40}$/i.test(value);
-  const verifiedNightly=nightly&&isNightly
-    &&validSha(check.running_revision)
-    &&check.running_revision.toLowerCase()===build.source_revision.toLowerCase();
+  const verifiedNightly=nightly&&validSha(check.running_revision)
+    &&((isNightly
+        &&check.running_revision.toLowerCase()===build.source_revision.toLowerCase())
+      ||(inst.kind==='git'&&check.running_revision_source==='git'));
   const rawVerdict=updateVerdict(check);
   const resultVerified=nightly
     ?verifiedNightly&&validSha(check.latest_revision)
@@ -6449,9 +6450,10 @@ RENDER.update=async()=>{
       const result=await j('/api/v1/update').catch(()=>null);
       if(!onThisUpdate())return;
       const next=result&&result.check_status||{};
-      if(result&&(next.state==='current'||next.state==='available'
-          ||next.state==='error'
-          ||(next.last_attempt_at&&next.last_attempt_at!==previousAttempt))){
+      if(result&&!next.in_progress
+          &&(next.state==='current'||next.state==='available'
+            ||next.state==='error'
+            ||(next.last_attempt_at&&next.last_attempt_at!==previousAttempt))){
         RENDER.update();
         return;
       }
@@ -6470,8 +6472,8 @@ RENDER.update=async()=>{
       const r=await fn();
       if(!onThisUpdate())return;
       say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error,name);
-      setTimeout(()=>{if(onThisUpdate())go('update');},
-        r.ok&&name==='ApplyUpdate'?2500:0);
+      if(r.ok)setTimeout(()=>{if(onThisUpdate())go('update');},
+        name==='ApplyUpdate'?2500:0);
     }catch(err){
       if(!onThisUpdate())return;
       say('request failed: '+err, true,name);
