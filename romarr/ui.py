@@ -614,6 +614,169 @@ html:not(.sidebar-ready):has(#fallback-accent-2:checked){--accent:#c084fc;}
 html:not(.sidebar-ready):has(#fallback-accent-3:checked){--accent:#5aa2f0;}
 html:not(.sidebar-ready):has(#fallback-accent-4:checked){--accent:#2dd4bf;}
 html:not(.sidebar-ready):has(#fallback-accent-5:checked){--accent:#7bd88f;}
+
+/* System -> Update: v11 presentation, scoped to the existing route and theme tokens. */
+.update-view{min-width:0;width:100%;max-width:1120px;margin:0 auto}
+.update-hero{border:1px solid var(--accent-line);border-radius:18px;
+  background:radial-gradient(ellipse at 12% 5%,var(--accent-softer),transparent 65%),var(--surface);
+  padding:26px 28px;margin-bottom:20px;box-shadow:var(--shadow-2),var(--edge)}
+.update-hero-heading{display:flex;align-items:center;gap:18px;min-width:0}
+.update-hero-icon{display:grid;place-items:center;width:52px;height:52px;flex:none;
+  border-radius:17px;background:var(--accent-soft);border:1px solid var(--accent-line);
+  color:var(--accent-text);font-size:34px;font-weight:600}
+.update-hero h2{font-size:clamp(22px,2.4vw,28px);letter-spacing:-.025em;
+  line-height:1.16;font-weight:700;overflow-wrap:anywhere}
+.update-hero-summary{margin-top:6px;font-size:13px;line-height:1.55;color:var(--fg-2)}
+.update-hero-time{margin-top:5px;color:var(--dim);font-size:12px}
+.update-hero-content{display:grid;grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;gap:24px;margin-top:22px}
+.update-versions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px;min-width:0}
+.update-version{min-width:0;border:1px solid var(--line);border-radius:13px;
+  background:var(--surface-2);padding:15px 19px}
+.update-version dt{font-size:12.5px;color:var(--fg-2);margin-bottom:4px}
+.update-version dd{font-size:clamp(23px,2.5vw,32px);font-weight:700;
+  line-height:1.25;overflow-wrap:anywhere}
+.update-version.is-new dd{color:var(--accent-text)}
+.update-hero-actions{display:flex;flex-direction:column;gap:9px;min-width:176px;
+  border-left:1px solid var(--line);padding-left:21px}
+.update-hero-actions .btn{min-height:44px;white-space:normal;text-align:center}
+.update-safe-hint{color:var(--dim);font-size:11px;line-height:1.45;max-width:210px}
+.update-card{padding:21px 25px;margin-bottom:16px}
+.update-card h3{font-size:18px;margin-bottom:12px}
+.update-rows{margin:0;border-top:1px solid var(--line-soft)}
+.update-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  align-items:center;gap:16px;padding:13px 3px;border-bottom:1px solid var(--line-soft);
+  min-width:0}
+.update-row:last-child{border-bottom:0}
+.update-row dt{font-size:13px;font-weight:550;color:var(--fg)}
+.update-row dd{min-width:0;margin:0;display:flex;align-items:center;gap:8px;
+  flex-wrap:wrap;color:var(--fg-2);font-size:12.5px;overflow-wrap:anywhere}
+.update-state{display:inline-flex;align-items:center;justify-content:center;
+  border-radius:999px;padding:4px 11px;border:1px solid var(--line);
+  background:var(--surface-2);font-size:12px;color:var(--fg);font-weight:600;
+  white-space:nowrap}
+.update-state.is-on{color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,var(--surface));
+  border-color:color-mix(in srgb,var(--ok) 30%,var(--line))}
+.update-row-detail{font-size:12px;line-height:1.5;color:var(--dim)}
+.update-section-note{font-size:12px;color:var(--dim);margin-top:12px}
+.update-section-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px}
+.update-section-actions .btn{min-height:39px}
+.update-result{flex-basis:100%;min-width:0}
+.update-disclosure{padding:0;overflow:hidden}
+.update-disclosure>summary{display:flex;align-items:center;gap:12px;min-height:62px;
+  padding:16px 24px;cursor:pointer;list-style:none;font-size:16px;
+  font-weight:650;color:var(--fg)}
+.update-disclosure>summary::-webkit-details-marker{display:none}
+.update-disclosure>summary::before{content:"+";display:grid;place-items:center;
+  width:25px;height:25px;border-radius:7px;border:1px solid var(--line);
+  color:var(--accent-text);font-size:18px;line-height:1}
+.update-disclosure[open]>summary::before{content:"−"}
+.update-disclosure>summary:focus-visible{outline:2px solid var(--accent-text);outline-offset:-4px}
+.update-disclosure-body{border-top:1px solid var(--line-soft);padding:17px 24px 22px;
+  color:var(--fg-2);font-size:12.5px;line-height:1.6}
+.update-disclosure-body .help{margin:0 0 10px}
+.update-code{margin:10px 0 0;padding:13px 15px;background:var(--bg);
+  border:1px solid var(--line-soft);border-radius:9px;color:var(--fg-2);
+  font:12px/1.65 ui-monospace,Menlo,Consolas,monospace;
+  white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto}
+.update-plugin-table{width:100%;table-layout:fixed}
+.update-plugin-table td,.update-plugin-table th{overflow-wrap:anywhere;word-break:break-word}
+.update-plugin-table td:first-child{font-weight:650;color:var(--fg)}
+.update-plugin-table th:nth-child(1){width:21%}
+.update-plugin-table th:nth-child(2){width:42%}
+.update-plugin-table th:nth-child(3){width:20%}
+.update-plugin-table th:nth-child(4){width:17%}
+.update-plugin-table code{font-size:11.5px}
+@media(max-width:1020px){
+  .update-hero-content{grid-template-columns:1fr;gap:15px}
+  .update-hero-actions{flex-direction:row;align-items:center;flex-wrap:wrap;
+    border-left:0;border-top:1px solid var(--line);padding:16px 0 0}
+  .update-safe-hint{max-width:none}
+}
+@media(max-width:700px){
+  .update-hero{padding:19px 17px;border-radius:15px}
+  .update-hero-icon{width:55px;height:55px;font-size:27px;border-radius:13px}
+  .update-hero-heading{gap:12px}
+  .update-hero h2{font-size:24px}
+  .update-hero-content{margin-top:17px}
+  .update-version{padding:12px 13px}
+  .update-version dd{font-size:25px}
+  .update-card{padding:16px 17px}
+  .update-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:9px}
+  .update-disclosure{padding:0}
+  .update-disclosure>summary{padding:15px 16px}
+  .update-disclosure-body{padding:15px 17px 19px}
+}
+@media(max-width:440px){
+  .update-versions{grid-template-columns:1fr}
+  .update-hero-actions{display:grid;grid-template-columns:minmax(0,1fr)}
+  .update-hero-actions .btn{width:100%}
+  .update-row{grid-template-columns:1fr;gap:5px}
+  .update-plugin-table thead{display:none}
+  .update-plugin-table,.update-plugin-table tbody,.update-plugin-table tr{display:block}
+  .update-plugin-table tr{border:1px solid var(--line);border-radius:10px;
+    padding:7px 11px;margin:0 0 10px;background:var(--surface-2)}
+  .update-plugin-table tr:last-child{margin-bottom:0}
+  .update-plugin-table td{display:grid;grid-template-columns:70px minmax(0,1fr);
+    gap:8px;padding:8px 0;border-bottom:1px solid var(--line-soft)}
+  .update-plugin-table td::before{content:attr(data-label);color:var(--dim);
+    font-size:11px;font-weight:550}
+  .update-plugin-table td:last-child{border:0}
+}
+
+/* Structured installation settings and a neutral ROM Hub plugins table. */
+.update-hero-primary{min-width:0}
+.update-build-meta{display:flex;align-items:center;flex-wrap:wrap;gap:7px 20px;
+  padding:12px 2px 0;font-size:12.5px;color:var(--fg-2)}
+.update-build-meta b,.update-build-meta code{color:var(--fg)}
+.update-build-note{font-size:12px;color:var(--dim);margin-top:4px}
+.update-install-table-wrap,.update-plugin-table-wrap{border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.update-install-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px}
+.update-install-table th{padding:10px 13px;text-align:left;background:var(--surface-2);
+ color:var(--dim);font-size:11px;font-weight:700;text-transform:uppercase;
+ letter-spacing:.06em;border-bottom:1px solid var(--line)}
+.update-install-table th:nth-child(1){width:30%}
+.update-install-table th:nth-child(2){width:18%}
+.update-install-table th:nth-child(3){width:52%}
+.update-install-table td{padding:13px;vertical-align:middle;border-bottom:1px solid var(--line-soft);overflow-wrap:anywhere}
+.update-install-table tr:last-child td{border:0}
+.update-install-table td:first-child{color:var(--fg);font-weight:620}
+.update-install-table td:last-child{font-size:12.5px;color:var(--fg-2);line-height:1.5}
+.update-plugin-card{border-color:var(--line);background:var(--surface)}
+.update-plugin-heading{display:flex;align-items:center;justify-content:space-between;
+ flex-wrap:wrap;gap:12px;margin-bottom:13px}
+.update-plugin-heading h3{margin:0}
+.update-plugin-heading .btn{min-height:39px}
+.update-plugin-table{border-collapse:collapse}
+.update-plugin-table th{padding:10px 12px;background:var(--surface-2);font-size:11px;
+ text-transform:uppercase;letter-spacing:.06em;color:var(--dim);text-align:left;
+ border-bottom:1px solid var(--line)}
+.update-plugin-table td{padding:12px;border-bottom:1px solid var(--line-soft)}
+.update-plugin-table tr:last-child td{border:0}
+.update-plugin-card .update-result{margin-top:10px}
+@media(max-width:700px){
+ .update-install-table-wrap,.update-plugin-table-wrap{border:0;overflow:visible}
+ .update-install-table thead{display:none}
+ .update-install-table,.update-install-table tbody,.update-install-table tr{display:block}
+ .update-install-table tr{border:1px solid var(--line);border-radius:10px;
+  padding:6px 12px;margin-bottom:10px;background:var(--surface-2)}
+ .update-install-table td{display:grid;grid-template-columns:68px minmax(0,1fr);
+  gap:9px;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+ .update-install-table td:before{content:attr(data-label);color:var(--dim);font-size:11px}
+ .update-install-table td:last-child{border:0}
+}
+@media(max-width:440px){
+ .update-install-table tr{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:0 10px}
+ .update-install-table td{display:block;padding:8px 0}
+ .update-install-table td:before{display:none}
+ .update-install-table td:first-child{grid-column:1;align-self:center}
+ .update-install-table td:nth-child(2){grid-column:2;align-self:center}
+ .update-install-table td:last-child{grid-column:1/-1;padding-top:9px;
+  border-top:1px solid var(--line-soft);border-bottom:0}
+ .update-plugin-heading .btn{width:100%}
+}
+
+
 """
 
 
@@ -6018,74 +6181,138 @@ RENDER.update=async()=>{
   if((typeof activePage==='string'&&activePage!=='update')
       ||(viewVersion!==null&&pageVersion!==viewVersion))return;
   if(!d){$('#page').innerHTML='<div class="panel-note panel-warn">Could not read update status.</div>';return;}
-  const inst=d.install||{}, st=d.settings||{}, verdict=updateVerdict(d.check_status);
-  const kindLabel={git:'git checkout (self-update possible)',
-    docker:'container image (updates come from the host)',
-    none:'unknown install shape'}[inst.kind]||inst.kind;
-  const badge=(on)=>on
-    ?'<span class="pill" style="background:var(--ok);color:#08210d">ON</span>'
-    :'<span class="pill">off</span>';
+  const inst=d.install||{}, st=d.settings||{}, check=d.check_status||{};
+  const build=d.build||{};
+  const isNightly=build.type==='development'
+    &&build.source_ref==='refs/heads/main'
+    &&build.source_repository==='BlizzHacker/romarr'
+    &&typeof build.source_revision==='string'
+    &&/^[0-9a-f]{40}$/i.test(build.source_revision);
+  const buildType=build.type==='release'?'Release':isNightly?'Nightly'
+    :build.type==='development'?'Other build':'Unknown';
+  const buildNote=buildType==='Release'?'Built from a published release.'
+    :isNightly?'Built from ROMarr’s main branch.'
+    :buildType==='Other build'?'Built from another source revision.'
+    :'Build information is unavailable.';
+  const rawVerdict=updateVerdict(d.check_status);
+  const verdict=(build.type==='development'||(st.update_channel||'stable')!=='stable')
+      &&['available','current'].includes(rawVerdict.state)
+    ?{state:'unknown',note:'This build or channel cannot be compared with published releases.'}
+    :rawVerdict;
+  const kindLabel={git:'Git / source',docker:'Docker',none:'Unknown'}[inst.kind]||inst.kind||'Unknown';
+  const titles={available:'Update available',current:"You're up to date",
+    never_checked:'Not checked yet',unknown:'Update status unknown',
+    error:"Couldn't check for updates"};
+  const title=titles[verdict.state]||'Update status unknown';
+  const compared=verdict.state==='available'||verdict.state==='current';
+  const stamp=compared?check.last_success_at:check.last_attempt_at;
+  const stampLabel=compared?'Last successful check':'Last check attempt';
+  const when=stamp?stampLabel+': '+(typeof fmtDateTime==='function'
+    ?fmtDateTime(stamp):String(stamp)):'No completed check recorded';
+  const autoState=inst.kind==='docker'?'N/A'
+    :st.auto_update_effective===true?'On':st.auto_update?'Unavailable':'Off';
+  const state=(name,on)=>'<span class="update-state'+(on?' is-on':'')+'">'+name+'</span>';
   const plugins=Object.entries(d.plugins||{});
   $('#page').innerHTML=
-    '<div class="card"><h3>This install</h3>'
-    +'<div class="st">'
-    +'<div><b>'+esc(d.running_version||'unknown')+'</b><span>Running</span></div>'
-    +'<div><b>'+esc(d.latest_version||'—')+'</b><span>'+(verdict.state==='available'||verdict.state==='current'?'Latest on GitHub':'Last known release')+'</span></div>'
-    +'<div><b>'+(verdict.state==='available'?'<span style="color:var(--warn)">yes</span>':esc(verdict.label))+'</b><span>Update available</span></div>'
-    +'</div>'
-    +'<p class="help">Install shape: <b>'+esc(kindLabel)+'</b>'
-    +(inst.branch?' — branch <code>'+esc(inst.branch)+'</code> at <code>'+esc(inst.commit||'')+'</code>':'')+'</p>'
-    +buildIdentityLine(d.build)
-    +'<p class="help">Update check: '+esc(verdict.note)+'</p>'
-    +'</div>'
-    +'<div class="card"><h3>Automatic updates</h3>'
-    +'<p class="help">Settings live under Settings → General; this page shows and acts. '
-    +'Check now only checks for updates. Automatic application depends on this installation\'s verified capability; '
-    +'a Docker image must be updated through its host deployment.</p>'
-    +'<table><tbody>'
-    +'<tr><td>Daily update check</td><td>'+badge(st.update_check)+'</td></tr>'
-    +'<tr><td>Auto-apply ROMarr updates</td><td>'+badge(st.auto_update)
-    +' <span class="help">'+esc(autoApplyDetail(st,inst))+'</span></td></tr>'
-    +'<tr><td>Channel</td><td>'+esc(st.update_channel||'stable')+'</td></tr>'
-    +'<tr><td>Auto-update ROM Hub plugins</td><td>'+badge(st.auto_update_plugins)+'</td></tr>'
-    +'</tbody></table>'
-    +'<div class="row" style="gap:8px;margin-top:10px">'
-    +'<button class="btn ghost" id="up-check">Check now</button>'
-    +(inst.can_apply?'<button class="btn" id="up-apply">Update now</button>':'')
-    +(plugins.length?'<button class="btn ghost" id="up-plugins">Update plugins now</button>':'')
-    +'</div>'
-    +'<div id="up-msg" style="margin-top:10px"></div>'
-    +'</div>'
+    '<div class="update-view">'
+    +'<section class="update-hero" aria-labelledby="update-status-heading">'
+    +'<div class="update-hero-heading"><div class="update-hero-icon" aria-hidden="true">↻</div>'
+    +'<div><h2 id="update-status-heading">'+esc(title)+'</h2>'
+    +'<p class="update-hero-summary">'+esc(verdict.note)+'</p>'
+    +'<p class="update-hero-time">'+esc(when)+'</p></div></div>'
+    +'<div class="update-hero-content">'
+    +'<div class="update-hero-primary"><dl class="update-versions">'
+    +'<div class="update-version"><dt>Installed version</dt><dd>'+esc(d.running_version||'unknown')+'</dd></div>'
+    +'<div class="update-version'+(verdict.state==='available'?' is-new':'')+'">'
+    +'<dt>'+(compared?'Latest on GitHub':'Last known release')+'</dt>'
+    +'<dd>'+esc(d.latest_version||'—')+'</dd></div></dl>'
+    +'<div class="update-build-meta"><span>Build type <b>'+esc(buildType)+'</b></span>'
+    +(isNightly?'<span>Source revision <code>'+esc(build.source_revision.slice(0,8))+'</code></span>':'')
+    +'</div><p class="update-build-note">'+esc(buildNote)+'</p></div>'
+    +'<div class="update-hero-actions"><button class="btn" id="up-check">Check for updates</button>'
+    +(inst.can_apply?'<button class="btn ghost" id="up-apply">Update now</button>':'')
+    +'<p class="update-safe-hint">Checks for updates only; does not install or restart.</p>'
+    +'<div id="up-msg" class="update-result" role="status" aria-live="polite"></div>'
+    +'</div></div></section>'
+    +'<section class="card update-card" aria-labelledby="update-install-heading">'
+    +'<h3 id="update-install-heading">About this installation</h3>'
+    +'<div class="update-install-table-wrap"><table class="update-install-table">'
+    +'<thead><tr><th scope="col">Setting</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead><tbody>'
+    +'<tr><td data-label="Setting">Installed using</td><td data-label="Status">'+state(esc(kindLabel),false)
+    +'</td><td data-label="Details">'+esc(inst.kind==='docker'?'Update ROMarr through your Docker host or container manager.'
+      :inst.kind==='git'?'This copy runs from source. Updates can be installed here when supported.'
+      :'ROMarr cannot tell how this copy was installed.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Update channel</td><td data-label="Status">'
+    +state(esc(st.update_channel==='nightly'?'Nightly':st.update_channel==='stable'?'Stable':'Unknown'),false)
+    +'</td><td data-label="Details">'+esc(st.update_channel==='nightly'?'Nightly update checks are not available yet.'
+      :st.update_channel==='stable'?'Checks for published ROMarr releases.'
+      :'The configured update channel could not be verified.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Install updates automatically</td><td data-label="Status">'
+    +state(esc(autoState),st.auto_update_effective===true)+'</td><td data-label="Details">'
+    +esc(inst.kind==='docker'?'ROMarr cannot update its own Docker image.'
+      :st.auto_update_effective===true?'Installs eligible updates after a scheduled check.'
+      :!st.auto_update?'ROMarr will not install updates automatically.'
+      :st.auto_update_reason==='update_check_disabled'?'Automatic update checks are turned off.'
+      :st.auto_update_reason==='nightly_revision_check_not_supported'?'Nightly automatic installation is not supported yet.'
+      :'Automatic installation is not available for this setup.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Check for updates automatically</td><td data-label="Status">'
+    +state(st.update_check===true?'On':st.update_check===false?'Off':'Unknown',st.update_check===true)
+    +'</td><td data-label="Details">'+esc(st.update_check===true?'Checks for new releases every day.'
+      :st.update_check===false?'Use Check for updates when you want to check.'
+      :'Automatic check preference is unavailable.')+'</td></tr>'
+    +'<tr><td data-label="Setting">Auto-update ROM Hub plugins</td><td data-label="Status">'
+    +state(st.auto_update_plugins===true?'On':st.auto_update_plugins===false?'Off':'Unknown',st.auto_update_plugins===true)
+    +'</td><td data-label="Details">'+esc(st.auto_update_plugins===true?'Keeps installed plugins up to date.'
+      :st.auto_update_plugins===false?'Plugin updates are manual.'
+      :'Automatic plugin update preference is unavailable.')+'</td></tr>'
+    +'</tbody></table></div>'
+    +'<p class="update-section-note">Change automatic-update preferences under Settings → General.</p>'
+    +'</section>'
     +((d.docker_guidance||[]).length
-      ?'<div class="card"><h3>How to update this container</h3><p class="help">'
-       +'ROMarr runs from an image. Verify the original host deployment before changing it:</p><pre style="font:12px/1.6 ui-monospace,Menlo,monospace;color:var(--dim)">'
-       +esc(d.docker_guidance.join('\n'))+'</pre></div>'
+      ?'<details class="card update-disclosure"><summary>Updating ROMarr with Docker</summary>'
+       +'<div class="update-disclosure-body"><p>Use the original host deployment method and preserve its configuration and rollback materials.</p>'
+       +'<pre class="update-code">'+esc(d.docker_guidance.join('\n'))+'</pre></div></details>'
       :'')
     +(plugins.length
-      ?'<div class="card"><h3>ROM Hub plugins</h3><table><thead><tr>'
-       +'<th>Plugin</th><th>Source</th><th>Ref</th><th>Commit</th></tr></thead><tbody>'
-       +plugins.map(([slug,info])=>'<tr><td>'+esc(slug)+'</td>'
-         +'<td style="color:var(--dim);font-size:12px">'+esc(info.source||'—')+'</td>'
-         +'<td>'+esc(info.ref||'latest')+'</td>'
-         +'<td><code>'+esc((info.commit||'').slice(0,8))+'</code></td></tr>').join('')
-       +'</tbody></table></div>'
+      ?'<section class="card update-card update-plugin-card" aria-labelledby="update-plugins-heading">'
+       +'<div class="update-plugin-heading"><h3 id="update-plugins-heading">ROM Hub plugins</h3>'
+       +'<button class="btn ghost" id="up-plugins">Update plugins now</button></div>'
+       +'<div class="update-plugin-table-wrap"><table class="update-plugin-table"><thead><tr><th>Plugin</th><th>Source</th><th>Ref</th><th>Commit</th></tr></thead><tbody>'
+       +plugins.map(([slug,raw])=>{const info=raw||{};return '<tr><td data-label="Plugin">'+esc(slug)+'</td>'
+         +'<td data-label="Source">'+esc(info.source||'—')+'</td>'
+         +'<td data-label="Ref">'+esc(info.ref||'latest')+'</td>'
+         +'<td data-label="Commit"><code>'+esc((info.commit||'').slice(0,8))+'</code></td></tr>';}).join('')
+       +'</tbody></table></div><div id="up-plugin-msg" class="update-result" role="status" aria-live="polite"></div></section>'
       :'')
     +((d.update_log||'')
-      ?'<div class="card"><h3>Last self-update log</h3>'
-       +'<pre style="font:12px/1.6 ui-monospace,Menlo,monospace;color:var(--dim);white-space:pre-wrap;max-height:40vh;overflow:auto">'
-       +esc(d.update_log)+'</pre></div>'
-      :'');
-  const msg=$('#up-msg');
-  const say=(t,bad)=>{msg.innerHTML='<div class="panel-note '+(bad?'panel-warn':'')+'">'+esc(t)+'</div>';};
+      ?'<details class="card update-disclosure"><summary>Last self-update log</summary>'
+       +'<div class="update-disclosure-body"><pre class="update-code">'+esc(d.update_log)+'</pre></div></details>'
+      :'')
+    +'</div>';
+  const onThisUpdate=()=>(
+    (typeof activePage!=='string'||activePage==='update')
+    &&(viewVersion===null||pageVersion===viewVersion));
+  const say=(t,bad,name)=>{const msg=name==='PluginUpdate'?$('#up-plugin-msg'):$('#up-msg');
+    if(msg)msg.innerHTML='<div class="panel-note '+(bad?'panel-warn':'')+'">'+esc(t)+'</div>';};
   const run=(name,fn)=>async e=>{
-    e.target.disabled=true; e.target.textContent='Running…';
-    say('Working…');
+    if(!onThisUpdate())return;
+    const button=e.target, originalText=button.textContent;
+    button.disabled=true; button.textContent='Running…';
+    say('Working…',false,name);
     try{
       const r=await fn();
-      say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error);
-      setTimeout(()=>go('update'), r.ok&&name==='ApplyUpdate'?2500:0);
-    }catch(err){say('request failed: '+err, true);}
-    e.target.disabled=false;
+      if(!onThisUpdate())return;
+      say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error,name);
+      setTimeout(()=>{if(onThisUpdate())go('update');},
+        r.ok&&name==='ApplyUpdate'?2500:0);
+    }catch(err){
+      if(!onThisUpdate())return;
+      say('request failed: '+err, true,name);
+    }finally{
+      if(onThisUpdate()){
+        button.disabled=false; button.textContent=originalText;
+      }
+    }
   };
   const cmd=(name)=>j('/api/v1/command',{method:'POST',
     headers:{'content-type':'application/json'},
