@@ -456,6 +456,8 @@ def test_git_path_environment_cannot_redirect_preflight(checkout, monkeypatch):
     "deploy@example.invalid:romarr.git",
     "example.invalid:romarr.git",
     "ssh://git@github.com/BlizzHacker/romarr.git",
+    "git+ssh://git@github.com/BlizzHacker/romarr.git",
+    "ssh+git://git@github.com/BlizzHacker/romarr.git",
 ])
 def test_ssh_remote_is_blocked_before_worker_reservation(
         checkout, monkeypatch, ssh_origin_url):
@@ -496,6 +498,7 @@ def test_ignored_operator_file_is_not_overwritten_by_fast_forward(checkout):
     git("fetch", "-q", "origin", cwd=repo)
     git("merge", "--ff-only", "origin/main", cwd=repo)
     (repo / "operator.txt").write_text("owner data\n")
+    assert git("check-ignore", "operator.txt", cwd=repo) == "operator.txt"
     (publisher / "operator.txt").write_text("upstream data\n")
     git("add", "-f", "operator.txt", cwd=publisher)
     git("commit", "-qm", "upstream now tracks formerly ignored path", cwd=publisher)
