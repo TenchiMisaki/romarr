@@ -756,6 +756,12 @@ def test_manual_update_check_reloads_success_and_failure_verdicts(outcome):
     start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
+        "const root={innerHTML:''}, controls={};",
+        "const controls={};"
+        "const root={_html:'',get innerHTML(){return this._html;},"
+        "set innerHTML(value){this._html=value;"
+        "delete controls['#up-msg'];delete controls['#up-check'];}};",
+    ).replace(
         "const j=async()=>data;",
         "let activePage='update',pageVersion=1,reads=0,posts=0;"
         "const j=async(url,opts)=>{if(opts){posts++;return data.command;}"
