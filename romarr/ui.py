@@ -6436,7 +6436,8 @@ RENDER.update=async()=>{
   // Observe the existing scheduled check without sending duplicate requests.
   const awaitFirstCheck=(check.in_progress||check.state==='never_checked'
     ||(check.state==='unknown'&&[
-      'build_or_channel_changed','nightly_build_changed','not_checked'
+      'build_or_channel_changed','nightly_build_changed',
+      'nightly_revision_not_checked','not_checked'
     ].includes(check.reason)));
   if(st.update_check===true&&awaitFirstCheck
       &&typeof activePage==='string'&&activePage==='update'
