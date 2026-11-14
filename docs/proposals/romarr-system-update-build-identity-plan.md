@@ -1,8 +1,8 @@
 # Backlog: ROMarr System → Update — Build Identity, Correct Update Status, and Docker Guidance
 
-## CURRENT — PR #23 focused PASS (2026-11-13 19:38 PST)
+## PR #23 Node PASS (Nov 13, 2026)
 
-Fork PR #23 `316d620`: portable Node 24.22.3; native pytest **2 pass/0 skip**, exit 0. `PR023-StatusRaceNode-Results-v02-PASS.zip` SHA-256 `0cb0b81d489d61f6af8bf345f5c0c50dc3db1ddc99338e5a6a61c852d8514942` CRC/manifest/case recount PASS; private JUnit/log not read. No separate `pr-pytest-cases-v1` export (format gap). Previous full suite **3,595 pass/62 skip** stands; two Node skips now passed separately. Fork CodeRabbit clean; upstream #182 still `d0164a9` with one unresolved finding. No deployment; owner approval required for promotion.
+At `316d620`, Node 24.22.3 focused pytest: **2 pass/0 skip**. ZIP CRC/manifest PASS; raw JUnit not read; separate case export absent. Full suite remains **3595 pass/62 skip**. Upstream #182 open; owner approval required for promotion.
 
 ## CURRENT — Part 4 submitted upstream as #182 (November 13, 2026 PST)
 
