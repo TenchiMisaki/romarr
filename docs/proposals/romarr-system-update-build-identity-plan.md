@@ -1,10 +1,5 @@
 # Backlog: ROMarr System → Update — Build Identity, Correct Update Status, and Docker Guidance
 
-## CURRENT — Upstream #182 review and fork #23 staging (November 13, 2026 PST)
-
-Upstream [#182](https://github.com/BlizzHacker/romarr/pull/182): exact `d0164a9` CI success; CodeRabbit found one open minor same-page Status race. Isolated fork review [#23](https://github.com/TenchiMisaki/romarr/pull/23) at `316d620` adds a render counter and two cases. Offline V8 reproduced both failures and passed both corrections; fork CodeRabbit completed with no actionable findings. Native pytest pending; no promotion, Docker or PR #21 change.
-
-
 ## CURRENT — Part 4 submitted upstream as #182 (November 13, 2026 PST)
 
 Owner created [official PR #182](https://github.com/BlizzHacker/romarr/pull/182): OPEN/non-draft, base `BlizzHacker/romarr:main`, head `TenchiMisaki/romarr:feature/system-update-ui-parity-pr4` at tested `d0164a9`. Exact five-file diff and PR body match fork #20. Upstream CodeRabbit started on that SHA; review is PENDING, and GitHub CI has no completed results at this readback. Preserve fork #20 until an actual upstream merge; separate UI PR #21 remains open.
