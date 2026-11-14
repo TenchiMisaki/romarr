@@ -810,6 +810,11 @@ class ROMarr:
             return read
 
         self.scheduler = Scheduler()
+        # Check update status before potentially slower scheduled work.
+        self.scheduler.add(
+            "UpdateCheck", "Check github.com for a newer ROMarr",
+            lambda: 86400 if self.store.settings.get("update_check", True) else 0,
+            lambda: self.check_update()["message"])
         self.scheduler.add(
             "ImportCompleted", "Import completed downloads",
             _minutes("auto_import_interval_minutes", gate="auto_import"),
@@ -833,10 +838,6 @@ class ROMarr:
             "ListSync", "Sync import lists into Wanted",
             _hours("list_sync_interval_hours"),
             lambda: self.list_sync()["message"])
-        self.scheduler.add(
-            "UpdateCheck", "Check github.com for a newer ROMarr",
-            lambda: 86400 if self.store.settings.get("update_check", True) else 0,
-            lambda: self.check_update()["message"])
         # Plugins update on the same daily clock, gated by their own setting:
         # each re-installs from the source its registry entry recorded, so
         # "latest from GitHub" is the Hub's own install path, not a git
@@ -6384,6 +6385,33 @@ class ROMarr:
             base = f"{scheme}://{request_host}"
         return f"{base}/oidc/callback" if base else "/oidc/callback"
 
+    def request_informational_update_check(self) -> None:
+        """Refresh after a channel change without installing or notifying.
+
+        Respect the update-check preference and never let a settings save
+        start an automatic Git update or a Docker image operation.
+        """
+        if not self.store.settings.get("update_check", True):
+            return
+
+        def check() -> None:
+            # Retry only a transient busy check. API failures are not retried.
+            for attempt in range(8):
+                if not self.store.settings.get("update_check", True):
+                    return
+                try:
+                    outcome = self.check_update(manual=True)
+                except Exception:
+                    log.exception("automatic update-status refresh failed")
+                    return
+                if not outcome.get("busy"):
+                    return
+                if attempt < 7:
+                    threading.Event().wait(2)
+
+        threading.Thread(target=check, name="romarr-update-status-refresh",
+                         daemon=True).start()
+
     def _record_update_check(self, state: str, reason: str, *,
                              checked_channel: str, latest: str = "",
                              error: str = "", checked_revision: str = "",
@@ -6421,11 +6449,25 @@ class ROMarr:
         state = str(settings.get("_update_state") or "never_checked")
         reason = str(settings.get("_update_reason") or "not_checked")
         running_revision = ""
+        running_revision_source = ""
         if channel == "nightly":
             from . import nightly, selfupdate
+            build = get_build_info(VERSION)
+            install = selfupdate.detect()
             running_revision = nightly.running_main_revision(
-                get_build_info(VERSION), selfupdate.detect(),
+                build, install,
                 startup_git_revision=self._nightly_git_start_revision)
+            if running_revision:
+                # The trusted comparison accepts official image metadata or
+                # a clean official Git HEAD pinned to service startup.
+                if (build.get("type") == "development"
+                        and build.get("source_repository") == nightly.OFFICIAL_REPOSITORY
+                        and build.get("source_ref") == nightly.MAIN_REF
+                        and str(build.get("source_revision") or "").lower()
+                        == running_revision):
+                    running_revision_source = "build"
+                elif install.kind == "git":
+                    running_revision_source = "git"
         if state not in ("never_checked", "available", "current", "unknown", "error"):
             state, reason = "unknown", "invalid_saved_status"
         elif state != "never_checked" and (
@@ -6451,6 +6493,7 @@ class ROMarr:
                            if state == "error" else ""),
             "latest_version": settings.get("_latest_version") or "",
             "running_revision": running_revision,
+            "running_revision_source": running_revision_source,
             "latest_revision": (
                 settings.get("_update_latest_revision") or ""
                 if channel == "nightly" and state in ("current", "available") else ""),
@@ -9722,7 +9765,15 @@ def make_handler(service: ROMarr):
                 # Serialize public settings writes with the updater launch.
                 try:
                     with service._lock:
+                        old_channel = str(service.store.settings.get(
+                            "update_channel") or "stable").lower()
+                        old_check_enabled = bool(service.store.settings.get(
+                            "update_check", True))
                         updated = service.store.update_settings(body)
+                        new_channel = str(service.store.settings.get(
+                            "update_channel") or "stable").lower()
+                        new_check_enabled = bool(service.store.settings.get(
+                            "update_check", True))
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 if any(str(k).startswith("oidc") or k == "_oidc_client_secret"
@@ -9735,6 +9786,9 @@ def make_handler(service: ROMarr):
                     # reload_dats both stores and applies it.
                     service.reload_dats(str(body.get("dat_path") or ""))
                 service.reload_policy()
+                if new_check_enabled and (
+                        new_channel != old_channel or not old_check_enabled):
+                    service.request_informational_update_check()
                 updated = service.safe_settings()
                 # A library path is only really changed once the running
                 # service files ROMs there, not once it is stored.

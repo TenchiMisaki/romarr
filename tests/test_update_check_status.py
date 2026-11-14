@@ -517,3 +517,100 @@ def test_changing_channel_after_record_does_not_reserve_notice(
     assert not notified
     assert svc.store.settings.get("_update_notified") != "1.8.2"
     assert svc.update_status()["check_status"]["state"] == "unknown"
+
+
+def test_update_status_check_runs_before_other_scheduled_jobs(tmp_path):
+    """Avoid delaying first-start update status behind slower background work."""
+    svc = _svc(tmp_path)
+    tasks = svc.scheduler.status()
+    assert tasks and tasks[0]["name"] == "UpdateCheck"
+    assert len([task for task in tasks if task["name"] == "UpdateCheck"]) == 1
+
+
+def test_channel_change_refresh_uses_manual_check_semantics(tmp_path, monkeypatch):
+    """Settings-triggered refresh must not notify, apply, or change Docker."""
+    svc = _svc(tmp_path)
+    observed = []
+
+    class InlineThread:
+        """Execute the isolated worker inline for deterministic test evidence."""
+
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+            assert name == "romarr-update-status-refresh" and daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("romarr.app.threading.Thread", InlineThread)
+    monkeypatch.setattr(svc, "check_update",
+                        lambda *, manual=False: observed.append(manual)
+                        or {"ok": True, "state": "current"})
+    svc.request_informational_update_check()
+    assert observed == [True]
+
+    svc.store.settings["update_check"] = False
+    svc.request_informational_update_check()
+    assert observed == [True]
+
+
+def test_nightly_status_exposes_verified_git_checkout_source(tmp_path, monkeypatch):
+    """A trusted startup-pinned Git checkout needs no generated image metadata."""
+    from romarr import nightly
+
+    svc = _svc(tmp_path)
+    sha = "a" * 40
+    svc.store.settings["update_channel"] = "nightly"
+    svc._nightly_git_start_revision = sha
+    env = selfupdate.Environment(
+        kind="git", repo=str(tmp_path), branch="main", commit=sha)
+    monkeypatch.setattr(selfupdate, "detect", lambda root=None: env)
+    monkeypatch.setattr("romarr.app.get_build_info",
+                        lambda _version: {"type": "unknown",
+                                          "source_revision": "",
+                                          "source_ref": "",
+                                          "source_repository": ""})
+    monkeypatch.setattr(nightly, "git_checkout_revision", lambda _env: sha)
+    svc._record_update_check(
+        "current", "nightly_revision_equal", checked_channel="nightly",
+        checked_revision=sha, latest_revision=sha)
+
+    result = svc.update_status()
+    check = result["check_status"]
+    assert result["build"]["type"] == "unknown"
+    assert result["install"]["kind"] == "git"
+    assert check["state"] == "current"
+    assert check["running_revision"] == sha
+    assert check["running_revision_source"] == "git"
+    assert check["latest_revision"] == sha
+
+    # A dirty or moved checkout invalidates the completed verdict at read time.
+    monkeypatch.setattr(nightly, "git_checkout_revision", lambda _env: "")
+    response = svc.update_status()
+    check = response["check_status"]
+    assert check["state"] == "unknown"
+    assert check["running_revision"] == ""
+    assert check["running_revision_source"] == ""
+    assert response["update_available"] is False
+
+
+def test_nightly_status_exposes_official_build_metadata_source(tmp_path, monkeypatch):
+    """Official image provenance remains independently verified without Git."""
+    svc = _svc(tmp_path)
+    sha = "b" * 40
+    svc.store.settings["update_channel"] = "nightly"
+    monkeypatch.setattr(selfupdate, "detect", lambda root=None:
+                        selfupdate.Environment(kind="docker", detail="image"))
+    monkeypatch.setattr("romarr.app.get_build_info", lambda _version: {
+        "type": "development", "source_repository": "BlizzHacker/romarr",
+        "source_ref": "refs/heads/main", "source_revision": sha,
+    })
+    svc._record_update_check(
+        "available", "nightly_newer_main", checked_channel="nightly",
+        checked_revision=sha, latest_revision="c" * 40)
+
+    check = svc.update_status()["check_status"]
+    assert check["state"] == "available"
+    assert check["running_revision_source"] == "build"
+    assert check["running_revision"] == sha
+    assert check["latest_revision"] == "c" * 40
