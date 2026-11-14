@@ -586,11 +586,12 @@ def test_nightly_status_exposes_verified_git_checkout_source(tmp_path, monkeypat
 
     # A dirty or moved checkout invalidates the completed verdict at read time.
     monkeypatch.setattr(nightly, "git_checkout_revision", lambda _env: "")
-    check = svc.update_status()["check_status"]
+    response = svc.update_status()
+    check = response["check_status"]
     assert check["state"] == "unknown"
     assert check["running_revision"] == ""
     assert check["running_revision_source"] == ""
-    assert check["update_available"] is False
+    assert response["update_available"] is False
 
 
 def test_nightly_status_exposes_official_build_metadata_source(tmp_path, monkeypatch):
