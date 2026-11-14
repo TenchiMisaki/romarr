@@ -2,7 +2,7 @@
 
 ## PR #23 Node PASS (Nov 13, 2026)
 
-At `316d620`, Node 24.22.3 focused pytest: **2 pass/0 skip**. ZIP CRC/manifest PASS; raw JUnit not read; separate case export absent. Full suite remains **3595 pass/62 skip**. Upstream #182 open; owner approval required for promotion.
+At `316d620`, Node 24.22.3 focused pytest: **2 pass/0 skip**. v03 case export PASS (2/2; CRC/hashes/recount); JUnit private; no rerun. Full suite remains **3595 pass/62 skip**. Upstream #182 open; owner approval required for promotion.
 
 ## CURRENT — Part 4 submitted upstream as #182 (November 13, 2026 PST)
 
