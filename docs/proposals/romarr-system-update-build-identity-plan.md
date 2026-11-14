@@ -1,5 +1,10 @@
 # Backlog: ROMarr System → Update — Build Identity, Correct Update Status, and Docker Guidance
 
+## CURRENT — Part 4 submitted upstream as #182 (November 13, 2026 PST)
+
+Owner created [official PR #182](https://github.com/BlizzHacker/romarr/pull/182): OPEN/non-draft, base `BlizzHacker/romarr:main`, head `TenchiMisaki/romarr:feature/system-update-ui-parity-pr4` at tested `d0164a9`. Exact five-file diff and PR body match fork #20. Upstream CodeRabbit started on that SHA; review is PENDING, and GitHub CI has no completed results at this readback. Preserve fork #20 until an actual upstream merge; separate UI PR #21 remains open.
+
+
 ## CURRENT — PR #20 exact-head native full-suite PASS (November 13, 2026, 17:49 PST)
 
 **Scope and observed evidence:** The owner uploaded the actual `PR020-SystemUpdatePart4-Results-v02-PASS.zip` as a standalone Results ZIP (not a folder wrapper). The independently opened **12,946-byte** archive has SHA-256 `0bfc04c2ab3387b87544fdb9dab6950ab141edc00180c2cfb4e7e3b0c1362117`; ZIP CRC, six-member safe-path/inventory check, all five manifest-member length and SHA-256 checks, and exact PR/repository/SHA/run-ID agreement **PASS**. The private original JUnit XML and raw log are retained on CT107 and their hashes are present in the summary, but their private bytes were not retrieved for independent raw-log recount. The anonymous `testcases.json` has **3,655 unique sequential ordinal cases**, independently recounted **3,595 passed / 60 skipped / 0 failed / 0 errors**, matching `summary.json` and `testcases.json` counts. The 60 skipped cases are genuine reported skips and are not silently reclassified as passed. Outcome list contains no test names, paths, parameters or traceback bodies.
