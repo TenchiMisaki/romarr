@@ -53,7 +53,7 @@ const toast=()=>{},go=()=>{},confirm=()=>false;
 
 def _update(payload: dict) -> dict:
     """Execute the real Update renderer, including its conditional controls."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     script = (_BASE + _helpers() + ui.JS[start:stop] + """
 RENDER.update().then(()=>console.log(JSON.stringify({
@@ -240,7 +240,7 @@ def test_stats_banner_handles_failed_and_mismatched_status():
 
 def test_update_ignores_late_api_response_after_navigation():
     """A previous page's fetch must not repaint an unrelated newer page."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
         "const j=async()=>data;",
@@ -374,7 +374,7 @@ def test_update_nightly_does_not_fake_stable_comparison():
 @pytest.mark.parametrize("outcome", ["success", "failure", "refresh"])
 def test_update_command_completion_ignores_stale_page(outcome):
     """Old plugin callbacks cannot update or refresh a new page generation."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
         "const j=async()=>data;",
@@ -546,7 +546,7 @@ def test_stats_nightly_banner_reports_revisions_not_release_versions():
 
 def test_update_page_observes_initial_check_without_posting_commands():
     """Observe the scheduled Nightly check and repaint without manual action."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
         "const j=async()=>data;",
@@ -593,7 +593,7 @@ def test_update_page_observes_initial_check_without_posting_commands():
 
 def test_update_page_automatic_observation_respects_disabled_schedule():
     """Do not poll or manually initiate checks when auto-check is disabled."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
         "const toast=()=>{},go=()=>{},confirm=()=>false;",
@@ -615,7 +615,7 @@ RENDER.update().then(()=>console.log(JSON.stringify({
 
 def test_update_page_abandons_old_poll_after_navigation():
     """Background status checks may not overwrite a different page."""
-    start = ui.JS.index("RENDER.update=async()=>")
+    start = ui.JS.index("let updatePollGeneration=0;")
     stop = ui.JS.index("RENDER.logs=async()=>", start)
     setup = _BASE.replace(
         "const toast=()=>{},go=()=>{},confirm=()=>false;",
