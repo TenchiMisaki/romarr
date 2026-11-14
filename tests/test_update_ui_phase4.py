@@ -638,3 +638,113 @@ def test_update_page_abandons_old_poll_after_navigation():
         settings={"update_check": True},
     )))
     assert result == {"scheduled": 1, "html": "<div>Another page</div>"}
+
+
+def test_verified_git_nightly_without_generated_build_metadata():
+    """Trust a verified Git result without changing build identity labeling."""
+    sha = "d" * 40
+    settings = {"update_channel": "nightly", "update_check": True}
+    check = {"state": "current", "channel": "nightly",
+             "running_revision": sha, "latest_revision": sha,
+             "running_revision_source": "git"}
+    data = _payload(
+        running_version="0.0.0+unknown", latest_version="1.8.1",
+        install={"kind": "git", "can_apply": True},
+        build={"type": "unknown", "source_revision": "",
+               "source_repository": "", "source_ref": ""},
+        check_status=check, settings=settings,
+    )
+    html = _update(data)["html"]
+    assert '<h2 id="update-status-heading">You\'re up to date</h2>' in html
+    assert "<dt>Installed version</dt><dd>Nightly · dddddddd</dd>" in html
+    assert "<dt>Latest on GitHub</dt><dd>dddddddd</dd>" in html
+    assert "Build type <b>Unknown</b>" in html
+    assert "Source revision <code>" not in html
+
+    # An unsigned result or a non-Git install cannot borrow Git provenance.
+    for variant in (
+        {**data, "check_status": {**check, "running_revision_source": ""}},
+        {**data, "install": {"kind": "docker", "can_apply": False}},
+    ):
+        unknown = _update(variant)["html"]
+        assert '<h2 id="update-status-heading">Update status unknown</h2>' in unknown
+        assert '<div class="update-version is-new">' not in unknown
+
+
+def test_active_check_does_not_reset_poll_limit_on_cached_current_status():
+    """An active request must not rerender or evade the 30-poll budget."""
+    start = ui.JS.index("let updatePollGeneration=0;")
+    stop = ui.JS.index("RENDER.logs=async()=>", start)
+    setup = _BASE.replace(
+        "const j=async()=>data;",
+        "let activePage='update',pageVersion=1,reads=0;"
+        "const j=async()=>{reads++;return data;};",
+    ).replace(
+        "const toast=()=>{},go=()=>{},confirm=()=>false;",
+        "const timers=[];const setTimeout=fn=>timers.push(fn);"
+        "const toast=()=>{},go=()=>{},confirm=()=>false;",
+    )
+    script = setup + _helpers() + ui.JS[start:stop] + """
+(async()=>{
+  await RENDER.update();
+  let polls=0;
+  while(timers.length&&polls<40){
+    await timers.shift()();
+    polls++;
+  }
+  console.log(JSON.stringify({
+    polls,reads,timers:timers.length,generation:updatePollGeneration
+  }));
+})().catch(err=>{console.error(String(err));process.exitCode=1});
+"""
+    sha = "e" * 40
+    result = json.loads(_node(script, _payload(
+        build={"type": "development", "source_ref": "refs/heads/main",
+               "source_repository": "BlizzHacker/romarr",
+               "source_revision": sha},
+        check_status={"state": "current", "channel": "nightly",
+                      "running_revision": sha, "latest_revision": sha,
+                      "in_progress": True},
+        settings={"update_channel": "nightly", "update_check": True},
+    )))
+    assert result == {"polls": 30, "reads": 31, "timers": 0, "generation": 1}
+
+
+def test_failed_update_command_keeps_error_visible_without_refresh():
+    """A rejected command must not erase its diagnostic by reloading the page."""
+    start = ui.JS.index("let updatePollGeneration=0;")
+    stop = ui.JS.index("RENDER.logs=async()=>", start)
+    setup = _BASE.replace(
+        "const j=async()=>data;",
+        "let activePage='update',pageVersion=1;"
+        "const j=async(url,opts)=>opts?data.failure:data.status;",
+    ).replace(
+        "const toast=()=>{},go=()=>{},confirm=()=>false;",
+        "const timers=[],navigation=[];"
+        "const setTimeout=fn=>timers.push(fn);"
+        "const toast=()=>{},go=page=>navigation.push(page),confirm=()=>true;",
+    )
+    script = setup + _helpers() + ui.JS[start:stop] + """
+(async()=>{
+  await RENDER.update();
+  const button=controls['#up-apply'];
+  if(typeof button?.onclick!=='function')throw Error('ApplyUpdate missing');
+  await button.onclick({target:button});
+  console.log(JSON.stringify({
+    error:controls['#up-msg'].innerHTML.includes('downloads are in flight'),
+    timers:timers.length,navigation:navigation.length,enabled:!button.disabled
+  }));
+})().catch(err=>{console.error(String(err));process.exitCode=1});
+"""
+    status = _payload(
+        check_status={"state": "current", "channel": "stable"},
+        install={"kind": "git", "can_apply": True},
+        settings={"update_channel": "stable", "update_check": True},
+    )
+    result = json.loads(_node(script, {
+        "status": status,
+        "failure": {"ok": False, "deferred": True,
+                    "error": "downloads are in flight; update deferred"},
+    }))
+    assert result == {"error": True, "timers": 0,
+                      "navigation": 0, "enabled": True}
