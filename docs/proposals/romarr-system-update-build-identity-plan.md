@@ -2,7 +2,7 @@
 
 ## PR #23 → #182 (Nov 13)
 
-`316d620`: Node 24 **2/2 PASS**, v03 cases valid (JUnit private); full **3595 pass/62 skip**. Approved non-force FF `d0164a9`→`316d620` advanced #182/#20; #23 auto-merged via base. Prior review resolved; CI pending. No upstream merge/deploy.
+`316d620`: Node 24 **2/2 PASS**, v03 cases valid (JUnit private); full **3595 pass/62 skip**. Approved non-force FF `d0164a9`→`316d620` advanced #182/#20; #23 auto-merged via base. Prior review resolved; Docker/Win CI PASS. No upstream merge/deploy.
 
 ## CURRENT — Part 4 submitted upstream as #182 (November 13, 2026 PST)
 
