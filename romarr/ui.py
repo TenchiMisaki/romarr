@@ -6471,9 +6471,23 @@ RENDER.update=async()=>{
     try{
       const r=await fn();
       if(!onThisUpdate())return;
-      say(r.message||(r.error?r.error:'done'), !r.ok&&!!r.error,name);
-      if(r.ok)setTimeout(()=>{if(onThisUpdate())go('update');},
-        name==='ApplyUpdate'?2500:0);
+      const message=r.message||(r.error?r.error:'done');
+      const failed=!r.ok&&!!r.error;
+      say(message,failed,name);
+      if(name==='UpdateCheck'&&!r.busy){
+        // A failed check changes the backend verdict to error. Refresh that
+        // verdict, but retain the diagnostic in the newly rendered view.
+        const nextGeneration=updatePollGeneration+1;
+        await RENDER.update();
+        if((typeof activePage!=='string'||activePage==='update')
+            &&(viewVersion===null||pageVersion===viewVersion)
+            &&updatePollGeneration===nextGeneration){
+          say(message,failed,name);
+        }
+      }else if(r.ok){
+        setTimeout(()=>{if(onThisUpdate())go('update');},
+          name==='ApplyUpdate'?2500:0);
+      }
     }catch(err){
       if(!onThisUpdate())return;
       say('request failed: '+err, true,name);
