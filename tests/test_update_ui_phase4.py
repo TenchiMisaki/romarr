@@ -748,3 +748,63 @@ def test_failed_update_command_keeps_error_visible_without_refresh():
     }))
     assert result == {"error": True, "timers": 0,
                       "navigation": 0, "enabled": True}
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_manual_update_check_reloads_success_and_failure_verdicts(outcome):
+    """A completed manual comparison must refresh without losing its message."""
+    start = ui.JS.index("let updatePollGeneration=0;")
+    stop = ui.JS.index("RENDER.logs=async()=>", start)
+    setup = _BASE.replace(
+        "const j=async()=>data;",
+        "let activePage='update',pageVersion=1,reads=0,posts=0;"
+        "const j=async(url,opts)=>{if(opts){posts++;return data.command;}"
+        "reads++;return reads===1?data.before:data.after;};",
+    ).replace(
+        "const toast=()=>{},go=()=>{},confirm=()=>false;",
+        "const timers=[],navigation=[];"
+        "const setTimeout=fn=>timers.push(fn);"
+        "const toast=()=>{},go=page=>navigation.push(page),confirm=()=>true;",
+    )
+    script = setup + _helpers() + ui.JS[start:stop] + """
+(async()=>{
+  await RENDER.update();
+  const before=root.innerHTML;
+  const button=controls['#up-check'];
+  if(typeof button?.onclick!=='function')throw Error('UpdateCheck missing');
+  await button.onclick({target:button});
+  console.log(JSON.stringify({
+    initiallyCurrent:before.includes("You're up to date"),
+    initiallyUnchecked:before.includes("Not checked yet"),
+    nowCurrent:root.innerHTML.includes("You're up to date"),
+    nowError:root.innerHTML.includes("Couldn't check for updates"),
+    message:controls['#up-msg'].innerHTML.includes(data.command.message),
+    reads,posts,timers:timers.length,navigation:navigation.length
+  }));
+})().catch(err=>{console.error(String(err));process.exitCode=1});
+"""
+    stable = {"update_channel": "stable", "update_check": False}
+    initial_state = "never_checked" if outcome == "success" else "current"
+    final_state = "current" if outcome == "success" else "error"
+    description = "up to date" if outcome == "success" else "GitHub denied this request"
+    result = json.loads(_node(script, {
+        "before": _payload(
+            check_status={"state": initial_state, "channel": "stable"},
+            settings=stable),
+        "after": _payload(
+            check_status={"state": final_state, "channel": "stable",
+                          "reason": "request_failed" if outcome == "failure"
+                          else "stable_release_version"},
+            settings=stable),
+        "command": {"ok": outcome == "success", "message": description,
+                    "error": description if outcome == "failure" else ""},
+    }))
+    expected = {
+        "initiallyCurrent": outcome == "failure",
+        "initiallyUnchecked": outcome == "success",
+        "nowCurrent": outcome == "success",
+        "nowError": outcome == "failure",
+        "message": True, "reads": 2, "posts": 1,
+        "timers": 0, "navigation": 0,
+    }
+    assert result == expected
