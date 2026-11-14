@@ -9748,12 +9748,17 @@ def make_handler(service: ROMarr):
                 if "_oidc_client_secret" in body and secret in ("", "********"):
                     body.pop("_oidc_client_secret")
                 # Serialize public settings writes with the updater launch.
-                old_channel = str(service.store.settings.get(
-                    "update_channel") or "stable").lower()
-                old_check_enabled = bool(service.store.settings.get("update_check", True))
                 try:
                     with service._lock:
+                        old_channel = str(service.store.settings.get(
+                            "update_channel") or "stable").lower()
+                        old_check_enabled = bool(service.store.settings.get(
+                            "update_check", True))
                         updated = service.store.update_settings(body)
+                        new_channel = str(service.store.settings.get(
+                            "update_channel") or "stable").lower()
+                        new_check_enabled = bool(service.store.settings.get(
+                            "update_check", True))
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 if any(str(k).startswith("oidc") or k == "_oidc_client_secret"
@@ -9766,9 +9771,6 @@ def make_handler(service: ROMarr):
                     # reload_dats both stores and applies it.
                     service.reload_dats(str(body.get("dat_path") or ""))
                 service.reload_policy()
-                new_channel = str(service.store.settings.get(
-                    "update_channel") or "stable").lower()
-                new_check_enabled = bool(service.store.settings.get("update_check", True))
                 if new_check_enabled and (
                         new_channel != old_channel or not old_check_enabled):
                     service.request_informational_update_check()
