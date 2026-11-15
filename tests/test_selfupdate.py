@@ -42,6 +42,16 @@ def test_desktop_bundle_uses_package_update_even_with_git_or_container_markers(
     assert "existing data and library folders" in env.detail
 
 
+def test_android_bundle_wins_over_desktop_marker(tmp_path, monkeypatch):
+    """Native Android source is never treated as a Windows or Git install."""
+    monkeypatch.setenv("ROMARR_ANDROID", "1")
+    monkeypatch.setenv("ROMARR_DESKTOP", "1")
+    env = selfupdate.detect(root=tmp_path)
+    assert env.kind == "none" and not env.can_apply
+    assert "Android app bundle" in env.detail
+    assert "Windows desktop" not in env.detail
+
+
 def test_non_linux_git_checkout_reports_manual_update_only(monkeypatch):
     """The detached updater is Linux-systemd-specific, not a Windows/macOS updater."""
     env = selfupdate.Environment(kind="git", repo="/some/checkout",
