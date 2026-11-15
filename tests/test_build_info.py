@@ -140,7 +140,7 @@ def _check_docker_build_steps(workflow):
         push = push_match.group(1) if push_match else ""
         load_match = re.search(r"(?m)^          load: (.+?)[ \t]*$", step)
         load = load_match.group(1) if load_match else ""
-        if push in {"true", "${{ github.event_name != 'pull_request' }}"}:
+        if push in {"true", "${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}"}:
             build_roles.add((selected_file, "publish"))
         if load == "true":
             build_roles.add((selected_file, "smoke"))
