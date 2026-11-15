@@ -68,7 +68,9 @@ class Environment:
 
     @property
     def can_apply(self) -> bool:
-        return self.kind == "git"
+        # The supported detached worker is a Linux systemd service. A Git
+        # checkout alone is not permission to launch it on Windows or macOS.
+        return self.kind == "git" and sys.platform == "linux"
 
 
 def _container_marker() -> bool:
@@ -93,6 +95,11 @@ def detect(root: Path | None = None) -> Environment:
     if os.environ.get("ROMARR_ANDROID") == "1" or sys.platform == "android":
         return Environment(kind="none", python=sys.executable or "",
                            detail="Android app bundle; update through your app distributor or install a newer APK")
+    # The native launcher already sets this marker for the bundled backend.
+    # Even if Git happens to be available, its code belongs to the package.
+    if os.environ.get("ROMARR_DESKTOP") == "1":
+        return Environment(kind="none", python=sys.executable or "",
+                           detail="Windows desktop package; install a verified newer ROMarr release ZIP and retain your existing data and library folders")
     python = sys.executable or shutil.which("python3") or "python3"
     if _container_marker():
         return Environment(kind="docker", python=python,
@@ -103,9 +110,12 @@ def detect(root: Path | None = None) -> Environment:
     if git and (root / ".git").exists():
         branch = _git(git, root, "rev-parse", "--abbrev-ref", "HEAD")
         commit = _git(git, root, "rev-parse", "--short", "HEAD")
+        detail = f"git checkout at {commit} on {branch}"
+        if sys.platform != "linux":
+            detail += ("; automatic updates require a Linux systemd service; "
+                       "update this checkout using your platform's installation procedure")
         return Environment(kind="git", repo=str(root), python=python,
-                           branch=branch, commit=commit,
-                           detail=f"git checkout at {commit} on {branch}")
+                           branch=branch, commit=commit, detail=detail)
     return Environment(kind="none", python=python,
                        detail="no git checkout and no container marker; "
                               "ROMarr cannot tell how it was installed")
