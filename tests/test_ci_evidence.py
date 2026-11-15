@@ -15,8 +15,9 @@ HEAD, BASE = "a" * 40, "b" * 40
 
 
 @pytest.fixture
-def args(tmp_path):
+def args(tmp_path, monkeypatch):
     """Give every test independent raw and public evidence destinations."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", ci.REPOSITORY)
     private = tmp_path / "private"
     private.mkdir()
     return SimpleNamespace(private=private, public=tmp_path / "public", root=tmp_path / "source",
@@ -122,7 +123,8 @@ def test_missing_runtime_is_environment_failure(args, monkeypatch):
     assert ci.read(args.private / "run.json") == dict(environment="FAIL", test="NOT_RUN", exit=None)
 
 
-def test_official_base_identity_and_full_sha_are_required():
+def test_official_base_identity_and_full_sha_are_required(monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", ci.REPOSITORY)
     data = dict(number=188, state="open", head=dict(sha=HEAD),
                 base=dict(sha=BASE, repo=dict(full_name="fork/romarr")))
     with pytest.raises(ValueError, match="source identity"):
@@ -190,3 +192,51 @@ def test_windows_desktop_workflow_sanitizes_native_proof_artifact():
     assert "Get-Content -LiteralPath $evidence\n" not in text, "Raw smoke-proof JSON should not be dumped to workflow logs"
     assert "Get-ChildItem -LiteralPath $proof -Filter '*error*'" not in text, "Raw error/traceback dumps should not be spewed to workflow logs"
 
+
+
+@pytest.mark.parametrize("repository", ["BlizzHacker/romarr", "TenchiMisaki/romarr"])
+def test_trusted_repository_metadata_uses_actual_owner(monkeypatch, repository):
+    """Fork workflows must resolve their own PR and branch, not upstream refs."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    assert ci.source_repository() == repository
+    observed = []
+    def fetch(path):
+        observed.append(path)
+        if path.startswith("pulls/"):
+            return {"number": 188, "state": "open", "head": {"sha": HEAD},
+                    "base": {"sha": BASE, "repo": {"full_name": repository}}}
+        return {"sha": HEAD}
+    assert ci.live("188", "", fetch=fetch) == {"head": HEAD, "base": BASE}
+    assert ci.live("", "refs/heads/main", fetch=fetch) == {"head": HEAD, "base": HEAD}
+    assert observed == ["pulls/188", "commits/refs/heads/main"]
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, *_):
+            return b'{}'
+    def urlopen(request, timeout):
+        assert request.full_url == "https://api.github.com/repos/" + repository + "/commits/main"
+        return Response()
+    monkeypatch.setattr(ci, "urlopen", urlopen)
+    assert ci.api("commits/main") == {}
+
+
+@pytest.mark.parametrize("repository", ["", "unknown/romarr", "BlizzHacker/romarr-other"])
+def test_untrusted_repository_rejected_before_metadata(monkeypatch, repository):
+    """Never silently fall back to upstream when workflow identity is absent or wrong."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    with pytest.raises(ValueError, match="unexpected workflow repository"):
+        ci.source_repository()
+    with pytest.raises(ValueError, match="unexpected workflow repository"):
+        ci.live("", "refs/heads/main", fetch=lambda _: {"sha": HEAD})
+
+
+def test_fork_pr_cannot_use_official_base_metadata(monkeypatch):
+    """A valid SHA from another repository must not pass provenance checks."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "TenchiMisaki/romarr")
+    data = {"number": 188, "state": "open", "head": {"sha": HEAD},
+            "base": {"sha": BASE, "repo": {"full_name": ci.REPOSITORY}}}
+    with pytest.raises(ValueError, match="source identity"):
+        ci.live("188", "", fetch=lambda _: data)
