@@ -19,15 +19,15 @@ it safe:
 How the update happens depends on how ROMarr is installed, detected rather
 than configured:
 
-  git      a clone (the LXC/bare-metal shape): fetch + ff-merge + pip +
-           service restart. This is the only shape that can truly
-           self-apply, because the code on disk is mutable.
+  git      a Linux, systemd-managed source clone: fetch + ff-merge + pip +
+           service restart. Other source installs require platform-managed
+           updates; Git metadata alone does not make the worker portable.
   docker   the ghcr image: the code is a read-only layer, so "updating"
            means re-pulling the image OUTSIDE the container. ROMarr says
            exactly that, with the commands, and does not pretend otherwise.
-  none     no git, no container marker: refuse with the reason. An update
-           that cannot explain how it would apply is an update that should
-           not run.
+  none     bundled native Windows/Android apps require an updated package;
+           an unidentified installation refuses with a clear reason. An
+           update that cannot safely explain how it applies must not run.
 
 Channels: `stable` fast-forwards to the latest release tag; `nightly`
 fast-forwards to origin/main. Both are GitHub's refs -- nothing is trusted
@@ -82,10 +82,11 @@ def _container_marker() -> bool:
 
 
 def detect(root: Path | None = None) -> Environment:
-    """Classify the install. Order matters: a git clone INSIDE a container is
-    still a container (the image owns the code on a real deployment); the
-    container markers are checked first so the answer matches how the operator
-    actually updates it."""
+    """Classify the install by native package, container, then Git checkout.
+
+    Native package markers take precedence; a Git clone inside a container is
+    still a container because the image owns its installed code.
+    """
     # sys.executable FIRST: it is the interpreter actually running ROMarr,
     # which on the common LXC/venv install is /opt/romarr/.venv/bin/python.
     # shutil.which("python3") would find the SYSTEM python3, and pip-installing
