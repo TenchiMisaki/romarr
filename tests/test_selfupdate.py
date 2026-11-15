@@ -22,9 +22,35 @@ def test_a_git_checkout_is_detected_as_self_updatable(tmp_path, monkeypatch):
     monkeypatch.setattr(selfupdate, "_git",
                         lambda git, cwd, *a: {"rev-parse": "abc1234"}.get(a[-1], "main")
                         if a else "")
+    # Evaluate the supported Linux worker path on any test host.
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
     env = selfupdate.detect(root=repo)
     assert env.kind == "git" and env.can_apply
     assert env.repo == str(repo)
+
+
+def test_desktop_bundle_uses_package_update_even_with_git_or_container_markers(
+        tmp_path, monkeypatch):
+    """Native Windows bundles must not offer in-place Git or Docker updates."""
+    monkeypatch.delenv("ROMARR_ANDROID", raising=False)
+    monkeypatch.setenv("ROMARR_DESKTOP", "1")
+    monkeypatch.setattr(selfupdate, "_container_marker", lambda: True)
+    (tmp_path / ".git").mkdir()
+    env = selfupdate.detect(root=tmp_path)
+    assert env.kind == "none" and not env.can_apply
+    assert "Windows desktop package" in env.detail
+    assert "existing data and library folders" in env.detail
+
+
+def test_non_linux_git_checkout_reports_manual_update_only(monkeypatch):
+    """The detached updater is Linux-systemd-specific, not a Windows/macOS updater."""
+    env = selfupdate.Environment(kind="git", repo="/some/checkout",
+                                 branch="main", commit="abc1234")
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(selfupdate.sys, "platform", platform)
+        assert not env.can_apply
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
+    assert env.can_apply
 
 
 def test_a_container_is_detected_and_refuses_self_update(tmp_path, monkeypatch):
@@ -325,6 +351,26 @@ def test_apply_update_launches_when_idle(tmp_path, monkeypatch):
     out = svc.apply_update()
     assert out["ok"] is True
     assert out["target"] == "refs/tags/v9.9.9"
+
+
+def test_non_linux_git_update_status_cannot_claim_automatic_apply(
+        tmp_path, monkeypatch):
+    """Saved auto-update preference is not effective without Linux systemd."""
+    svc = _svc(tmp_path)
+    svc.store.settings["auto_update"] = True
+    env = selfupdate.Environment(
+        kind="git", repo=str(tmp_path), branch="main",
+        commit="abc1234", detail="update using the platform's manual procedure")
+    monkeypatch.setattr(selfupdate, "detect", lambda root=None: env)
+    with monkeypatch.context() as context:
+        context.setattr(selfupdate.sys, "platform", "win32")
+        status = svc.update_status()
+        blocked = svc.apply_update()
+    assert status["settings"]["auto_update"] is True
+    assert status["settings"]["auto_update_effective"] is False
+    assert status["settings"]["auto_update_reason"] == "install_cannot_self_update"
+    assert blocked["ok"] is False
+    assert "manual procedure" in blocked["error"]
 
 
 def test_update_status_reports_the_shape_and_settings(tmp_path, monkeypatch):
