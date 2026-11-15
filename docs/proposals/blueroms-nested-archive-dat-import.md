@@ -1,5 +1,5 @@
 > **ROMarr ZIP-import backlog — DRAFT, DO NOT MERGE.**
-> This PR contains the complete investigation of multiple ZIP files in one download, ZIP-inside-ZIP support, DAT-verified game selection, and safe import. Read the full content below to resume the investigation. The same content is versioned in [the companion Markdown file](https://github.com/TenchiMisaki/romarr/blob/notes/blueroms-multi-archive-dat-import/docs/proposals/blueroms-nested-archive-dat-import.md).
+> This companion Markdown is the complete investigation of multiple ZIP files in one download, ZIP-inside-ZIP support, DAT-verified game selection, and safe import. The draft PR description is now a concise status index linking to this file, not a complete duplicate. Read the full companion and the latest verified PR/source state before resuming.
 > **No ZIP-import functionality has been implemented or tested by this PR.**
 
 
