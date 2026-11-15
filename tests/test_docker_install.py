@@ -147,6 +147,30 @@ def test_media_permissions_are_configurable_without_rewriting_downloads():
     assert "directories with mode `0775`" in guide
 
 
+
+def test_release_image_metadata_does_not_claim_main_latest_tag():
+    """Only the main-branch image may claim the moving latest tag."""
+    workflow = (ROOT / ".github" / "workflows" / "docker.yml").read_text(
+        encoding="utf-8"
+    )
+    standard = workflow.split("\n  image:\n", 1)[1].split(
+        "\n  image-browser:\n", 1
+    )[0]
+    metadata = standard.split("\n      - id: meta\n", 1)[1].split(
+        "\n      - name: Build the amd64 leg for a smoke test\n", 1
+    )[0]
+    active = "\n".join(
+        line for line in metadata.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert re.search(r"(?m)^          flavor: \\|\\s*$", active)
+    assert re.search(r"(?m)^            latest=false\\s*$", active)
+    assert re.search(
+        r"(?m)^            type=raw,value=latest,enable=\\{\\{is_default_branch\\}\\}\\s*$",
+        active,
+    )
+
+
 def test_the_live_image_proves_a_download_bind_mount_is_unchanged():
     workflow = (ROOT / ".github" / "workflows" / "docker.yml").read_text(
         encoding="utf-8"
