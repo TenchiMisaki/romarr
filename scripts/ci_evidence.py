@@ -23,6 +23,15 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 REPOSITORY = "BlizzHacker/romarr"
+TRUSTED_REPOSITORIES = frozenset((REPOSITORY, "TenchiMisaki/romarr"))
+
+
+def source_repository():
+    """Only use GitHub metadata for explicitly trusted workflow repositories."""
+    value = os.environ.get("GITHUB_REPOSITORY", "")
+    if value not in TRUSTED_REPOSITORIES:
+        raise ValueError("unexpected workflow repository")
+    return value
 STATES = ("passed", "failed", "error", "skipped")
 FILES = {"summary.json", "cases.json"}
 STRUCTURAL = [f"tests/test_{name}.py" for name in (
@@ -57,18 +66,19 @@ def api(path):
     token = os.environ.get("GH_TOKEN")
     if token:
         headers["Authorization"] = "Bearer " + token
-    request = Request("https://api.github.com/repos/" + REPOSITORY + "/" + path, headers=headers)
+    request = Request("https://api.github.com/repos/" + source_repository() + "/" + path, headers=headers)
     with urlopen(request, timeout=15) as response:
         return json.load(response)
 
 
 def live(pr, ref, fetch=api):
     """Resolve official base identity and immutable PR head/base, or one ref."""
+    repository = source_repository()
     if pr:
         if not re.fullmatch(r"[1-9][0-9]{0,6}", pr):
             raise ValueError("invalid PR")
         data = fetch("pulls/" + pr)
-        if (data["base"]["repo"]["full_name"] != REPOSITORY
+        if (data["base"]["repo"]["full_name"] != repository
                 or data["number"] != int(pr) or data["state"] != "open"):
             raise ValueError("unexpected source identity")
         return {"head": sha(data["head"]["sha"]), "base": sha(data["base"]["sha"])}
@@ -142,8 +152,7 @@ def collect(path):
 
 def pin(args):
     """Save the pre-test official source snapshot after checking exact checkout."""
-    if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
-        raise ValueError("unexpected workflow repository")
+    source_repository()
     target = live(args.pr, args.ref)
     if target["head"] != sha(args.expected) or not clean(args.root, target["head"]):
         raise ValueError("source changed before tests")
@@ -175,7 +184,7 @@ def finalize(args):
     """Publish sanitized accounting and independently verify the live source."""
     target = read(args.private / "pin.json")
     args.public.mkdir(parents=True, exist_ok=False)
-    summary = {"schema": 1, "repository": REPOSITORY, "tested_head": sha(target["head"]),
+    summary = {"schema": 1, "repository": source_repository(), "tested_head": sha(target["head"]),
                "tested_base": sha(target["base"]), "scope": args.scope,
                "environment": "FAIL", "test": "NOT_RUN", "collection": "FAIL",
                "source": "STALE_OR_UNVERIFIED", "exit": None, "counts": None}
