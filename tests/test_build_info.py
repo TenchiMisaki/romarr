@@ -263,7 +263,7 @@ def test_docker_build_step_validator_rejects_misconfigured_steps():
         )),
         "non-standard Dockerfile": bad_dockerfile,
         "push disabled": workflow.replace(
-            "push: ${{ github.event_name != 'pull_request' }}", "push: false", 1
+            "push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}", "push: false", 1
         ),
     }
     for label, changed in bad_cases.items():
