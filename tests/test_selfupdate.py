@@ -354,6 +354,8 @@ def test_apply_update_launches_when_idle(tmp_path, monkeypatch):
                                  python="python3", branch="main",
                                  commit="abc", service="romarr")
     monkeypatch.setattr(selfupdate, "detect", lambda root=None: env)
+    # This test exercises the supported Linux systemd update path on any host.
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
     monkeypatch.setattr(selfupdate, "launch",
                         lambda e, target: {"ok": True, "target": target,
                                            "message": "started"})
