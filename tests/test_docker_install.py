@@ -163,10 +163,10 @@ def test_release_image_metadata_does_not_claim_main_latest_tag():
         line for line in metadata.splitlines()
         if not line.lstrip().startswith("#")
     )
-    assert re.search(r"(?m)^          flavor: \\|\\s*$", active)
-    assert re.search(r"(?m)^            latest=false\\s*$", active)
+    assert re.search(r"(?m)^          flavor: \|\s*$", active)
+    assert re.search(r"(?m)^            latest=false\s*$", active)
     assert re.search(
-        r"(?m)^            type=raw,value=latest,enable=\\{\\{is_default_branch\\}\\}\\s*$",
+        r"(?m)^            type=raw,value=latest,enable=\{\{is_default_branch\}\}\s*$",
         active,
     )
 
