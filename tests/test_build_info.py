@@ -140,7 +140,8 @@ def _check_docker_build_steps(workflow):
         push = push_match.group(1) if push_match else ""
         load_match = re.search(r"(?m)^          load: (.+?)[ \t]*$", step)
         load = load_match.group(1) if load_match else ""
-        if push in {"true", "${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}"}:
+        if push and push != "false":
+            assert push == "${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}", "Docker publishing must be guarded to upstream"
             build_roles.add((selected_file, "publish"))
         if load == "true":
             build_roles.add((selected_file, "smoke"))
@@ -169,7 +170,7 @@ def test_docker_build_step_validator_rejects_misconfigured_steps():
         with:
           context: .
           file: Dockerfile.browser
-          push: true
+          push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}
           build-args: |
             ROMARR_BUILD_KIND=${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'development' }}
             ROMARR_SOURCE_REF=${{ github.ref }}
@@ -211,8 +212,8 @@ def test_docker_build_step_validator_rejects_misconfigured_steps():
             extra.replace("      - if: ${{ always() }}", "      - name: Fixture", 1)
             .replace("          file: Dockerfile.browser",
                      f"          file: {dockerfile}", 1)
-            .replace("          push: true",
-                     "          push: true" if publish else "          load: true", 1)
+            .replace("          push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}",
+                     "          push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}" if publish else "          load: true", 1)
         )
 
     fixture = "".join(
@@ -264,6 +265,16 @@ def test_docker_build_step_validator_rejects_misconfigured_steps():
         "non-standard Dockerfile": bad_dockerfile,
         "push disabled": workflow.replace(
             "push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}", "push: false", 1
+        ),
+        "unguarded publish": workflow.replace(
+            "push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}", "push: true", 1
+        ),
+        "unguarded added publish": with_extra(extra.replace(
+            "push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}", "push: true", 1
+        )),
+        "wrong repository publish": workflow.replace(
+            "push: ${{ github.repository == 'BlizzHacker/romarr' && github.event_name != 'pull_request' }}",
+            "push: ${{ github.repository == 'TenchiMisaki/romarr' && github.event_name != 'pull_request' }}", 1
         ),
     }
     for label, changed in bad_cases.items():
