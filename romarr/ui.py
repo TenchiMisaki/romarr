@@ -3449,8 +3449,10 @@ RENDER.ecosystem=async()=>{
 const updateVerdict=check=>{
   const state=check&&typeof check.state==='string'?check.state:'unknown';
   const nightly=check&&check.channel==='nightly';
+  const preview=['alpha','beta','rc'].includes(check&&check.channel);
   if(state==='available')return {state,label:'yes',note:nightly
     ?'A newer official Nightly revision was verified against this running build.'
+    :preview?'A newer release was found in the selected channel.'
     :'A newer stable release was found by the last successful check.'};
   if(state==='current')return {state,label:'None',note:nightly
     ?'The running source revision matches the last verified official main revision.'
@@ -3519,8 +3521,9 @@ const statsUpdateMessage=(stats,update)=>{
   const check=update.check_status||{},nightly=check.channel==='nightly';
   const latest=nightly?((check.latest_revision||'').slice(0,8)||'unknown')
     :(update.latest_version||'unknown');
-  const running=nightly?((check.running_revision||'').slice(0,8)||'unknown')
-    :(stats.version||'unknown');
+  const validSha=sha=>typeof sha==='string'&&/^[0-9a-f]{40}$/i.test(sha);
+  const running=nightly&&update.build?.type!=='release'&&validSha(check.running_revision)
+    ?'Nightly · '+check.running_revision.slice(0,8):(stats.version||'unknown');
   return '<div class="card" style="border-color:var(--warn)">'
     +'<h3>Update available</h3><p class="help">ROMarr '
     +esc(latest)+(nightly?' (Nightly revision)':'')+' is available; this install is running '
@@ -6574,7 +6577,11 @@ RENDER.update=async()=>{
     :(verdict.state==='available'||verdict.state==='current'?'Latest on GitHub':'Last known release');
   const kindLabel={git:inst.can_apply?'git checkout (self-update possible)':'git checkout (update manually)',
     docker:'container image (updates come from the host)',
-    none:'unknown install shape'}[inst.kind]||inst.kind;
+    none:typeof inst.detail==='string'&&inst.detail.startsWith('Windows desktop package;')
+      ?'Windows desktop package (update manually)'
+      :typeof inst.detail==='string'&&inst.detail.startsWith('Android app bundle;')
+        ?'Android app bundle (update through distributor)'
+        :'unknown install shape'}[inst.kind]||inst.kind;
   const badge=(on)=>on
     ?'<span class="pill" style="background:var(--ok);color:#08210d">ON</span>'
     :'<span class="pill">off</span>';

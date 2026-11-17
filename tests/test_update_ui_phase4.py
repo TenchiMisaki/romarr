@@ -142,6 +142,64 @@ def test_update_git_label_matches_actual_capability(can_apply, label):
     assert label in html
     assert ('id="up-apply"' in html) is can_apply
 
+
+@pytest.mark.parametrize("detail,label", [
+    ("Windows desktop package; install a newer ZIP", "Windows desktop package (update manually)"),
+    ("Android app bundle; use your distributor", "Android app bundle (update through distributor)"),
+    ("no git checkout and no container marker", "unknown install shape"),
+])
+def test_update_page_labels_packaged_and_unknown_installs(detail, label):
+    html = _update(_payload(install={"kind": "none", "can_apply": False,
+                                         "detail": detail}))["html"]
+    assert label in html
+    assert 'id="up-apply"' not in html
+
+
+@pytest.mark.parametrize("channel,expected", [
+    ("stable", "A newer stable release was found"),
+    ("alpha", "A newer release was found in the selected channel"),
+    ("beta", "A newer release was found in the selected channel"),
+    ("rc", "A newer release was found in the selected channel"),
+    ("nightly", "A newer official Nightly revision was verified"),
+])
+def test_update_page_available_note_matches_channel(channel, expected):
+    html = _update(_payload(check_status={"state": "available",
+                                              "channel": channel}))["html"]
+    assert expected in html
+    assert "<span>Update available</span>" in html
+
+
+def test_stats_nightly_release_keeps_release_version():
+    stats = {"version": "1.10.2"}
+    result = _payload(running_version="1.10.2",
+                      build={"type": "release"},
+                      check_status={"state": "available", "channel": "nightly",
+                                    "running_revision": "a" * 40,
+                                    "latest_revision": "b" * 40})
+    banner = _stats_banner(stats, result)
+    assert "this install is running 1.10.2" in banner
+    assert "Nightly · aaaaaaaa" not in banner
+
+
+def test_stats_nightly_development_displays_verified_revision():
+    stats = {"version": "1.10.2"}
+    result = _payload(running_version="1.10.2",
+                      build={"type": "development"},
+                      check_status={"state": "available", "channel": "nightly",
+                                    "running_revision": "a" * 40,
+                                    "latest_revision": "b" * 40})
+    assert "Nightly · aaaaaaaa" in _stats_banner(stats, result)
+
+
+def test_stats_nightly_invalid_revision_keeps_reported_version():
+    stats = {"version": "1.10.2"}
+    result = _payload(running_version="1.10.2",
+                      build={"type": "development"},
+                      check_status={"state": "available", "channel": "nightly",
+                                    "running_revision": "abc123",
+                                    "latest_revision": "b" * 40})
+    assert "this install is running 1.10.2" in _stats_banner(stats, result)
+
 def test_update_page_legacy_absence_is_honest():
     """Older APIs with no check/capability/build fields must not claim current."""
     result = _update({"running_version": "0.0.0+unknown",
