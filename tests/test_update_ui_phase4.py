@@ -130,6 +130,18 @@ def test_update_page_git_eligible_keeps_manual_action():
     assert 'id="up-apply"' in html
 
 
+
+@pytest.mark.parametrize("can_apply,label", [
+    (True, "git checkout (self-update possible)"),
+    (False, "git checkout (update manually)"),
+])
+def test_update_git_label_matches_actual_capability(can_apply, label):
+    """Installation label must agree with the presence of the Update button."""
+    html = _update(_payload(install={"kind": "git",
+                                     "can_apply": can_apply}))["html"]
+    assert label in html
+    assert ('id="up-apply"' in html) is can_apply
+
 def test_update_page_legacy_absence_is_honest():
     """Older APIs with no check/capability/build fields must not claim current."""
     result = _update({"running_version": "0.0.0+unknown",

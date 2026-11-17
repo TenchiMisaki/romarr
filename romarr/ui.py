@@ -6572,7 +6572,7 @@ RENDER.update=async()=>{
     :(d.latest_version||'—');
   const latestTitle=nightly?'Latest Nightly revision'
     :(verdict.state==='available'||verdict.state==='current'?'Latest on GitHub':'Last known release');
-  const kindLabel={git:'git checkout (self-update possible)',
+  const kindLabel={git:inst.can_apply?'git checkout (self-update possible)':'git checkout (update manually)',
     docker:'container image (updates come from the host)',
     none:'unknown install shape'}[inst.kind]||inst.kind;
   const badge=(on)=>on
