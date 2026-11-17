@@ -69,10 +69,15 @@ def git_checkout_revision(env) -> str:
 def running_main_revision(build: dict, env=None, *, startup_git_revision: str = "") -> str:
     """Trust image provenance or a Git HEAD still equal to the service startup HEAD."""
     revision = str(build.get("source_revision") or "").lower()
-    if (build.get("type") == "development"
-            and build.get("source_repository") == OFFICIAL_REPOSITORY
-            and build.get("source_ref") == MAIN_REF
-            and _SHA.fullmatch(revision)):
+    ref = str(build.get("source_ref") or "")
+    official = (build.get("source_repository") == OFFICIAL_REPOSITORY
+                and _SHA.fullmatch(revision))
+    # get_build_info already verifies the release tag matches its version.
+    if official and (
+            (build.get("type") == "development" and ref == MAIN_REF)
+            or (build.get("type") == "release" and re.fullmatch(
+                r"refs/tags/v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+                r"(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?", ref))):
         return revision
     if not _SHA.fullmatch(startup_git_revision):
         return ""

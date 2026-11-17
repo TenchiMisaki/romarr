@@ -92,7 +92,7 @@ def _payload(**overrides) -> dict:
 
 
 @pytest.mark.parametrize("state,label", [
-    ("current", "no"), ("never_checked", "not checked"),
+    ("current", "None"), ("never_checked", "not checked"),
     ("unknown", "unknown"), ("error", "error"),
 ])
 def test_update_page_renders_each_nonavailable_verdict(state, label):
@@ -136,7 +136,7 @@ def test_update_page_legacy_absence_is_honest():
                       "install": {"kind": "none"}})
     html = result["html"]
     assert "<b>unknown</b><span>Update available</span>" in html
-    assert "Build identity: unverified" in html
+    assert "Build identity: unverified" not in html
     assert result["check_bound"]
 
 
@@ -148,7 +148,7 @@ def test_update_page_escapes_identity_and_preserves_optional_sections():
         plugins={"<img>": {"source": "<script>", "ref": "main"}},
         update_log="<script>alert(1)</script>",
     ))["html"]
-    assert "&lt;img src=x&gt;" in html and "<img src=x>" not in html
+    assert "&lt;img src=x&gt;" not in html and "<img src=x>" not in html
     assert "&lt;script&gt;" in html and "<script>" not in html
     assert "ROM Hub plugins" in html and "Last self-update log" in html
     assert 'id="up-plugins"' in html
@@ -254,10 +254,10 @@ pending.then(()=>console.log(JSON.stringify(root.innerHTML)))
 
 
 def test_stats_and_status_use_same_verified_build_presentation():
-    """Cross-page UI should share one escaped build-identity presenter."""
+    """Keep escaped build identity on Stats and Status, not Update."""
     source = ui.JS
     assert "buildIdentityLine(h.build)" in source
-    assert "buildIdentityLine(d.build)" in source
+    assert "buildIdentityLine(d.build)" not in source
     assert "up.running_version===s.version?up.build:null" in source
     for marker in ("RENDER.stats=async()=>", "RENDER.status=async()=>",
                    "RENDER.update=async()=>", "RENDER.queue=async()=>"):
@@ -359,3 +359,20 @@ def test_stats_nightly_banner_reports_revisions_not_release_versions():
     assert "Nightly revision" in banner and "bbbbbbbb" in banner
     assert "aaaaaaaa" in banner
     assert "1.8.1 is available" not in banner
+
+
+def test_tagged_release_current_update_page_has_no_build_ref():
+    """Keep existing renderer and remove only redundant build text."""
+    sha="a"*40
+    html=_update(_payload(
+        running_version="1.10.2",
+        check_status={"state":"current","channel":"nightly",
+                      "running_revision":sha,"latest_revision":sha},
+        build={"type":"release","source_ref":"refs/tags/v1.10.2",
+               "source_revision":sha,"source_repository":"BlizzHacker/romarr"},
+    ))["html"]
+    assert "<b>1.10.2</b><span>Running</span>" in html
+    assert "<b>"+sha[:8]+"</b><span>Latest Nightly revision</span>" in html
+    assert "<b>None</b><span>Update available</span>" in html
+    assert "refs/tags/v1.10.2" not in html
+    assert "Build: <b>Release</b>" not in html

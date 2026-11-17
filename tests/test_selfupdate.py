@@ -22,9 +22,45 @@ def test_a_git_checkout_is_detected_as_self_updatable(tmp_path, monkeypatch):
     monkeypatch.setattr(selfupdate, "_git",
                         lambda git, cwd, *a: {"rev-parse": "abc1234"}.get(a[-1], "main")
                         if a else "")
+    # Evaluate the supported Linux worker path on any test host.
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
     env = selfupdate.detect(root=repo)
     assert env.kind == "git" and env.can_apply
     assert env.repo == str(repo)
+
+
+def test_desktop_bundle_uses_package_update_even_with_git_or_container_markers(
+        tmp_path, monkeypatch):
+    """Native Windows bundles must not offer in-place Git or Docker updates."""
+    monkeypatch.delenv("ROMARR_ANDROID", raising=False)
+    monkeypatch.setenv("ROMARR_DESKTOP", "1")
+    monkeypatch.setattr(selfupdate, "_container_marker", lambda: True)
+    (tmp_path / ".git").mkdir()
+    env = selfupdate.detect(root=tmp_path)
+    assert env.kind == "none" and not env.can_apply
+    assert "Windows desktop package" in env.detail
+    assert "existing data and library folders" in env.detail
+
+
+def test_android_bundle_wins_over_desktop_marker(tmp_path, monkeypatch):
+    """Native Android source is never treated as a Windows or Git install."""
+    monkeypatch.setenv("ROMARR_ANDROID", "1")
+    monkeypatch.setenv("ROMARR_DESKTOP", "1")
+    env = selfupdate.detect(root=tmp_path)
+    assert env.kind == "none" and not env.can_apply
+    assert "Android app bundle" in env.detail
+    assert "Windows desktop" not in env.detail
+
+
+def test_non_linux_git_checkout_reports_manual_update_only(monkeypatch):
+    """The detached updater is Linux-systemd-specific, not a Windows/macOS updater."""
+    env = selfupdate.Environment(kind="git", repo="/some/checkout",
+                                 branch="main", commit="abc1234")
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(selfupdate.sys, "platform", platform)
+        assert not env.can_apply
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
+    assert env.can_apply
 
 
 def test_a_container_is_detected_and_refuses_self_update(tmp_path, monkeypatch):
@@ -319,6 +355,8 @@ def test_apply_update_launches_when_idle(tmp_path, monkeypatch):
                                  python="python3", branch="main",
                                  commit="abc", service="romarr")
     monkeypatch.setattr(selfupdate, "detect", lambda root=None: env)
+    # This test exercises the supported Linux systemd update path on any host.
+    monkeypatch.setattr(selfupdate.sys, "platform", "linux")
     monkeypatch.setattr(selfupdate, "launch",
                         lambda e, target: {"ok": True, "target": target,
                                            "message": "started"})
@@ -326,6 +364,26 @@ def test_apply_update_launches_when_idle(tmp_path, monkeypatch):
     out = svc.apply_update()
     assert out["ok"] is True
     assert out["target"] == "refs/tags/v9.9.9"
+
+
+def test_non_linux_git_update_status_cannot_claim_automatic_apply(
+        tmp_path, monkeypatch):
+    """Saved auto-update preference is not effective without Linux systemd."""
+    svc = _svc(tmp_path)
+    svc.store.settings["auto_update"] = True
+    env = selfupdate.Environment(
+        kind="git", repo=str(tmp_path), branch="main",
+        commit="abc1234", detail="update using the platform's manual procedure")
+    monkeypatch.setattr(selfupdate, "detect", lambda root=None: env)
+    with monkeypatch.context() as context:
+        context.setattr(selfupdate.sys, "platform", "win32")
+        status = svc.update_status()
+        blocked = svc.apply_update()
+    assert status["settings"]["auto_update"] is True
+    assert status["settings"]["auto_update_effective"] is False
+    assert status["settings"]["auto_update_reason"] == "install_cannot_self_update"
+    assert blocked["ok"] is False
+    assert "manual procedure" in blocked["error"]
 
 
 def test_update_status_reports_the_shape_and_settings(tmp_path, monkeypatch):
@@ -503,3 +561,43 @@ def test_check_update_offers_final_release_to_prerelease_build(tmp_path, monkeyp
     assert out["update_available"] is True
     assert out["latest"] == "1.7.0"
     assert len(told) == 1
+
+
+# PR29 integration compatibility: preserve the newer release channels when
+# adding installation-type restrictions; tests are pure and do not launch work.
+import pytest as _pr29_pytest
+
+@_pr29_pytest.mark.parametrize("channel,tag,expected", [
+    ("stable", "v1.10.0", "refs/tags/v1.10.0"),
+    ("alpha", "v1.11.0-alpha.1", "refs/tags/v1.11.0-alpha.1"),
+    ("beta", "1.11.0-beta.2", "refs/tags/v1.11.0-beta.2"),
+    ("rc", "v1.11.0-rc.3", "refs/tags/v1.11.0-rc.3"),
+    ("nightly", "", "origin/main"),
+])
+def test_pr29_channel_matrix_preserves_targets(channel, tag, expected):
+    env = selfupdate.Environment(kind="git", repo="/synthetic")
+    result, _message = selfupdate.resolve_target(env, channel, tag)
+    assert result == expected
+
+
+@_pr29_pytest.mark.parametrize("channel", ["", "unknown", "development", "STABLE"])
+def test_pr29_channel_matrix_rejects_unsupported(channel):
+    env = selfupdate.Environment(kind="git", repo="/synthetic")
+    target, why = selfupdate.resolve_target(env, channel, "v1.10.0")
+    assert target == ""
+    assert "unknown update channel" in why
+
+
+@_pr29_pytest.mark.parametrize("channel", ["stable", "alpha", "beta", "rc"])
+def test_pr29_channel_matrix_missing_release_tag_fails_closed(channel):
+    env = selfupdate.Environment(kind="git", repo="/synthetic")
+    target, reason = selfupdate.resolve_target(env, channel, "")
+    assert target == ""
+    assert channel in reason
+
+
+@_pr29_pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_pr29_channel_matrix_platform_guard(platform, monkeypatch):
+    env = selfupdate.Environment(kind="git", repo="/synthetic")
+    monkeypatch.setattr(selfupdate.sys, "platform", platform)
+    assert env.can_apply is (platform == "linux")

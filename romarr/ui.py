@@ -3452,8 +3452,8 @@ const updateVerdict=check=>{
   if(state==='available')return {state,label:'yes',note:nightly
     ?'A newer official Nightly revision was verified against this running build.'
     :'A newer stable release was found by the last successful check.'};
-  if(state==='current')return {state,label:'no',note:nightly
-    ?'The running Nightly revision matches the last verified official main revision.'
+  if(state==='current')return {state,label:'None',note:nightly
+    ?'The running source revision matches the last verified official main revision.'
     :'The last successful comparison found this running release current.'};
   if(state==='error')return {state,label:'error',note:nightly
     ?'The Nightly revision check failed. No newer revision was verified.'
@@ -6565,7 +6565,7 @@ RENDER.update=async()=>{
   const inst=d.install||{}, st=d.settings||{}, verdict=updateVerdict(d.check_status);
   const check=d.check_status||{}, nightly=check.channel==='nightly';
   const validSha=sha=>typeof sha==='string'&&/^[0-9a-f]{40}$/i.test(sha);
-  const runningLabel=nightly&&validSha(check.running_revision)
+  const runningLabel=nightly&&d.build?.type!=='release'&&validSha(check.running_revision)
     ?'Nightly · '+check.running_revision.slice(0,8):(d.running_version||'unknown');
   const latestLabel=nightly
     ?(validSha(check.latest_revision)?check.latest_revision.slice(0,8):'—')
@@ -6588,7 +6588,6 @@ RENDER.update=async()=>{
     +'</div>'
     +'<p class="help">Install shape: <b>'+esc(kindLabel)+'</b>'
     +(inst.branch?' — branch <code>'+esc(inst.branch)+'</code> at <code>'+esc(inst.commit||'')+'</code>':'')+'</p>'
-    +buildIdentityLine(d.build)
     +'<p class="help">Update check: '+esc(verdict.note)+'</p>'
     +'</div>'
     +'<div class="card"><h3>Automatic updates</h3>'

@@ -19,18 +19,19 @@ it safe:
 How the update happens depends on how ROMarr is installed, detected rather
 than configured:
 
-  git      a clone (the LXC/bare-metal shape): fetch + ff-merge + pip +
-           service restart. This is the only shape that can truly
-           self-apply, because the code on disk is mutable.
+  git      a Linux, systemd-managed source clone: fetch + ff-merge + pip +
+           service restart. Other source installs require platform-managed
+           updates; Git metadata alone does not make the worker portable.
   docker   the ghcr image: the code is a read-only layer, so "updating"
            means re-pulling the image OUTSIDE the container. ROMarr says
            exactly that, with the commands, and does not pretend otherwise.
-  none     no git, no container marker: refuse with the reason. An update
-           that cannot explain how it would apply is an update that should
-           not run.
+  none     bundled native Windows/Android apps require an updated package;
+           an unidentified installation refuses with a clear reason. An
+           update that cannot safely explain how it applies must not run.
 
-Channels: `stable` fast-forwards to the latest release tag; `nightly`
-fast-forwards to origin/main. Both are GitHub's refs -- nothing is trusted
+Channels: `stable`, `alpha`, `beta` and `rc` select verified release tags;
+`nightly` targets origin/main for explicitly initiated updates. GitHub refs
+are verified by the update worker -- nothing is trusted
 but what `git fetch` verifies against the remote.
 """
 
@@ -68,7 +69,9 @@ class Environment:
 
     @property
     def can_apply(self) -> bool:
-        return self.kind == "git"
+        # The supported detached worker is a Linux systemd service. A Git
+        # checkout alone is not permission to launch it on Windows or macOS.
+        return self.kind == "git" and sys.platform == "linux"
 
 
 def _container_marker() -> bool:
@@ -80,10 +83,11 @@ def _container_marker() -> bool:
 
 
 def detect(root: Path | None = None) -> Environment:
-    """Classify the install. Order matters: a git clone INSIDE a container is
-    still a container (the image owns the code on a real deployment); the
-    container markers are checked first so the answer matches how the operator
-    actually updates it."""
+    """Classify the install by native package, container, then Git checkout.
+
+    Native package markers take precedence; a Git clone inside a container is
+    still a container because the image owns its installed code.
+    """
     # sys.executable FIRST: it is the interpreter actually running ROMarr,
     # which on the common LXC/venv install is /opt/romarr/.venv/bin/python.
     # shutil.which("python3") would find the SYSTEM python3, and pip-installing
@@ -93,6 +97,11 @@ def detect(root: Path | None = None) -> Environment:
     if os.environ.get("ROMARR_ANDROID") == "1" or sys.platform == "android":
         return Environment(kind="none", python=sys.executable or "",
                            detail="Android app bundle; update through your app distributor or install a newer APK")
+    # The native launcher already sets this marker for the bundled backend.
+    # Even if Git happens to be available, its code belongs to the package.
+    if os.environ.get("ROMARR_DESKTOP") == "1":
+        return Environment(kind="none", python=sys.executable or "",
+                           detail="Windows desktop package; install a verified newer ROMarr release ZIP and retain your existing data and library folders")
     python = sys.executable or shutil.which("python3") or "python3"
     if _container_marker():
         return Environment(kind="docker", python=python,
@@ -103,9 +112,12 @@ def detect(root: Path | None = None) -> Environment:
     if git and (root / ".git").exists():
         branch = _git(git, root, "rev-parse", "--abbrev-ref", "HEAD")
         commit = _git(git, root, "rev-parse", "--short", "HEAD")
+        detail = f"git checkout at {commit} on {branch}"
+        if sys.platform != "linux":
+            detail += ("; automatic updates require a Linux systemd service; "
+                       "update this checkout using your platform's installation procedure")
         return Environment(kind="git", repo=str(root), python=python,
-                           branch=branch, commit=commit,
-                           detail=f"git checkout at {commit} on {branch}")
+                           branch=branch, commit=commit, detail=detail)
     return Environment(kind="none", python=python,
                        detail="no git checkout and no container marker; "
                               "ROMarr cannot tell how it was installed")
@@ -180,7 +192,7 @@ def resolve_target(env: Environment, channel: str, latest_tag: str) -> tuple[str
     if channel not in ("stable", "alpha", "beta", "rc"):
         return "", "unknown update channel"
     if not latest_tag:
-        return "", "stable channel but no release tag is known yet -- " \
+        return "", f"{channel} channel but no release tag is known yet -- " \
                    "run UpdateCheck first"
     tag = latest_tag if latest_tag.startswith("v") else f"v{latest_tag}"
     return f"refs/tags/{tag}", f"{channel} channel: fast-forward to {tag}"
