@@ -63,6 +63,7 @@ from . import hub  # ROM Hub bridge -- the Cartridge plugin layer
 from . import clamav, scanners, nup, mdm
 from .emulators import EmulatorHub
 from .libretro import CoreHub
+from .cartridge import CartridgeHub
 from .emulator_catalog import resource_catalog
 from .dat import DatIndex, parse_dat
 from .decompress import run_batch as run_decompress_batch, scan_compressed
@@ -491,6 +492,9 @@ class ROMarr:
         self._lock = threading.Lock()
         # A manual check and the daily sweep must never overlap or auto-apply twice.
         self._update_check_lock = threading.Lock()
+        # First-run setup claims serialize here after pre-hashing so concurrent
+        # claimants cannot both observe an unclaimed install and mint sessions.
+        self._setup_lock = threading.Lock()
         # Git HEAD can move without restarting this service. Pin the source
         # actually running at service construction, not a later checkout HEAD.
         from . import nightly, selfupdate
@@ -538,6 +542,10 @@ class ROMarr:
         self.store.settings["_prowlarr_url"] = e.get("PROWLARR_URL", "")
         self.store.settings["_qbit_url"] = e.get("QBITTORRENT_URL", "")
         self.store.settings["_romm_url"] = e.get("ROMM_URL", "")
+        hub.configure_flaresolverr(
+            str(self.store.settings.get("flaresolverr_url")
+                or e.get("ROM_HUB_FLARESOLVERR_URL", "") or "")
+        )
 
         # The headless RetroArch stream server, if the operator runs one. It is
         # what plays the machines EmulatorJS has no core for -- PS2, GameCube,
@@ -894,6 +902,10 @@ class ROMarr:
                                   "read": 0, "stage": "counting", "library": "",
                                   "limit_reached": False}
             ok, total, shelf, failures = True, 0, [], []
+            # Set when a library's count failed and its read stopped at
+            # LIBRARY_MAX: the rows read are then a lower bound, so the
+            # total is published as unknown (a dash) rather than as a number.
+            total_unknown = False
             # Accumulated beside the total, because the total on its own is
             # the bug: a library that catalogues streamed entries answers
             # `count()` with the two categories added together, and every
@@ -988,6 +1000,7 @@ class ROMarr:
                         if callable(close):
                             close()
                     continue
+                count_failed = False
                 try:
                     split = library_counts(backend)
                     total += int(split.get("total") or 0)
@@ -1008,11 +1021,18 @@ class ROMarr:
                     self._count_split = {"total": total, "on_disk": on_disk,
                                          "catalogued": catalogued}
                 except Exception as err:
-                    ok = False
-                    failures.append(f"{label}: {err.__class__.__name__}")
-                    reasons[label] = _read_failure(err)
-                    log.warning("library count refresh failed for %s: %s",
+                    # The count is a summary, not the read. A slow server-side
+                    # count (issue #216: RomM's filtered total took 6-10 s on
+                    # a 28k library) used to flag a read that went on to fetch
+                    # every game as incomplete. Carry on with the paged read;
+                    # if it finishes, its length is the total and the split
+                    # is reported as unknown rather than guessed.
+                    count_failed = True
+                    on_disk = catalogued = None
+                    log.warning("library count refresh failed for %s: %s; "
+                                "using the games read as the total",
                                 label, err.__class__.__name__)
+                read_before = len(shelf)
                 try:
                     # The WHOLE library, in pages, published progressively.
                     # This used to stop at one 200-row page, which made a
@@ -1039,6 +1059,11 @@ class ROMarr:
                             break
                     if offset >= self.LIBRARY_MAX:
                         self._library_scan["limit_reached"] = True
+                    if count_failed:
+                        if offset >= self.LIBRARY_MAX:
+                            total_unknown = True
+                        else:
+                            total += len(shelf) - read_before
                 except Exception as err:
                     ok = False
                     failures.append(f"{label}: {err.__class__.__name__}")
@@ -1050,6 +1075,8 @@ class ROMarr:
             self._library_scan.update(running=False, finished=time.monotonic(),
                                       stage="complete" if ok else "error")
             if shelf or ok:
+                if total_unknown:
+                    total = None
                 self._count_cache = (total, time.monotonic())
                 self._count_split = {"total": total, "on_disk": on_disk,
                                      "catalogued": catalogued}
@@ -1644,6 +1671,29 @@ class ROMarr:
         }
         self.store.save()
         return {"ok": True}
+
+    def claim_setup(self, password: str) -> str | None:
+        """Hash outside the claim lock, then atomically persist and claim ownership."""
+        candidate_hash = self.auth.hash_password(password)
+        with self._setup_lock:
+            if self.claimed:
+                return None
+            with self.store._lock:
+                had_previous = "_password_hash" in self.store.settings
+                previous_hash = self.store.settings.get("_password_hash")
+                self.store.settings["_password_hash"] = candidate_hash
+                try:
+                    self.store.save(raise_on_error=True)
+                except Exception:
+                    if had_previous:
+                        self.store.settings["_password_hash"] = previous_hash
+                    else:
+                        self.store.settings.pop("_password_hash", None)
+                    raise
+            self.auth.password_hash = candidate_hash
+            self.claimed = True
+            log.info("this install has been claimed; setup is now closed")
+            return self.auth.issue_session()
 
     def setup_dats(self, directory: str) -> dict:
         """Validate the optional DAT folder and explain an empty result."""
@@ -4014,6 +4064,16 @@ class ROMarr:
         from .collections import normalise_lang
         translation_langs = tuple(dict.fromkeys(
             normalise_lang(c) for c in translation_langs if str(c).strip()))
+        raw_pref_langs = (
+            policy_kw["preferred_languages"]
+            if policy_kw.get("preferred_languages") is not None
+            else self.store.settings.get("preferred_languages") or ()
+        )
+        if isinstance(raw_pref_langs, str):
+            raw_pref_langs = [c for c in raw_pref_langs.split(",")
+                              if c.strip()]
+        preferred_languages = tuple(dict.fromkeys(
+            normalise_lang(c) for c in raw_pref_langs if str(c).strip()))
         region_mode = str(policy_kw.get("region_mode")
                           or self.store.settings.get("region_mode")
                           or "prefer").lower()
@@ -4025,6 +4085,7 @@ class ROMarr:
             translation_langs=translation_langs,
             region_mode=region_mode if region_mode in ("prefer", "strict")
             else "prefer",
+            preferred_languages=preferred_languages,
         )
         plan = build_plan(dat, self._present_titles(platform), policy)
         return {
@@ -4037,6 +4098,7 @@ class ROMarr:
                        "exclude": sorted(policy.exclude),
                        "translation_policy": policy.translation_policy,
                        "translation_langs": list(policy.translation_langs),
+                       "preferred_languages": list(policy.preferred_languages),
                        "region_mode": policy.region_mode},
             "titles": [
                 {"name": t.name, "parent": t.parent, "status": t.status,
@@ -4045,6 +4107,12 @@ class ROMarr:
                  "outside_preference": t.outside_preference,
                  "translation": t.is_translation}
                 for t in plan.titles
+            ],
+            "unknown_language_titles": [
+                {"name": t.name, "parent": t.parent, "status": t.status,
+                 "why": t.chosen_because,
+                 "outside_preference": t.outside_preference}
+                for t in plan.unknown_language_titles
             ],
         }
 
@@ -5363,7 +5431,8 @@ class ROMarr:
         acquisition pipeline did its job.
         """
         rom = getattr(verdict, "rom", None)
-        sha1 = str(sha1 or getattr(rom, "sha1", "") or "")
+        physical_sha1 = str(sha1 or "")
+        sha1 = str(getattr(rom, "sha1", "") or physical_sha1)
         if not sha1:
             return
         from .dat import VERIFIED
@@ -5379,7 +5448,7 @@ class ROMarr:
                 path = ""
         self.hashes.add(sha1, getattr(verdict, "game", "") or fallback,
                         platform, getattr(verdict, "status", "") == VERIFIED,
-                        path)
+                        path, physical_sha1=physical_sha1)
         self.hashes.save()
 
     #: Progress of the background hash seed, so the UI can show it moving
@@ -6047,18 +6116,22 @@ class ROMarr:
                 # Keep the hash. Netplay is decided on bytes, and this walk
                 # is the only place ROMarr ever computes them; discarding
                 # them here is what left an offer with nothing to carry.
-                if sha:
-                    self.hashes.add(
-                        sha, verdict.game or path.stem, platform.slug,
-                        verdict.status == VERIFIED,
-                        path.relative_to(library_root).as_posix())
                 # DAT verification strips copier headers on some platforms.
                 # Quarantine candidates must match every physical byte instead.
                 try:
                     raw_sha = raw_sha1(path)
-                    raw_size = path.stat().st_size
+                    final = path.stat()
+                    raw_size = final.st_size
                 except OSError:
                     continue
+                if (after.st_size, after.st_mtime_ns, after.st_ino) != (
+                        final.st_size, final.st_mtime_ns, final.st_ino):
+                    continue
+                if sha:
+                    self.hashes.add(
+                        sha, verdict.game or path.stem, platform.slug,
+                        verdict.status == VERIFIED,
+                        path.relative_to(library_root).as_posix(), physical_sha1=raw_sha)
                 key = (raw_sha, raw_size)
                 if key in seen:
                     state["duplicates"].append({
@@ -7016,7 +7089,7 @@ class ROMarr:
             if sub_path.startswith("/api/heartbeat"):
                 payload = {
                     "SYSTEM": {
-                        "version": getattr(self, "VERSION", "1.10.1"),
+                        "version": VERSION,
                         "romm_version": "5.1.0-romarr",
                         "arch": "x86_64",
                         "os": "Linux"
@@ -8399,6 +8472,11 @@ def make_handler(service: ROMarr):
                     return self._json(200, result)
                 except (ValueError, requests.RequestException):
                     return self._json(400, {"error": "Could not check this upstream release. Use its downloads page."})
+            if route.path == "/api/v1/cartridge/status":
+                try:
+                    return self._json(200, CartridgeHub(service.store.path.parent).status())
+                except Exception as err:
+                    return self._json(400, {"error": str(err)})
             if route.path == "/api/v1/downloadclient/mdm":
                 return self._json(200, service.mdm_capability())
             if route.path == "/metrics":
@@ -8541,9 +8619,19 @@ def make_handler(service: ROMarr):
                     translation_langs=[
                         c for c in query.get("translation_langs", [""])[0]
                         .split(",") if c] or None,
+                    preferred_languages=(
+                        [c for c in query.get("preferred_languages", [""])[0]
+                         .split(",") if c.strip()]
+                        if ("preferred_languages" in query
+                            or "preferred_languages=" in (route.query or ""))
+                        else None),
                     region_mode=query.get("region_mode", [""])[0] or None,
-                    exclude=[e for e in query.get("exclude", [""])[0].split(",")
-                             if e] if "exclude" in query else None))
+                    exclude=(
+                        [e for e in query.get("exclude", [""])[0].split(",")
+                         if e]
+                        if ("exclude" in query
+                            or "exclude=" in (route.query or ""))
+                        else None)))
             if route.path == "/api/v1/collection":
                 return self._json(200, service.collection_status())
             if route.path == "/api/v1/collection/source":
@@ -8899,6 +8987,7 @@ def make_handler(service: ROMarr):
                                         "sandboxed": confined,
                                         "sandbox_detail": why,
                                         "archive_org_auth": hub.archive_org_auth_status(),
+                                        "flaresolverr_configured": bool(hub.flaresolverr_url()),
                                         "searchable_plugins": searchable,
                                         # The Plugins page says out loud what
                                         # enabling a plugin now does: its
@@ -9058,6 +9147,10 @@ def make_handler(service: ROMarr):
                     regions=body.get("regions") or None,
                     translation_policy=body.get("translation_policy") or None,
                     translation_langs=body.get("translation_langs") or None,
+                    preferred_languages=(
+                        body.get("preferred_languages")
+                        if body.get("preferred_languages") is not None
+                        else None),
                     region_mode=body.get("region_mode") or None,
                     exclude=body.get("exclude")
                     if body.get("exclude") is not None else None))
@@ -9514,26 +9607,31 @@ def make_handler(service: ROMarr):
                 # First-run claim. Open only while unclaimed, and it closes the
                 # moment it succeeds -- so this is a one-shot, not a standing
                 # unauthenticated way to reset the password.
+                already_claimed = {
+                    "error": "already set up",
+                    "detail": "This ROMarr already has a password. Sign in "
+                              "instead.",
+                }
                 if service.claimed:
-                    return self._json(409, {
-                        "error": "already set up",
-                        "detail": "This ROMarr already has a password. Sign in "
-                                  "instead.",
-                    })
+                    return self._json(409, already_claimed)
+                if not isinstance(body, dict):
+                    return self._json(400, {"error": "Use a JSON object"})
                 password = str(body.get("password") or "")
                 if len(password) < MIN_PASSWORD:
                     return self._json(400, {
                         "error": "weak password",
                         "detail": f"Use at least {MIN_PASSWORD} characters.",
                     })
-                service.store.settings["_password_hash"] = \
-                    service.auth.hash_password(password)
-                service.auth.password_hash = \
-                    service.store.settings["_password_hash"]
-                service.claimed = True
-                service.store.save()
-                log.info("this install has been claimed; setup is now closed")
-                token = service.auth.issue_session()
+                try:
+                    token = service.claim_setup(password)
+                except Exception:
+                    log.exception("failed to persist initial setup password")
+                    return self._json(500, {
+                        "error": "could not save password",
+                        "detail": "Could not persist the setup password.",
+                    })
+                if token is None:
+                    return self._json(409, already_claimed)
                 return self._send_session(token, {"ok": True})
             if route.path == "/api/v1/login":
                 # Exchange a credential for a session, so a browser presents
@@ -9764,6 +9862,29 @@ def make_handler(service: ROMarr):
                         scanners.ScanUnavailable) as err:
                     log.warning("Emulator installation failed: %s", type(err).__name__)
                     return self._json(400, {"error": str(err) if isinstance(err, (ValueError, scanners.ScanUnavailable)) else "Emulator installation failed"})
+            if route.path == "/api/v1/cartridge/install":
+                try:
+                    cartridge_hub = CartridgeHub(service.store.path.parent)
+                    result = cartridge_hub.install(scanner=service.scan_installation)
+                    return self._json(200, result)
+                except (ValueError, OSError, requests.RequestException, scanners.ScanUnavailable) as err:
+                    log.warning("Cartridge installation failed: %s", type(err).__name__)
+                    return self._json(400, {"error": str(err) if isinstance(err, (ValueError, scanners.ScanUnavailable)) else "Cartridge installation failed"})
+            if route.path == "/api/v1/cartridge/launch":
+                try:
+                    cartridge_hub = CartridgeHub(service.store.path.parent)
+                    port_val = service.port if hasattr(service, "port") else 6868
+                    result = cartridge_hub.launch(port=port_val, game_id=str(body.get("game_id") or "") or None)
+                    return self._json(200, result)
+                except Exception as err:
+                    return self._json(400, {"error": str(err)})
+            if route.path == "/api/v1/emulators/plug-and-play":
+                try:
+                    cartridge_hub = CartridgeHub(service.store.path.parent)
+                    result = cartridge_hub.plug_and_play_setup()
+                    return self._json(200, result)
+                except Exception as err:
+                    return self._json(400, {"error": str(err)})
             if route.path == "/api/v1/security/inspect":
                 try:
                     return self._json(200, service.security_inspect(
@@ -9933,6 +10054,8 @@ def make_handler(service: ROMarr):
                 try:
                     with service._lock:
                         updated = service.store.update_settings(body)
+                        if "flaresolverr_url" in body:
+                            hub.configure_flaresolverr(str(updated.get("flaresolverr_url") or ""))
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 if any(str(k).startswith("oidc") or k == "_oidc_client_secret"
