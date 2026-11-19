@@ -44,16 +44,16 @@ def _local_git(repo: Path, *args: str) -> str | None:
 
 
 def git_checkout_revision(env) -> str:
-    """Read and validate the exact clean official Git HEAD; failures are not clean."""
-    if (env is None or env.kind != "git" or env.branch != "main"
-            or not env.repo):
+    """Read and validate the exact clean official Git HEAD on any named branch."""
+    if (env is None or env.kind != "git" or not env.repo
+            or not env.branch or env.branch == "HEAD"):
         return ""
     try:
         root = Path(env.repo).resolve(strict=True)
     except (OSError, RuntimeError):
         return ""
     if (_local_git(root, "rev-parse", "--show-toplevel") != str(root)
-            or _local_git(root, "symbolic-ref", "--quiet", "--short", "HEAD") != "main"
+            or _local_git(root, "symbolic-ref", "--quiet", "--short", "HEAD") != env.branch
             or _local_git(root, "remote", "get-url", "origin") not in _OFFICIAL_REMOTES):
         return ""
     status = _local_git(root, "status", "--porcelain", "--untracked-files=all")
@@ -69,15 +69,29 @@ def git_checkout_revision(env) -> str:
 def running_main_revision(build: dict, env=None, *, startup_git_revision: str = "") -> str:
     """Trust image provenance or a Git HEAD still equal to the service startup HEAD."""
     revision = str(build.get("source_revision") or "").lower()
-    if (build.get("type") == "development"
-            and build.get("source_repository") == OFFICIAL_REPOSITORY
-            and build.get("source_ref") == MAIN_REF
-            and _SHA.fullmatch(revision)):
+    ref = str(build.get("source_ref") or "")
+    official = (build.get("source_repository") == OFFICIAL_REPOSITORY
+                and _SHA.fullmatch(revision))
+    # get_build_info already verifies the release tag matches its version.
+    valid_release = (official and build.get("type") == "release" and re.fullmatch(
+        r"refs/tags/v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+        r"(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?", ref))
+    if env is not None and env.kind == "git":
+        # Never trust a generated build stamp over a changed running checkout.
+        if not _SHA.fullmatch(startup_git_revision):
+            return ""
+        live = git_checkout_revision(env)
+        if live != startup_git_revision:
+            return ""
+        if env.branch == "main":
+            return live
+        # For release checkouts on other branches, require metadata to match
+        # both the startup and live revision; no inferred update on drift.
+        return live if valid_release and live == revision else ""
+    if official and ((build.get("type") == "development" and ref == MAIN_REF)
+                     or valid_release):
         return revision
-    if not _SHA.fullmatch(startup_git_revision):
-        return ""
-    live = git_checkout_revision(env)
-    return live if live == startup_git_revision else ""
+    return ""
 
 
 class NightlyCheckError(Exception):

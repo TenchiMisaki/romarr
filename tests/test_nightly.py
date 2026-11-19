@@ -115,6 +115,55 @@ def test_clean_verified_git_checkout_uses_full_sha(monkeypatch, tmp_path):
     assert nightly.running_main_revision({}, env, startup_git_revision=startup) == ""
 
 
+
+def test_git_checkout_ignores_stale_official_metadata(monkeypatch, tmp_path):
+    """Compare actual startup HEAD, not an outdated generated build stamp."""
+    env = SimpleNamespace(kind="git", repo=str(tmp_path), branch="main",
+                          commit=LATEST[:8])
+    answers = {"rev-parse --show-toplevel": str(tmp_path),
+               "symbolic-ref --quiet --short HEAD": "main",
+               "remote get-url origin": "https://github.com/BlizzHacker/romarr.git",
+               "status --porcelain --untracked-files=all": "",
+               "rev-parse --verify HEAD": LATEST}
+    monkeypatch.setattr(nightly, "_local_git",
+                        lambda repo, *args: answers[" ".join(args)])
+    assert nightly.running_main_revision(OFFICIAL, env,
+                                        startup_git_revision=LATEST) == LATEST
+    get, _ = _response_get(Reply({"sha": LATEST}))
+    assert nightly.compare_main_revision(
+        LATEST, get, {"Accept": "application/vnd.github+json"})["state"] == "current"
+    answers["rev-parse --verify HEAD"] = RUNNING
+    env.commit = RUNNING[:8]
+    assert nightly.running_main_revision(OFFICIAL, env,
+                                        startup_git_revision=LATEST) == ""
+
+
+def test_release_branch_git_checkout_needs_clean_matching_tag(monkeypatch, tmp_path):
+    """Official release metadata cannot override changed or dirty Git source."""
+    env = SimpleNamespace(kind="git", repo=str(tmp_path), branch="release/1.10",
+                          commit=RUNNING[:8])
+    answers = {"rev-parse --show-toplevel": str(tmp_path),
+               "symbolic-ref --quiet --short HEAD": "release/1.10",
+               "remote get-url origin": "https://github.com/BlizzHacker/romarr.git",
+               "status --porcelain --untracked-files=all": "",
+               "rev-parse --verify HEAD": RUNNING}
+    monkeypatch.setattr(nightly, "_local_git",
+                        lambda repo, *args: answers[" ".join(args)])
+    release = {"type": "release", "source_repository": "BlizzHacker/romarr",
+               "source_ref": "refs/tags/v1.10.2", "source_revision": RUNNING}
+    assert nightly.running_main_revision(release, env,
+                                        startup_git_revision=RUNNING) == RUNNING
+    assert nightly.running_main_revision({}, env,
+                                        startup_git_revision=RUNNING) == ""
+    answers["status --porcelain --untracked-files=all"] = "?? local.txt"
+    assert nightly.running_main_revision(release, env,
+                                        startup_git_revision=RUNNING) == ""
+    answers["status --porcelain --untracked-files=all"] = ""
+    answers["rev-parse --verify HEAD"] = LATEST
+    env.commit = LATEST[:8]
+    assert nightly.running_main_revision(release, env,
+                                        startup_git_revision=RUNNING) == ""
+
 def test_same_commit_is_current_and_uses_one_request():
     """Equal full SHAs do not require a second ancestry API request."""
     get, calls = _response_get(Reply({"sha": RUNNING}))
@@ -262,3 +311,50 @@ def test_service_captures_git_revision_at_construction(tmp_path, monkeypatch):
     svc = ROMarr(env={"ROMARR_DATA": str(tmp_path / "service.json")})
     assert svc._nightly_git_start_revision == RUNNING
     assert observed == [env]
+
+
+RELEASE_PR30 = {"type": "release", "source_repository": "BlizzHacker/romarr",
+                "source_ref": "refs/tags/v1.10.2", "source_revision": RUNNING,
+                "version_known": True}
+
+
+def test_tagged_release_is_verified_main_comparison_origin():
+    """Accept official tagged releases but reject foreign or malformed metadata."""
+    assert nightly.running_main_revision(RELEASE_PR30) == RUNNING
+    for bad in ({**RELEASE_PR30, "source_repository": "fork/romarr"},
+                {**RELEASE_PR30, "source_ref": "refs/pull/4/head"},
+                {**RELEASE_PR30, "source_ref": "refs/tags/v1.10.2/evil"},
+                {**RELEASE_PR30, "source_revision": "abc123"}):
+        assert nightly.running_main_revision(bad) == ""
+
+
+def test_tagged_release_equal_main_is_current(service, monkeypatch):
+    """An official tagged Docker image at main is current without applying."""
+    monkeypatch.setattr("romarr.app.VERSION", "1.10.2")
+    monkeypatch.setattr("romarr.app.get_build_info", lambda _: dict(RELEASE_PR30))
+    get, calls = _response_get(Reply({"sha": RUNNING}))
+    monkeypatch.setattr(requests, "get", get)
+    invoked = []
+    monkeypatch.setattr(service, "apply_update", lambda **kw: invoked.append(kw))
+    result = service.check_update(manual=True)
+    status = service.update_status()
+    assert result["state"] == "current"
+    assert result["update_available"] is False
+    assert status["check_status"]["latest_revision"] == RUNNING
+    assert status["check_status"]["running_revision"] == RUNNING
+    assert status["settings"]["auto_update_effective"] is False
+    assert len(calls) == 1 and not invoked
+
+
+def test_tagged_release_behind_main_is_informational(service, monkeypatch):
+    """Only proven descendant ancestry offers Nightly, never an image update."""
+    monkeypatch.setattr("romarr.app.VERSION", "1.10.2")
+    monkeypatch.setattr("romarr.app.get_build_info", lambda _: dict(RELEASE_PR30))
+    get, calls = _response_get(Reply({"sha": LATEST}), _comparison())
+    monkeypatch.setattr(requests, "get", get)
+    invoked = []
+    monkeypatch.setattr(service, "apply_update", lambda **kw: invoked.append(kw))
+    result = service.check_update(manual=True)
+    assert result["state"] == "available"
+    assert service.update_status()["check_status"]["latest_revision"] == LATEST
+    assert len(calls) == 2 and not invoked
