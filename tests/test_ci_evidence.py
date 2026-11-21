@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -49,8 +50,121 @@ def test_sanitized_success_contains_no_case_names_or_raw_output(args, monkeypatc
     assert ci.gate(args)
     public = "".join(path.read_text() for path in args.public.iterdir())
     assert "private-token-example" not in public
-    assert {p.name for p in args.public.iterdir()} == {"summary.json", "cases.json", "manifest.json"}
+    assert {p.name for p in args.public.iterdir()} == {"summary.json", "cases.json", "skips.json", "manifest.json"}
+    assert ci.read(args.public / "skips.json") == []
     assert ci.read(args.public / "summary.json")["tested_base"] == BASE
+
+
+def test_docker_workflow_uploads_only_the_allowlisted_public_evidence():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/docker.yml").read_text(encoding="utf-8")
+    upload = workflow.split("name: Upload anonymous test evidence", 1)[1].split("- name:", 1)[0]
+    paths = upload.split("path: |", 1)[1].split("if-no-files-found:", 1)[0]
+    uploaded = {line.strip() for line in paths.splitlines() if "romarr-evidence-public/" in line}
+    assert uploaded == {
+        "${{ runner.temp }}/romarr-evidence-public/summary.json",
+        "${{ runner.temp }}/romarr-evidence-public/cases.json",
+        "${{ runner.temp }}/romarr-evidence-public/skips.json",
+        "${{ runner.temp }}/romarr-evidence-public/manifest.json",
+    }
+
+
+def test_skip_evidence_publishes_only_allowlisted_category_and_static_identity(args, monkeypatch):
+    prepared(args, monkeypatch)
+    junit(args,
+          '<testcase classname="tests.test_sample" name="test_network[param-private-token-example]">'
+          '<skipped message="Needs credentials at C:\\\\Users\\\\Alice\\\\secret.txt token=private-token-example '
+          'https://private.example/path"/></testcase>', skipped=1)
+    ci.finalize(args)
+    assert ci.gate(args)  # Reporting a skip does not hide it or alter aggregate pass policy.
+    public = "".join(path.read_text() for path in args.public.iterdir())
+    assert ci.read(args.public / "skips.json") == [
+        {"test": "tests.test_sample::test_network", "reason": "credentials or authentication required"}
+    ]
+    for private_value in ("private-token-example", "Alice", "private.example", "Needs credentials"):
+        assert private_value not in public
+
+
+def test_skip_gate_rejects_missing_forged_or_nonallowlisted_records(args, monkeypatch):
+    prepared(args, monkeypatch)
+    junit(args, '<testcase classname="tests.test_sample" name="test_network"><skipped message="network"/>'
+          '</testcase>', skipped=1)
+    ci.finalize(args)
+    good_manifest = {
+        name: __import__("hashlib").sha256((args.public / name).read_bytes()).hexdigest()
+        for name in ci.FILES
+    }
+    (args.public / "skips.json").unlink()
+    assert not ci.gate(args)
+    ci.write(args.public / "skips.json", [{"test": "../private", "reason": "network"}])
+    ci.write(args.public / "manifest.json", good_manifest)
+    assert not ci.gate(args)
+    ci.write(args.public / "skips.json", [{"test": "tests.test_sample::test_network", "reason": "raw private text"}])
+    ci.write(args.public / "manifest.json", {
+        name: __import__("hashlib").sha256((args.public / name).read_bytes()).hexdigest()
+        for name in ci.FILES
+    })
+    assert not ci.gate(args)
+
+
+def test_module_level_collection_skip_is_reported_with_safe_module_identity(args, monkeypatch):
+    prepared(args, monkeypatch)
+    test_dir = args.root / "tests"
+    test_dir.mkdir(parents=True)
+    (test_dir / "test_pass.py").write_text("def test_pass():\n    assert True\n")
+    (test_dir / "test_optional.py").write_text(
+        "import pytest\npytest.skip('optional dependency unavailable', allow_module_level=True)\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--junitxml=" + str(args.private / "junit.xml"),
+         str(test_dir / "test_pass.py"), str(test_dir / "test_optional.py")],
+        cwd=args.root, capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    ci.finalize(args)
+    skip_records = ci.read(args.public / "skips.json")
+    assert len(skip_records) == 1
+    assert skip_records[0]["test"].endswith("test_optional::module-collection")
+    assert skip_records[0]["reason"] == "dependency unavailable"
+    assert ci.gate(args)
+
+
+@pytest.mark.parametrize("source,category", [
+    ('Missing API configuration: {&quot;api_key&quot;: &quot;private-sentinel with spaces&quot;}',
+     "credentials or authentication required"),
+    ("accessToken=Bearer private-sentinel", "credentials or authentication required"),
+    ("DOCKER_AUTH_CONFIG={&quot;auths&quot;:{&quot;registry.example&quot;:{&quot;auth&quot;:&quot;private-sentinel&quot;}}}",
+     "credentials or authentication required"),
+    ("network unavailable at https://private.example/path", "network or remote service unavailable"),
+    ("optional dependency package is not installed", "dependency unavailable"),
+    ("Unsupported Windows runtime", "platform or runtime unavailable"),
+    ("ordinary test-specific reason", "test-specific condition (details withheld)"),
+])
+def test_skip_reasons_are_mapped_to_fixed_categories(args, monkeypatch, source, category):
+    prepared(args, monkeypatch)
+    junit(args,
+          '<testcase classname="tests.test_sample" name="test_reason">'
+          f'<skipped message="{source}"/></testcase>', skipped=1)
+    ci.finalize(args)
+    public = "".join(path.read_text() for path in args.public.iterdir())
+    assert ci.read(args.public / "skips.json")[0]["reason"] == category
+    assert "private-sentinel" not in public
+    assert "private.example" not in public
+
+
+def test_camel_case_pytest_function_name_is_retained(args, monkeypatch):
+    prepared(args, monkeypatch)
+    junit(args,
+          '<testcase classname="tests.test_sample.TestOptional" name="testOptional">'
+          '<skipped message="optional"/></testcase>', skipped=1)
+    ci.finalize(args)
+    assert ci.read(args.public / "skips.json")[0]["test"] == "tests.test_sample.TestOptional::testOptional"
+
+
+def test_function_named_test_is_retained(args, monkeypatch):
+    prepared(args, monkeypatch)
+    junit(args,
+          '<testcase classname="tests.test_sample" name="test">'
+          '<skipped message="optional"/></testcase>', skipped=1)
+    ci.finalize(args)
+    assert ci.read(args.public / "skips.json")[0]["test"] == "tests.test_sample::test"
 
 
 @pytest.mark.parametrize("changed", ["head", "base"])
@@ -166,8 +280,8 @@ def test_tokens_are_absent_from_actual_pytest_process(args, monkeypatch):
     monkeypatch.setattr(ci, "clean", lambda *a: True)
     ci.run(args)
     assert ci.read(args.private / "run.json")["test"] == "PASS"
-    counts, cases = ci.collect(args.private / "junit.xml")
-    assert counts["passed"] == 1 and cases == [{"id": 1, "outcome": "passed"}]
+    counts, cases, skips = ci.collect(args.private / "junit.xml")
+    assert counts["passed"] == 1 and cases == [{"id": 1, "outcome": "passed"}] and skips == []
 
 
 def test_windows_desktop_workflow_sanitizes_native_proof_artifact():
