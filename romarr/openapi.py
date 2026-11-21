@@ -104,7 +104,7 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
                                       "it."),
     "/api/v1/lookup": ("GET", "Find games by IGDB title, with per-platform library, download and monitoring state. Requires q; optional platform."),
     "/api/v1/game/detail": ("GET", "Read one game and its cached metadata, wanted entry, queue and history; platform plus id or title."),
-    "/api/v1/wanted/add": ("POST", "Save a game/platform with boolean monitored (default true) and search (default false). Wishlist entries use monitored=false and are skipped by automatic searches."),
+    "/api/v1/wanted/add": ("POST", "Save a game/platform with boolean monitored (default true) and search (default false). Wishlist entries use monitored=false and are skipped by automatic searches. On platforms whose games have updates and DLC (PlayStation 3/4/5, PSP, Vita, 3DS, Wii U, Switch, Xbox 360, PC), entries may add parts, a list of base, update and dlc (default: the game)."),
     "/api/v1/wanted/monitor": ("POST", "Set boolean monitored for an existing game/platform; false pauses automatic searches without removing the entry."),
     "/api/v1/queue": ("GET", "Active downloads, import-preview availability and client-scoped progress/ETA when available."),
     "/api/queue": ("GET", "Active downloads (legacy path)."),
@@ -176,7 +176,7 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "/api/v1/collection/reconcile": ("POST", "Fulfil Wanted titles whose "
                                              "verified dump is already in the "
                                              "library for a platform."),
-    "/api/v1/collection/source": ("GET", "List qBittorrent set torrents and selective-acquisition jobs."),
+    "/api/v1/collection/source": ("GET", "List game-looking qBittorrent and Transmission set torrents (all=1 lists every torrent) and selective-acquisition jobs."),
     "/api/v1/collection/source/plan": ("POST", "Preview missing DAT files from a set torrent within a staging budget."),
     "/api/v1/collection/source/start": ("POST", "Select only the planned qBittorrent files and start a persistent staged acquisition."),
     "/api/v1/collection/source/step": ("POST", "Stage, verify and import completed files from the current torrent batch."),
@@ -200,6 +200,7 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "/api/v1/hub/plugins": ("GET", "The plugin catalogue, unfiltered."),
     "/api/v1/hub/igir": ("GET", "Igir v5.8.0 1G1R front-end status, default profile, and CLI execution (POST runs or previews an Igir 1G1R job with {romm} output tokens)."),
     "/api/v1/hub/exo2romm": ("GET", "eXo2romm eXoDOS-to-RomM ZIP repackager status, attribution to derkommutator, and defaults (POST previews or repackages eXoDOS game zips)."),
+    "/api/v1/hub/compressatorium": ("GET", "Compressatorium plugin status: whether it is installed and enabled, the service address batch decompression uses and where it comes from (env or plugin), whether an API key is saved, and credit to pacnpal/Compressatorium. Never returns the key (POST saves the address or key)."),
     "/api/v1/hub/fleet": ("GET", "Multi-device and network library sync profiles for ES-DE, RetroPie/ArcadePunks, Batocera, Argosy, Grout, Steam Deck, and RetroArch WebDAV (POST builds a 1G1R + gamelist.xml sync plan)."),
     "/api/v1/mcp": ("GET", "MCP connection manifest (GET), or authenticated stateless JSON-RPC MCP transport (POST). GET text/event-stream returns 405; no standalone SSE stream is offered."),
     "/api/v1/hub/archive-org/auth": ("POST", "Save or clear host-managed Archive.org credentials; returns status without credentials."),
@@ -233,7 +234,7 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
                                             "downloads from the browser extension "
                                             "and optionally adopt them."),
     "/api/v1/webhook": ("POST", "Inbound game request from a front-end."),
-    "/api/request": ("POST", "Request a game."),
+    "/api/request": ("POST", "Request a game. On platforms whose games have updates and DLC, requests may add parts, a list of base, update and dlc (default: the game); parts an import does not bring stay on Wanted."),
     "/api/v1/integration/info": ("GET", "Integration service info: name, version, capabilities."),
     "/api/v1/integration/requests": ("POST", "Accept a game request from an external platform "
         "(Cartridge). Starts the same search + grab pipeline; "
@@ -269,6 +270,17 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
                                      "re-runs the request, remove forgets it; resume-retained explicitly resumes an owned retained collection."),
     "/api/v1/queue/clear": ("POST", "Empty the queue, or only the rows in "
                                     "{state} (e.g. failed)."),
+    "/api/v1/discover/platform": ("GET", "Browse one platform's catalogue: "
+                                         "?platform=<slug or name>&sort="
+                                         "popular|released|rating|name&q="
+                                         "<title search>&page=&limit=&provider=, from the "
+                                         "first configured provider that lists "
+                                         "the platform (RAWG or IGDB). Each row "
+                                         "carries state (library, downloading, "
+                                         "monitored, unmonitored or empty) and "
+                                         "owned; has_more says whether a next "
+                                         "page exists. Pass page 1's provider "
+                                         "back as ?provider= for later pages."),
     "/api/v1/discover/library": ("GET", "Browse the library you already "
                                         "have: ?shelf=top-rated|recent|"
                                         "recently-added|hidden-gems|"
@@ -576,6 +588,28 @@ def spec(version: str = "0.0.0", *, base_url: str = "") -> dict:
     }
     paths["/api/v1/hub/exo2romm"]["post"]["responses"]["400"] = {
         "description": "Invalid request payload or all input archives failed processing.",
+    }
+    paths["/api/v1/hub/compressatorium"].update(_operation(
+        "/api/v1/hub/compressatorium", "POST",
+        "Save the Compressatorium plugin's service address and/or API key. "
+        "The key goes to ROM Hub's secret store; COMPRESSATORIUM_URL still wins when set."))
+    paths["/api/v1/hub/compressatorium"]["post"]["requestBody"] = {
+        "required": True,
+        "content": {"application/json": {"schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string",
+                        "description": "http(s) base address, for example http://compressatorium:8080. "
+                                       "An empty string clears it; omit to leave it unchanged."},
+                "api_key": {"type": "string", "format": "password",
+                            "description": "Replaces the saved key; omit to leave it unchanged."},
+                "clear_api_key": {"type": "boolean", "default": False,
+                                  "description": "Delete the saved key."},
+            },
+        }}},
+    }
+    paths["/api/v1/hub/compressatorium"]["post"]["responses"]["400"] = {
+        "description": "The plugin is not installed, or the address cannot be used.",
     }
     _guide_contracts(paths)
 

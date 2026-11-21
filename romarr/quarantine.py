@@ -15,6 +15,11 @@ from pathlib import Path
 ROOT_NAME = ".romarr-quarantine"
 
 
+def _portable_relative(value: str) -> str:
+    """Normalize Windows separators while preserving POSIX filenames."""
+    return value.replace("\\", "/") if os.name == "nt" else value
+
+
 def _fsync_dir(folder: Path) -> None:
     # Windows does not expose directory handles through os.open.
     if os.name == "nt":
@@ -136,7 +141,8 @@ def quarantine(library: Path, platform_root: Path, candidates: list[dict],
                allowed: list[dict]) -> dict:
     if not candidates:
         raise ValueError("select at least one duplicate")
-    approved = {(str(r.get("file")), str(r.get("same_as")),
+    approved = {(_portable_relative(str(r.get("file"))),
+                 _portable_relative(str(r.get("same_as"))),
                  str(r.get("sha1") or "").lower()): r for r in allowed}
     ident = uuid.uuid4().hex
     folder = _quarantine_root(library)
@@ -146,11 +152,11 @@ def quarantine(library: Path, platform_root: Path, candidates: list[dict],
     fingerprints = {}
     seen = set()
     for item in candidates:
-        relative = str(item.get("file") or "")
+        relative = _portable_relative(str(item.get("file") or ""))
         match = next((r for (f, _, _), r in approved.items() if f == relative), None)
         if match is None:
             raise ValueError(f"duplicate is not in the latest audit: {relative}")
-        keeper_rel = str(match.get("same_as") or "")
+        keeper_rel = _portable_relative(str(match.get("same_as") or ""))
         expected = str(match.get("sha1") or "").lower()
         if relative in seen or relative == keeper_rel:
             raise ValueError(f"invalid or repeated duplicate: {relative}")
@@ -164,8 +170,13 @@ def quarantine(library: Path, platform_root: Path, candidates: list[dict],
         _verify_unchanged(keeper, expected)
         entries.append({
             "id": uuid.uuid4().hex,
-            "original": str(Path(relative).relative_to(platform_root.name)),
-            "keeper": str(Path(keeper_rel).relative_to(platform_root.name)),
+            # Manifest paths are portable relative paths. In particular,
+            # keep the fingerprint key stable on Windows, where str(Path)
+            # would otherwise introduce backslashes.
+            "original": Path(relative).relative_to(
+                platform_root.name).as_posix(),
+            "keeper": Path(keeper_rel).relative_to(
+                platform_root.name).as_posix(),
             "sha1": expected,
             "size": src.stat().st_size, "status": "pending",
             "object": f"{ident}/{uuid.uuid4().hex}",
@@ -275,9 +286,30 @@ def restore(library: Path, manifest_id: str, entry_id: str) -> dict:
         os.link(source, destination)
     except FileExistsError as err:
         raise ValueError(f"restore destination already exists: {entry['original']}") from err
+    except OSError as err:
+        # Some Windows configurations deny hard-link creation even when both
+        # paths are on the same volume.  A same-volume rename is also atomic
+        # and refuses an existing destination, so it preserves the
+        # no-clobber restore contract. Recheck the verified source immediately
+        # before moving it because the hard-link attempt may have taken time.
+        if os.name != "nt" or getattr(err, "winerror", None) != 5:
+            raise
+        if destination.exists():
+            raise ValueError(
+                f"restore destination already exists: {entry['original']}") from err
+        if (_fingerprint(source) != before
+                or raw_sha1(source) != entry.get("sha1")
+                or _fingerprint(source) != before):
+            raise ValueError("quarantined file changed during restore") from err
+        try:
+            os.rename(source, destination)
+        except FileExistsError as rename_err:
+            raise ValueError(
+                f"restore destination already exists: {entry['original']}") from rename_err
     _fsync_dir(destination.parent)
-    source.unlink()
-    _fsync_dir(source.parent)
+    if source.exists():
+        source.unlink()
+        _fsync_dir(source.parent)
     _record_restored(manifest_path, data, entry)
     return {"ok": True, "file": entry["original"]}
 

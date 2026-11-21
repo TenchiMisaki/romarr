@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import ctypes
 
 import romarr.quarantine as quarantine_module
 
@@ -98,6 +99,24 @@ def test_quarantined_file_can_be_restored_and_survives_restart(tmp_path):
     assert restored["ok"]
     assert (platform / entry["original"]).read_bytes() == keeper.read_bytes()
     assert manifests(library)[0]["entries"][0]["status"] == "restored"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows hard-link fallback")
+def test_restore_uses_no_clobber_rename_when_hardlinks_are_denied(
+        tmp_path, monkeypatch):
+    library, platform, keeper, duplicate, rows, _ = _fixture(tmp_path)
+    result = quarantine(library, platform, [{"file": rows[0]["file"]}], rows)
+    entry = result["entries"][0]
+
+    def deny_hardlinks(_source, _destination):
+        raise ctypes.WinError(5)
+
+    monkeypatch.setattr(os, "link", deny_hardlinks)
+    restored = restore(library, result["manifest_id"], entry["id"])
+
+    assert restored["ok"]
+    assert (platform / entry["original"]).read_bytes() == keeper.read_bytes()
+    assert not (library / ".romarr-quarantine" / entry["object"]).exists()
 
 
 def test_restore_refuses_a_modified_quarantine_object(tmp_path):
@@ -236,7 +255,13 @@ def test_restore_recovers_a_crash_after_the_new_name_is_durable(tmp_path, monkey
     with pytest.raises(OSError, match="simulated crash"):
         restore(library, result["manifest_id"], entry["id"])
     source = library / ".romarr-quarantine" / entry["object"]
-    assert source.exists() and duplicate.exists()
+    assert duplicate.exists()
+    if os.name == "nt":
+        # The Windows hard-link fallback is an atomic rename, so a crash
+        # after the destination becomes durable leaves only the new name.
+        assert not source.exists()
+    else:
+        assert source.exists()
     monkeypatch.setattr(quarantine_module, "_fsync_dir", real_sync)
     assert restore(library, result["manifest_id"], entry["id"])["already_restored"]
     assert duplicate.read_bytes() == keeper.read_bytes()

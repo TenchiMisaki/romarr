@@ -23,7 +23,7 @@ Find games, verify ROMs, and import them into your library.
 [![Microsoft Store](https://img.shields.io/badge/Microsoft_Store-Windows_App-0078D4?logo=windows&logoColor=white)](https://github.com/BlizzHacker/romarr/releases)
 [![Submit Package](https://img.shields.io/badge/Package_Submissions-Submit_ROMarr-purple?logo=github&logoColor=white)](docs/SUBMISSIONS.md)
 
-**[Install](#install)** · **[First setup](docs/GETTING-STARTED.md)** · **[Discord](https://discord.gg/ywNFceuAd)** · **[Open Collective](https://opencollective.com/romarr)** · **[GG Requestz](https://github.com/BlizzHacker/ggrequestz)** · **[RomM](https://github.com/rommapp/romm)** · **[r/romm](https://www.reddit.com/r/romm)** · **[r/arr](https://www.reddit.com/r/arr)** · **[Android App & APK](docs/ANDROID.md)** · **[Unraid App](https://ca.unraid.net/apps/romarr-04jslct0riva81?q=romarr)** · **[Plugins](docs/PLUGINS.md)** · **[Roadmap](ROADMAP.md)** · **[Releases](https://github.com/BlizzHacker/romarr/releases)** · **[Submit Package](docs/SUBMISSIONS.md)** · **[Privacy](docs/PRIVACY.md)**
+**[Install](#install)** · **[First setup](docs/GETTING-STARTED.md)** · **[Discord](https://discord.gg/ywNFceuAd)** · **[Open Collective](https://opencollective.com/romarr)** · **[GG Requestz](https://github.com/XTREEMMAK/ggrequestz)** · **[RomM](https://github.com/rommapp/romm)** · **[r/romm](https://www.reddit.com/r/romm)** · **[r/arr](https://www.reddit.com/r/arr)** · **[Android App & APK](docs/ANDROID.md)** · **[Unraid App](https://ca.unraid.net/apps/romarr-04jslct0riva81?q=romarr)** · **[Plugins](docs/PLUGINS.md)** · **[Roadmap](ROADMAP.md)** · **[Releases](https://github.com/BlizzHacker/romarr/releases)** · **[Submit Package](docs/SUBMISSIONS.md)** · **[Privacy](docs/PRIVACY.md)**
 
 > [!NOTE]
 > **Community & Support:**  
@@ -198,6 +198,7 @@ The image includes archive tools. **ROM Hub is included on amd64/arm64; it is un
 - Game pages, a wishlist that saves games without searching, and monitoring you can switch on or off later. [Monitoring guide](docs/MONITORING.md).
 - Game soundtracks found by title or picked from your music folder, uploaded into RomM's Jukebox with exact undo. [Soundtracks guide](docs/SOUNDTRACKS.md).
 - A Switch Updates & DLC report; new updates and DLC are filed inside their game's folder where RomM finds them; plus NTSC/PAL and preferred-format release preferences. [Switch guide](docs/SWITCH-INVENTORY.md).
+- Base game, update and DLC handling for PlayStation 3/4/5, PSP, Vita, 3DS, Wii U, Switch, Xbox 360 and PC: search tells packs, updates and DLC apart, requests can ask for the update and DLC too, and imports file `<Title>/`, `update/` and `dlc/` the way RomM reads them. [Updates and DLC guide](docs/UPDATES-AND-DLC.md).
 - ZIP, 7z, RAR and compressed TAR downloads, read without extracting unsafe paths.
 - PS4, PS5 and PS Vita search/import formats, with [explicit playback and installation limits](docs/MODERN-CONSOLES.md).
 
@@ -245,6 +246,8 @@ Source plugins live in [ROM Hub](https://github.com/BlizzHacker/rom-hub); see it
 ### Acknowledgements
 
 Thanks to the library, emulator and preservation projects ROMarr works with, and to [Radarr](https://github.com/Radarr/Radarr), [Sonarr](https://github.com/Sonarr/Sonarr), [Questarr](https://github.com/Doezer/Questarr) and [gamarr](https://github.com/JeremiahM37/gamarr) for ideas and familiar workflows.
+
+Batch decompression hands disc images to [Compressatorium](https://github.com/pacnpal/compressatorium) by pacnpal over its HTTP API, through the preinstalled [Compressatorium plugin](https://github.com/BlizzHacker/rom-hub-compressatorium); no Compressatorium code is included.
 
 Soundtracks, the Switch report, wishlist monitoring and plugin start-up hardening build on MIT-licensed work from [romarrng](https://github.com/Squeaks72/romarrng), Copyright (c) 2026 MOVE WEIGHT.
 

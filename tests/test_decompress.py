@@ -55,7 +55,7 @@ def test_scan_finds_only_decompressable_files(tmp_path):
                  "notes.txt", "F.rvz", "G.cci"):
         (tmp_path / name).write_bytes(b"x")
 
-    found = {p.name for p in decompress.scan_compressed(tmp_path)}
+    found = {p.name for p in [w.source for w in decompress.scan_work(tmp_path)]}
 
     assert found == {"A.chd", "B.7z", "D.nkit.iso", "F.rvz"}
 
@@ -65,7 +65,7 @@ def test_scan_walks_subdirectories(tmp_path):
     (tmp_path / "gba").mkdir()
     (tmp_path / "gba" / "game.gba.zip").write_bytes(b"x")
 
-    assert [p.name for p in decompress.scan_compressed(tmp_path)] == \
+    assert [p.name for p in [w.source for w in decompress.scan_work(tmp_path)]] == \
         ["game.gba.zip"]
 
 
@@ -82,14 +82,18 @@ class FakeClient:
 
     name = "FakeCompressatorium"
 
-    def __init__(self, outputs=None, remote_matches=()):
+    def __init__(self, outputs=None, remote_matches=(), tools=None):
         self.outputs = outputs or {}
+        self.tools = tools
         self.remote_matches = set(remote_matches)
         self.submitted: list[dict] = []
         self._jobs: dict[str, JobResult] = {}
 
     def reachable(self):
         return True
+
+    def available_tools(self):
+        return self.tools
 
     def submit_job(self, *, file_path, mode, output_dir=None,
                    duplicate_action="skip", delete_on_verify=False):
@@ -275,10 +279,8 @@ def test_no_dats_at_all_never_deletes(library, monkeypatch):
     assert library["source"].exists()
 
 
-def test_remote_match_verifies_what_local_hashes_cannot(library, monkeypatch):
-    """CHD/Dolphin outputs: the container's file hash matches no DAT of its
-    contents, and the service's embedded-hash matching is the second opinion
-    that answers instead."""
+def test_remote_match_cannot_authorize_source_deletion(library, monkeypatch):
+    """A service identification response is insufficient destructive proof."""
     library["output"].write_bytes(b"container bytes, not the DAT payload")
     client = FakeClient(
         {str(library["source"]): library["output"]},
@@ -288,8 +290,26 @@ def test_remote_match_verifies_what_local_hashes_cannot(library, monkeypatch):
     report = _run(library, client, delete_originals=True)
     d = report.to_dict()
 
-    assert d["verified"] == 1 and d["deleted"] == 1, d
-    assert not library["source"].exists()
+    assert d["deleted"] == 0 and d["kept"] == 1, d
+    assert library["source"].exists()
+
+
+def test_outputs_are_reverified_before_source_deletion(library, monkeypatch):
+    library["output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["output"]})
+    _patch_client(monkeypatch, client)
+    original_verify = decompress._verify_outputs
+
+    def verify_then_mutate(files, dats, service):
+        result = original_verify(files, dats, service)
+        library["output"].write_bytes(b"changed after verification")
+        return result
+
+    monkeypatch.setattr(decompress, "_verify_outputs", verify_then_mutate)
+    report = _run(library, client, delete_originals=True)
+
+    assert report.deleted == 0 and report.kept == 1
+    assert library["source"].exists(), "changed outputs must retain the source"
 
 
 # ------------------------------------------------------------ failure modes --
@@ -353,4 +373,4 @@ def test_a_nup_is_never_decompression_work(tmp_path):
     assert mode_for("Game.nup") == ""
     (tmp_path / "Game.nup").write_bytes(b"NUP\x01")
 
-    assert decompress.scan_compressed(tmp_path) == []
+    assert [w.source for w in decompress.scan_work(tmp_path)] == []

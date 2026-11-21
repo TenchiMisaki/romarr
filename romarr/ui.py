@@ -1377,6 +1377,23 @@ RENDER.hub=async()=>{
           +(ia.configured?'<button class="mini" id="ia-auth-clear" type="button">Clear login</button>':'')
           +'</div></form>')
         +'</div>' : '';
+    const cm=hs.compressatorium||{};
+    const cmForm=(pl.slug==='compressatorium'&&pl.installed)
+      ?'<div style="margin-top:12px"><b>Compressatorium connection</b>'
+        +'<p class="help">'+(cm.source==='env'
+          ?'Set by COMPRESSATORIUM_URL ('+esc(cm.url||'')+'); the environment wins over these fields.'
+          :cm.configured?'Batch decompression sends disc images to '+esc(cm.url||'')+'.'
+          :'Set the address of your Compressatorium container to let batch decompression use it.')
+        +' Mount your library into it at the same path ROMarr uses. API keys require HTTPS; ROMarr will not send a key over HTTP.</p>'
+        +'<form id="cm-form" autocomplete="off">'
+        +'<div class="row"><input id="cm-url" type="url" placeholder="https://compressatorium.example" '
+        +'maxlength="2048" value="'+esc(cm.source==='plugin'?(cm.url||''):'')+'">'
+        +'<input id="cm-key" type="password" placeholder="'+(cm.api_key_set?'API key saved':'API key (optional)')+'" '
+        +'autocomplete="new-password" maxlength="4096"></div>'
+        +'<div class="row"><button class="mini accent" type="submit">Save</button>'
+        +(cm.api_key_set&&cm.source!=='env'?'<button class="mini" id="cm-clear" type="button">Clear API key</button>':'')
+        +'</div></form>'
+        +'<p class="help">'+esc(cm.credit||'')+'</p></div>' : '';
     return '<div class="pcard'+(pl.installed?' installed':'')+'">'
       +'<h4>'+esc(pl.name)+(pl.author?'<span class="by">by '+esc(pl.author)+'</span>':'')+'</h4>'
       +'<div class="desc">'+esc(pl.description||'No description supplied.')+'</div>'
@@ -1386,7 +1403,7 @@ RENDER.hub=async()=>{
       +(pl.key_required?'<div class="help">Requires an account or key. Check the instructions before installing.</div>':'')
       +'<div class="foot">'+action
       +(net?'<span class="net">reaches '+esc(net)+'</span>':'')+'</div>'
-      +authForm+'</div>';
+      +authForm+cmForm+'</div>';
   };
 
   const render=d=>{
@@ -1653,6 +1670,58 @@ RENDER.hub=async()=>{
     };
     if(iaClear) iaClear.onclick=async()=>{
       await submitIaAuth({clear:true},'Could not clear Archive.org login','Archive.org credentials cleared');
+    };
+
+    const cmF=$('#cm-form');
+    const cmClear=$('#cm-clear');
+    const submitCm=async(payload,okToast)=>{
+      const opVer=typeof pageVersion==='number'?pageVersion:0;
+      // A filter can re-render the Hub while Save is pending; then this form
+      // is gone and a newer one may hold unsaved input, so leave it alone.
+      const formCurrent=()=>isCurrentHub(opVer)&&!!cmF&&cmF.isConnected;
+      const btn=cmF?cmF.querySelector('button[type="submit"]'):null;
+      // The fields stay locked until the save and refresh finish, so nothing
+      // typed meanwhile is lost to the re-render.
+      const fields=cmF?[...cmF.querySelectorAll('input')]:[];
+      fields.forEach(f=>f.disabled=true);
+      if(btn)btn.disabled=true; if(cmClear)cmClear.disabled=true;
+      try{
+        try{
+          const response=await fetch('/api/v1/hub/compressatorium',{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)});
+          const result=await response.json();
+          if(!formCurrent()) return;
+          actionError=result.ok?'':(result.error||'Could not save the Compressatorium settings');
+          if(result.ok)toast(okToast);
+        }catch(e){
+          if(!formCurrent()) return;
+          actionError='Could not save the Compressatorium settings';
+        }
+        const nextHs=await j('/api/v1/hub/status').catch(()=>hs);
+        if(!formCurrent()) return;
+        hs=nextHs;
+        const nextData=await load();
+        if(!formCurrent()) return;
+        render(nextData);
+      }finally{
+        if(isCurrentHub(opVer)){fields.forEach(f=>f.disabled=false); if(btn)btn.disabled=false; if(cmClear)cmClear.disabled=false;}
+      }
+    };
+    if(cmF) cmF.onsubmit=async e=>{
+      e.preventDefault();
+      // Send the address only when it was edited: a key-only save must not
+      // clear a saved URL the card is not showing. Emptying the field still
+      // clears it.
+      const urlField=$('#cm-url');
+      const payload={};
+      if(urlField&&urlField.value.trim()!==urlField.defaultValue.trim())payload.url=urlField.value.trim();
+      const key=$('#cm-key').value;
+      if(key)payload.api_key=key;
+      await submitCm(payload,'Compressatorium settings saved');
+    };
+    if(cmClear) cmClear.onclick=async()=>{
+      await submitCm({clear_api_key:true},'Compressatorium API key cleared');
     };
 
     p.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
@@ -2021,8 +2090,23 @@ RENDER.add=async()=>{
       <button class="btn ghost" id="g-wish" style="margin-top:20px">Save to wishlist</button>
       <button class="btn" id="g-go" style="margin-top:20px">Search &amp; Grab</button>
     </div>
+    <div class="row" id="g-parts" style="display:none;margin-top:10px;gap:14px">
+      <span class="help" style="margin:0">Game packages:</span>
+      <label><input type="checkbox" data-part="base" checked> Base game</label>
+      <label><input type="checkbox" data-part="update"> Update</label>
+      <label><input type="checkbox" data-part="dlc"> DLC</label>
+    </div>
     <div id="g-out" style="margin-top:16px"></div></div>`;
   enhancePlatformSelect($('#g-plat'), 'Select a platform');
+  // Platforms whose games ship as base game, update and DLC packages (the
+  // server marks them "parts"). A combined pack is preferred; whatever an
+  // import does not bring stays on Wanted.
+  const hasParts=slug=>PLATFORMS.some(p=>p.slug===slug&&p.parts);
+  const syncParts=()=>{$('#g-parts').style.display=hasParts($('#g-plat').value)?'flex':'none';};
+  $('#g-plat').addEventListener('change',syncParts);
+  const chosenParts=platform=>hasParts(platform)
+    ?[...document.querySelectorAll('#g-parts [data-part]')].filter(c=>c.checked).map(c=>c.dataset.part):null;
+  const withParts=(body,platform)=>{const parts=chosenParts(platform);return parts&&parts.length?{...body,parts}:body;};
   $('#g-go').onclick=async()=>{
     const game=$('#g-name').value.trim(), platform=$('#g-plat').value;
     if(!game){toast('Enter a game name');return;}
@@ -2030,7 +2114,7 @@ RENDER.add=async()=>{
     $('#g-out').innerHTML='<div class="empty">Searching indexers…</div>';
     const r=await j('/api/request',{method:'POST',
       headers:{'content-type':'application/json'},
-      body:JSON.stringify({game,platform})});
+      body:JSON.stringify(withParts({game,platform},platform))});
     if(!current())return;
     $('#g-out').innerHTML=r.ok
       ? `<div class="card" style="margin:0"><h3>Grabbed</h3>
@@ -2043,7 +2127,7 @@ RENDER.add=async()=>{
   $('#g-wish').onclick=async()=>{
     const game=$('#g-name').value.trim(),platform=$('#g-plat').value;
     if(!game||!platform){toast('Enter a title and select a platform');return;}
-    const r=await j('/api/v1/wanted/add',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({game,platform,monitored:false})});
+    const r=await j('/api/v1/wanted/add',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(withParts({game,platform,monitored:false},platform))});
     if(!current())return;
     toast(r.ok?'Saved to wishlist; automatic searches are off':r.error||'Could not save');refreshCounts();
   };
@@ -2137,6 +2221,7 @@ RENDER.search=async()=>{
             style="text-decoration:none">&#8599;</a>`:''}
           ${r.torrent_file_path?`<div class="help" title="Only this path is selected from the collection">File: <code>${esc(r.torrent_file_path)}</code></div>`:''}
           ${r.platform?` <span class="pill" title="Target platform">${esc(r.platform)}</span>`:''}
+          ${r.package?` <span class="pill" title="What this release holds: base game, update, DLC or a pack">${esc(r.package)}</span>`:''}
           ${r.private?' <span class="pill">private</span>':''}
           ${r.protocol==='usenet'?' <span class="pill">usenet</span>':''}</td>
         <td style="white-space:nowrap">${mb(r.size)}</td>
@@ -2546,7 +2631,7 @@ function editList(item){
   };
 }
 
-let DISC={mode:'library',shelf:'top-rated',genre:''};
+let DISC={mode:'library',shelf:'top-rated',genre:'',platform:'',sort:'popular',q:''};
 RENDER.discover=async()=>{
   // Two sources, and the local one is the default because it works with
   // nothing configured: your own library already carries genres, ratings
@@ -2557,7 +2642,8 @@ RENDER.discover=async()=>{
                  ['multiplayer','Multiplayer'],['anniversary','On this day'],
                  ['by-genre','Genre'],['by-franchise','Franchise'],
                  ['by-company','Company']];
-  const webTabs=[['popular','Popular'],['new','New releases'],['upcoming','Upcoming']];
+  const webTabs=[['popular','Popular'],['new','New releases'],['upcoming','Upcoming'],
+                 ['platform','By platform']];
   const tabs=mine?libTabs:webTabs;
   if(mine&&!libTabs.some(t=>t[0]===DISC.shelf)) DISC.shelf='top-rated';
   if(!mine&&!webTabs.some(t=>t[0]===DISC.shelf)) DISC.shelf='popular';
@@ -2619,6 +2705,7 @@ RENDER.discover=async()=>{
     return;
   }
 
+  if(DISC.shelf==='platform'){await discoverPlatform();return;}
   const d=await j('/api/v1/discover?shelf='+DISC.shelf).catch(()=>({items:[]}));
   const shelf=DISC.shelf;
   if(!d.items||!d.items.length){
@@ -2671,6 +2758,108 @@ RENDER.discover=async()=>{
     refreshCounts();
   });
 };
+
+// One platform's whole catalogue (issue #238): pick a system, sort it,
+// search inside it, and add games without leaving the page. Every row is about
+// a platform ROMarr files, so each says whether it is already yours.
+async function discoverPlatform(){
+  const version=pageVersion;
+  const current=()=>activePage==='discover'&&pageVersion===version;
+  const sorts=[['popular','Popular'],['released','Release date'],['rating','Rating'],['name','A–Z']];
+  const stateLabel={library:'In library',downloading:'Downloading',
+                    monitored:'Wanted',unmonitored:'Wishlist'};
+  $('#d-genres').innerHTML=`<div class="row" style="gap:6px;flex-wrap:wrap">
+      <select id="dp-plat"><option value="">Choose a platform…</option>${
+        PLATFORMS.map(x=>`<option value="${esc(x.slug)}" ${x.slug===DISC.platform?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
+      <select id="dp-sort">${sorts.map(([k,l])=>`<option value="${k}" ${k===DISC.sort?'selected':''}>${l}</option>`).join('')}</select>
+      <input id="dp-q" placeholder="Search this platform" value="${esc(DISC.q)}" style="min-width:200px">
+      <button class="btn ghost" id="dp-go">Search</button></div>`;
+  const rerun=()=>{
+    DISC.platform=$('#dp-plat').value; DISC.sort=$('#dp-sort').value;
+    DISC.q=$('#dp-q').value.trim(); go('discover');
+  };
+  $('#dp-plat').onchange=rerun; $('#dp-sort').onchange=rerun; $('#dp-go').onclick=rerun;
+  $('#dp-q').onkeydown=e=>{if(e.key==='Enter')rerun();};
+  if(!DISC.platform){
+    $('#d-out').innerHTML='<div class="empty">Choose a platform to browse its games.</div>';
+    return;
+  }
+  const items=[];
+  // Game titles with a save in flight, and whether a page is loading: both
+  // survive redraws, so a rebuilt button cannot send the same request twice.
+  const saving=new Set();
+  let page=0, providerLabel='', providerType='', more=false, loading=false, pageError='';
+  const tile=(g,i)=>{
+    const st=g.state||'';
+    const href=gameHref(DISC.platform,'',g.title);
+    const busy=saving.has(g.title)?' disabled':'';
+    return `<div class="tile">
+      <a href="${esc(href)}"><div class="art" style="background-image:url('${esc(g.cover_url||'')}')"></div></a>
+      <div class="nm" title="${esc(g.summary||'')}">${esc(g.title)}</div>
+      <div class="pf">${esc((g.released||'').slice(0,4))}${g.rating?' · ★'+Number(g.rating).toFixed(1):''}</div>
+      ${st?`<div class="pf" style="padding-top:0"><span class="pill">${esc(stateLabel[st]||st)}</span></div>`
+        :`<div class="rowact" style="margin-top:4px">
+          <button data-dpadd="${i}" data-search="1"${busy}>${busy?'Saving…':'Want + search'}</button>
+          <button data-dpadd="${i}" data-search="0"${busy}>Wishlist</button></div>`}</div>`;
+  };
+  const draw=()=>{
+    $('#d-out').innerHTML=`<p class="help">${fmt(items.length)} game(s) from
+        ${esc(providerLabel||'a metadata provider')}'s catalogue for this platform.
+        Badges show what is already in your library or Wanted.</p>
+      <div class="grid">${items.map(tile).join('')}</div>
+      ${pageError?`<p class="help" role="alert">${esc(pageError)}</p>`:''}
+      ${more?`<div class="row" style="margin-top:10px"><button class="btn ghost" id="dp-more"${loading?' disabled':''}>${
+        loading?'Loading…':pageError?'Try again':'Load more'}</button></div>`:''}`;
+    document.querySelectorAll('[data-dpadd]').forEach(b=>b.onclick=async()=>{
+      const g=items[Number(b.dataset.dpadd)], search=b.dataset.search==='1';
+      if(!g||saving.has(g.title))return;
+      saving.add(g.title); draw();
+      const r=await j('/api/v1/wanted/add',{method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({game:g.title,platform:DISC.platform,monitored:search,search})})
+        .catch(()=>({ok:false,error:'Could not save'}));
+      saving.delete(g.title);
+      refreshCounts();
+      if(!current())return;
+      if(r.ok)g.state=r.state||(search?'monitored':'unmonitored');
+      toast(r.ok?(r.search?.ok?'Download started':search?'No release yet; monitoring is on':'Saved to wishlist')
+        :(r.error||'Could not save'));
+      draw();
+    });
+    const btn=$('#dp-more'); if(btn) btn.onclick=load;
+  };
+  const load=async()=>{
+    if(loading)return;
+    loading=true; if(items.length)draw();
+    const d=await j('/api/v1/discover/platform?platform='+encodeURIComponent(DISC.platform)
+      +'&sort='+encodeURIComponent(DISC.sort)+'&q='+encodeURIComponent(DISC.q)
+      +'&page='+(page+1)+'&limit=40'
+      +(providerType?'&provider='+encodeURIComponent(providerType):''))
+      .catch(()=>({items:[],error:'Browse failed'}));
+    loading=false;
+    if(!current())return;
+    const rows=d.items||[];
+    if(!rows.length){
+      if(!items.length){
+        $('#d-out').innerHTML=`<div class="empty">${esc(d.error||'Nothing to show.')}</div>`;
+        return;
+      }
+      // Keep what is loaded and offer the same page again.
+      pageError=d.error||'The next page did not load.';
+      if(!d.error)more=false;
+      draw();
+      return;
+    }
+    page+=1; pageError='';
+    providerLabel=d.provider_label||providerLabel;
+    providerType=providerType||d.provider||'';
+    items.push(...rows);
+    more=!!d.has_more;
+    draw();
+  };
+  $('#d-out').innerHTML='<div class="empty">Browsing…</div>';
+  await load();
+}
 
 RENDER.peers=async()=>{
   const d=await j('/api/v1/peer').catch(()=>({peers:[]}));
@@ -4307,12 +4496,17 @@ RENDER.queue=async()=>{
         <td>${esc(i.primary)}<div class="help">${esc(i.evidence)} (${esc(i.confidence)})<br>${i.bytes==null?'Expanded size unknown':esc(String(i.bytes))+' bytes'}<br>${i.members.map(esc).join('<br>')}</div></td>
         <td><select data-plan-role="${n}"><option value="unknown">Needs review</option><option value="base">Base game</option><option value="update">Update for this base</option><option value="dlc">DLC for this base</option><option value="additional-game">Additional game</option></select></td><td>${esc(i.destination)}</td></tr>`).join('')}</tbody></table>
       <details><summary>${plan.extras.length} excluded files</summary>${plan.extras.map(esc).join('<br>')||'None'}</details>
-      <p><button class="btn" id="q-plan-save">${plan.romm_routing?"Review destinations":"Save selection"}</button> <button class="btn ghost" id="q-plan-back">Back</button></p><div id="q-plan-review"></div>`;
+      <p><button class="btn" id="q-plan-save">${plan.romm_routing||plan.package_routing?"Review destinations":"Save selection"}</button> <button class="btn ghost" id="q-plan-back">Back</button></p><div id="q-plan-review"></div>`;
     $('#q-plan-mode').value=saved.mode||'single';
     if(plan.romm_routing) $('#q-plan-existing').value=saved.existing_game||'';
     plan.items.forEach((i,n)=>document.querySelector(`[data-plan-role="${n}"]`).value=selected.get(i.primary)||i.role);
     $('#q-plan-back').onclick=()=>go('queue');
+    // Bumped whenever the selection changes, so a review answer that arrives
+    // after a change is dropped instead of binding confirmation to old roles.
+    let reviewGen=0;
+    const pageAt=typeof pageVersion==='number'?pageVersion:0;
     $('#q-plan-save').onclick=async()=>{
+      const gen=++reviewGen;
       const choices=plan.items.flatMap((i,n)=>document.querySelector(`[data-plan-check="${n}"]`).checked?[{primary:i.primary,role:document.querySelector(`[data-plan-role="${n}"]`).value}]:[]);
       const selection={token:plan.token,choices,mode:$('#q-plan-mode').value,existing_game:plan.romm_routing?$('#q-plan-existing').value:''};
       const save=async extra=>{
@@ -4320,14 +4514,16 @@ RENDER.queue=async()=>{
         if(result.error){toast(result.error);return;}
         toast('Selection saved. The next import sweep will use it and retain the source.');go('queue');
       };
-      if(!plan.romm_routing){await save({});return;}
+      if(!plan.romm_routing&&!plan.package_routing){await save({});return;}
       const reviewed=await post({review:true,...selection});
+      if(gen!==reviewGen||(typeof activePage!=='undefined'&&activePage!=='queue')
+         ||(typeof pageVersion==='number'&&pageVersion!==pageAt))return;
       if(reviewed.error){toast(reviewed.error);return;}
       const destinations=reviewed.preview.planned_destinations||{};
       $('#q-plan-review').innerHTML=`<h3>Confirm destination tree</h3><p class="help">Files are organized for RomM scanning; updates/DLC are not installed or applied to an emulator. Sources stay intact.</p><ul>${Object.entries(destinations).map(([primary,destination])=>`<li>${esc(primary)} → <code>${esc(destination)}</code></li>`).join('')}</ul><button class="btn" id="q-plan-confirm">Confirm these destinations</button>`;
       $('#q-plan-confirm').onclick=()=>save({reviewed_destinations:destinations});
     };
-    document.querySelectorAll('[data-plan-check],[data-plan-role],#q-plan-mode,#q-plan-existing').forEach(c=>c.onchange=()=>{$('#q-plan-review').innerHTML='';});
+    document.querySelectorAll('[data-plan-check],[data-plan-role],#q-plan-mode,#q-plan-existing').forEach(c=>c.onchange=()=>{reviewGen++;$('#q-plan-review').innerHTML='';});
   });
   document.querySelectorAll('[data-qresume]').forEach(b=>b.onclick=()=>act(b.dataset.qresume,'resume-retained'));
   document.querySelectorAll('[data-qretry]').forEach(b=>b.onclick=()=>act(b.dataset.qretry,'retry'));
@@ -4612,6 +4808,7 @@ RENDER.media=()=>settingsPage('Media Management',
   +chk('rename_on_import','Use DAT names for verified single-file imports (disc-set filenames stay intact)',SETTINGS.rename_on_import)
   +chk('prefer_hardlinks','Prefer hardlinks; copy when unavailable (unchanged files only)',SETTINGS.prefer_hardlinks)
   +chk('switch_attach_extras','File Switch updates and DLC inside their game\'s folder (update/, dlc/) when the game already has one',SETTINGS.switch_attach_extras!==false)
+  +chk('game_package_folders','In RomM libraries, file games with updates and DLC (PlayStation, 3DS, Wii U, Switch) as one game folder: base game in &lt;Title&gt;/, update in update/, DLC in dlc/',SETTINGS.game_package_folders!==false)
   +`<p class="dim">Hardlinks share file contents with the download. Editing either file changes both. Archive members are extracted normally. Shared library read permissions are required; ROMarr never changes source permissions.</p>`
   +chk('retain_downloads_after_import','Keep completed downloads for seeding after import',SETTINGS.retain_downloads_after_import)
   +chk('overwrite_existing','Overwrite an existing file',SETTINGS.overwrite_existing)
@@ -5382,6 +5579,18 @@ RENDER.status=async()=>{
     &&(typeof activePage!=='string'||activePage==='status')
     &&(viewVersion===null||pageVersion===viewVersion);
   const h=await j('/api/v1/system/status');
+  if(h.dats_loading){
+    // Update only the DAT tiles: re-rendering the page would reset its forms.
+    const poll=async()=>{
+      if(!current()||!$('#status-dats'))return;
+      const s=await j('/api/v1/system/status').catch(()=>null);
+      if(!current()||!$('#status-dats'))return;
+      if(!s||s.dats_loading){setTimeout(poll,3000);return;}
+      $('#status-dats').innerHTML='<b>'+(s.dats||0)+'</b><span>DATs loaded</span>';
+      $('#status-dat-games').innerHTML='<b>'+(s.dat_games||0)+'</b><span>Known dumps</span>';
+    };
+    setTimeout(poll,3000);
+  }
   if(!current())return;
   const row=(l,ok,extra='')=>`<tr><td>${l}</td>
     <td><span class="dot ${ok?'up':'down'}"></span>${ok?'OK':'Not available'}</td>
@@ -5444,8 +5653,8 @@ RENDER.status=async()=>{
     <div class="card"><h3>About</h3><div class="st">
       <div><b>${esc(h.version||"unknown")}</b><span>Version</span></div>
       <div><b>${h.platforms}</b><span>Platforms</span></div>
-      <div><b>${h.dats||0}</b><span>DATs loaded</span></div>
-      <div><b>${h.dat_games||0}</b><span>Known dumps</span></div>
+      <div id="status-dats"><b>${h.dats_loading?"…":(h.dats||0)}</b><span>${h.dats_loading?"Loading DATs":"DATs loaded"}</span></div>
+      <div id="status-dat-games"><b>${h.dat_games||0}</b><span>Known dumps</span></div>
       <div><b>${h.events}</b><span>History events</span></div>
       <div><b>${esc(h.uptime)}</b><span>Uptime</span></div>
     </div>${buildIdentityLine(h.build)}<p class="help"><a href="https://romarr.app/privacy" target="_blank" rel="noopener noreferrer">Privacy policy</a> · <a href="mailto:me@romarr.app">Contact support</a> · <a href="https://discord.gg/ywNFceuAd" target="_blank" rel="noopener noreferrer">Discord</a> · <a href="https://opencollective.com/romarr" target="_blank" rel="noopener noreferrer">Open Collective</a> · <a href="https://github.com/BlizzHacker/romarr" target="_blank" rel="noopener noreferrer">GitHub</a></p></div>
@@ -6369,11 +6578,26 @@ RENDER.reports=async()=>{
 
 // The optional guide uses the same editors and connection checks as Settings.
 const SETUP={step:0,mode:'organize',initialized:false};
+const setupDatState=state=>state.dat_loading
+  ?'<p class="help"><b>Loading DATs…</b> Verification starts when they are ready.</p>'
+  :(state.dat_loaded?'<p class="help"><b>'+fmt(state.dat_loaded)+' DAT(s) loaded</b> · '+fmt(state.dat_games)+' games</p>':'');
 RENDER.setup=async()=>{
   const version=typeof pageVersion==='number'?pageVersion:null;
   const current=()=>version===null||(version===pageVersion&&activePage==='setup');
   const state=await j('/api/v1/setup/status').catch(()=>null);
   if(!current())return;
+  if(state&&state.dat_loading){
+    // Refresh only the DAT line, so a half-typed form keeps its input.
+    const poll=async()=>{
+      if(!current())return;
+      const s=await j('/api/v1/setup/status').catch(()=>null);
+      if(!current())return;
+      if(!s||s.dat_loading){setTimeout(poll,3000);return;}
+      Object.assign(state,{dat_loading:false,dat_loaded:s.dat_loaded,dat_games:s.dat_games});
+      const el=$('#setup-dat-state'); if(el) el.innerHTML=setupDatState(state);
+    };
+    setTimeout(poll,3000);
+  }
   if(!state||state.error){
     $('#page').innerHTML='<div class="card"><h3>Setup Guide</h3><p class="help">We could not read your setup. Refresh this page to try again.</p></div>';
     return;
@@ -6418,7 +6642,7 @@ RENDER.setup=async()=>{
   }else if(active===4){
     content='<h3>Add confidence and more sources</h3><p class="help">Both of these are optional. You can start with your existing files and return later.</p>'
       +'<h4>Verify with DATs</h4><p class="help">A No-Intro or Redump DAT is a checklist of known file hashes. It lets ROMarr verify a dump and compare your collection with a complete set.</p>'
-      +(state.dat_loaded?'<p class="help"><b>'+fmt(state.dat_loaded)+' DAT(s) loaded</b> · '+fmt(state.dat_games)+' games</p>':'')
+      +'<div id="setup-dat-state">'+setupDatState(state)+'</div>'
       +'<div class="field"><label for="setup-dat-path">Folder containing your DAT files</label><input id="setup-dat-path" value="'+esc(state.dat_path)+'" placeholder="/dats"></div>'
       +action('setup-dats','Check and load DATs')+'<div id="setup-dat-result" role="status" class="testline"></div>'
       +'<h4 style="margin-top:22px">Explore ROM Hub</h4><p class="help">ROM Hub is the plugin catalogue. Plugins can add supported search sources and download tools. Open a plugin’s details to check what it needs before installing.</p>'
@@ -6600,14 +6824,21 @@ RENDER.getstarted=async()=>{
     +'</p></div>';
 };
 
+// Shared torrent clients also hold films and TV. The picker lists only
+// game-looking torrents; the rest are fetched too but stay hidden until
+// "Show them anyway" reveals them in place, so DAT, platform and plan
+// choices already made on this page are kept.
 RENDER.collections=async()=>{
   const version=pageVersion;
   const current=()=>activePage==='collections'&&pageVersion===version;
   const st=await j('/api/v1/collection').catch(()=>({dats:[],batches:[]}));
   if(!current())return;
-  const sourceState=await j('/api/v1/collection/source').catch(()=>({torrents:[],jobs:[]}));
+  const sourceState=await j('/api/v1/collection/source?all=1').catch(()=>({torrents:[],jobs:[]}));
   if(!current())return;
-  const sourceTorrents=sourceState.torrents||[];
+  const allSources=sourceState.torrents||[];
+  const sourceTorrents=allSources.filter(t=>t.game!==false)
+    .concat(allSources.filter(t=>t.game===false));
+  const hiddenSources=allSources.length-allSources.filter(t=>t.game!==false).length;
   const dats=st.dats||[];
   $('#page').innerHTML='<div class="card"><h3>Plan a set</h3>'
     +(dats.length
@@ -6659,11 +6890,19 @@ RENDER.collections=async()=>{
     +'<div id="cres" style="margin-top:16px"></div></div>'
     +'<div class="card" style="margin-top:16px"><h3>Acquire missing files from a set torrent</h3>'
     +(sourceState.errors||[]).map(error=>'<div class="panel-note panel-warn">'+esc(error)+'</div>').join('')
+    +(hiddenSources>0
+      ?'<p class="help" id="csrc-hidden">'+esc(String(hiddenSources))
+       +(hiddenSources===1?' torrent that does not look like a game is':' torrents that do not look like games are')
+       +' hidden (films, TV, music). '
+       +'<a href="#collections" id="csrc-show-all">Show them anyway</a></p>'
+      :'')
     +(sourceTorrents.length&&dats.length
       ?'<p class="help">Preview a DAT plan against one existing qBittorrent or Transmission torrent. ROMarr selects only matching missing files, stages one budgeted batch at a time, verifies each staged set against the DAT, then restores the torrent’s original file priorities and paused state. The cap limits ROMarr staging copies; downloaded torrent files remain in the torrent client and need separate source storage.</p>'
-       +'<div class="row" style="flex-wrap:wrap">'
+       +'<div class="row" id="csrc-row" style="flex-wrap:wrap'
+       +(hiddenSources===allSources.length?';display:none':'')+'">'
        +'<select id="csrc-torrent">'+sourceTorrents.map(t=>
-         '<option value="'+esc(t.hash)+'" data-client="'+esc(t.client_id)+'">'
+         '<option value="'+esc(t.hash)+'" data-client="'+esc(t.client_id)+'"'
+         +(t.game===false?' hidden data-nongame="1"':'')+'>'
          +esc(t.client_name+' · '+t.name+' · '+t.state)+'</option>').join('')+'</select>'
        +'<label class="help">Staging cap (GiB) <input id="csrc-cap" type="number" min="0.01" step="1" value="100" style="width:90px"></label>'
        +'<button class="btn" id="csrc-plan">Preview source plan</button></div>'
@@ -6675,6 +6914,13 @@ RENDER.collections=async()=>{
     +'<div id="csrc-jobs" style="margin-top:10px"></div></div>'
     +'<div class="card" style="margin-top:16px"><h3>Batches</h3>'
     +'<div id="cbatch"></div></div>';
+  const showAllSources=$('#csrc-show-all');
+  if(showAllSources)showAllSources.onclick=e=>{
+    e.preventDefault();
+    document.querySelectorAll('#csrc-torrent option[data-nongame]').forEach(o=>{o.hidden=false;});
+    const row=$('#csrc-row'); if(row)row.style.display='';
+    const note=$('#csrc-hidden'); if(note)note.textContent='Showing every torrent in the client.';
+  };
 
   const drawBatches=async()=>{
     if(!current())return;
@@ -7045,11 +7291,14 @@ RENDER.tasks=async()=>{
     :s%60===0?`every ${s/60} min`:`every ${s} s`;
   const scheduled=(d.items||[]).map(t=>[t.name,t.label,t]);
   const manualOnly=[['RefreshLibrary','Re-read the library from RomM',null],
-    ['Decompress','Batch decompress the library: extract via Compressatorium, '
-     +'verify every output against the DATs. Originals are deleted only when '
-     +'they verified AND the API call asked for deletion — this button never '
-     +'deletes. Needs COMPRESSATORIUM_URL and decompress_path set in '
-     +'settings.',null]];
+    ['Decompress','Preview batch decompression: Run lists what would happen to each '
+     +'file and changes nothing. A real run is started through the API '
+     +'(POST /api/v1/decompress): CHD, RVZ, NSZ and the other compressed images go '
+     +'to Compressatorium, set by COMPRESSATORIUM_URL or the Compressatorium plugin '
+     +'on the ROM Hub page, and RAR sets and multi-file archives are extracted by '
+     +'ROMarr itself. Every output is verified against the DATs, and originals are '
+     +'deleted only when they verified and the API call asked for it. Needs '
+     +'decompress_path set in settings.',null]];
   $('#page').innerHTML=`<div class="card"><h3>Tasks</h3>
     <p class="help">The service runs these on its own clock &mdash; intervals live
       under Settings &rarr; General. Run starts one now regardless.</p>

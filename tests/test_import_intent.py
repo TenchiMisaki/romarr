@@ -1,4 +1,5 @@
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from romarr.import_intent import preview_import, choose_import
@@ -67,6 +68,38 @@ def test_pc_installer_remains_required(tmp_path):
     path = archive(tmp_path, {"setup.exe": b"exe", "setup-1.bin": b"data"})
     p = preview_import(path, resolve("win"), tmp_path / "lib")
     assert "setup.exe" in p["items"][0]["members"]
+
+
+def test_unverified_vita_packages_require_review_even_with_a_folder_plan(tmp_path):
+    folder = tmp_path / "Persona 4 Golden"
+    folder.mkdir()
+    (folder / "Persona 4 Golden.vpk").write_bytes(b"base")
+    (folder / "Other Game Update.vpk").write_bytes(b"update")
+    p = preview_import(folder, resolve("psvita"), tmp_path / "lib",
+                       package_folders=True, game_title="Persona 4 Golden")
+    assert p["requires_review"]
+    assert all(item["confidence"] == "format-only" for item in p["items"])
+    assert all(item["role"] == "base" for item in p["items"])
+
+
+def test_package_role_uses_filename_id_not_a_parent_folder_id(tmp_path):
+    folder = tmp_path / "Fire Emblem Fates [00040000001B4000]"
+    folder.mkdir()
+    (folder / "Fire Emblem Fates [00040000001B4000].cia").write_bytes(b"base")
+    (folder / "Update [0004000E001B4000].cia").write_bytes(b"update")
+    p = preview_import(folder, resolve("3ds"), tmp_path / "lib", package_folders=True,
+                       game_title="Fire Emblem Fates")
+    roles = {Path(item["primary"]).name: (item["role"], item["confidence"]) for item in p["items"]}
+    assert roles["Update [0004000E001B4000].cia"] == ("update", "title-id")
+
+
+def test_conflicting_title_ids_keep_a_single_package_in_review(tmp_path):
+    path = tmp_path / "Fire Emblem Fates [00040000001B4000][0004000E001B4000].cia"
+    path.write_bytes(b"package")
+    p = preview_import(path, resolve("3ds"), tmp_path / "lib", game_title="Fire Emblem Fates")
+    assert p["requires_review"]
+    assert p["items"][0]["role"] == "unknown"
+    assert not p["items"][0]["selected"]
 
 
 def test_service_stops_bundle_until_review_then_persists_and_retains_source(tmp_path, monkeypatch):

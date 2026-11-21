@@ -121,6 +121,10 @@ class WantedItem:
     # for months is retried weekly rather than hourly.
     searched_at: str = ""
     monitored: bool = True
+    # The parts of a game this request wants ("base", "update", "dlc"), on
+    # platforms whose games have updates and DLC.
+    # Empty means the game itself. See game_packages.normalise_parts.
+    parts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -184,6 +188,9 @@ class QueueItem:
     retained_torrent_hash: str = ""
     import_preview: dict = field(default_factory=dict)
     import_intent: dict = field(default_factory=dict)
+    # The parts the request asked for when this row was grabbed, so an
+    # import that brings only some of them can leave the rest on Wanted.
+    parts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -311,6 +318,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rename_on_import": True,
     "prefer_hardlinks": False,
     "switch_attach_extras": True,   # file Switch updates/DLC in <game>/update|dlc
+    "game_package_folders": True,   # RomM libraries: base/update/DLC in <Title>/, update/, dlc/
     "retain_downloads_after_import": True,
     "overwrite_existing": False,
     # Profile: for ROMs the meaningful axis is region and revision, not
@@ -530,19 +538,74 @@ class Store:
 
     # -- wanted ------------------------------------------------------------
 
-    def want(self, game: str, platform: str, monitored: bool = True) -> WantedItem:
+    def want(self, game: str, platform: str, monitored: bool = True,
+             parts=None) -> WantedItem:
         """Add to Wanted, or return the existing entry.
 
         Requesting the same game twice is a retry, not a second entry.
+        `parts` (validated by the caller) replaces the package parts the entry
+        wants; None leaves them as they are. The game alone is stored empty.
         """
+        stored = None if parts is None else ([] if tuple(parts) == ("base",) else list(parts))
         with self._lock:
-            for item in self.wanted:
-                if item.game.lower() == game.lower() and item.platform == platform:
-                    return item
-            item = WantedItem(game=game, platform=platform, monitored=monitored)
+            item = next((w for w in self.wanted
+                         if w.game.lower() == game.lower() and w.platform == platform), None)
+            if item is not None and (stored is None or item.parts == stored):
+                return item
+            if item is None:
+                item = WantedItem(game=game, platform=platform, monitored=monitored,
+                                  parts=stored or [])
+                self.wanted.append(item)
+            else:
+                item.parts = stored
+        self.save()
+        return item
+
+    def ensure_wanted(self, game: str, platform: str, monitored: bool = True,
+                      parts=None) -> WantedItem:
+        """Create a wanted entry for a failed grab without replacing a newer choice."""
+        stored = None if parts is None else ([] if tuple(parts) == ("base",) else list(parts))
+        with self._lock:
+            item = next((w for w in self.wanted
+                         if w.game.lower() == game.lower() and w.platform == platform), None)
+            if item is not None:
+                return item
+            item = WantedItem(game=game, platform=platform, monitored=monitored,
+                              parts=stored or [])
             self.wanted.append(item)
         self.save()
         return item
+
+    def settle_parts(self, game: str, platform: str, missing, monitored: bool = True,
+                     settled=()) -> None:
+        """Remove settled parts while preserving requests added during an import.
+
+        Nothing missing drops the entry; otherwise the entry (re-added when an
+        import already fulfilled it, keeping its `monitored` choice) asks for
+        the parts that remain. `settled` is the in-flight request completed by
+        the import; current Wanted parts outside it belong to newer requests.
+        """
+        missing = set(missing)
+        settled = set(settled)
+        part_order = ("base", "update", "dlc")
+        with self._lock:
+            item = next((w for w in self.wanted
+                         if w.game.lower() == game.lower() and w.platform == platform), None)
+            if item is None:
+                if not missing:
+                    return
+                remaining = missing
+                item = WantedItem(game=game, platform=platform, monitored=monitored)
+                self.wanted.append(item)
+            else:
+                current = set(item.parts or ("base",))
+                remaining = (current - settled) | missing
+            if not remaining:
+                self.wanted.remove(item)
+            else:
+                item.parts = ([] if remaining == {"base"}
+                              else [part for part in part_order if part in remaining])
+        self.save()
 
     def set_monitored(self, game: str, platform: str, monitored: bool) -> bool:
         """Turn watching on or off for one Wanted entry; False if it is not there."""
@@ -568,6 +631,24 @@ class Store:
         if changed:
             self.save()
         return changed
+
+    def fulfil_base(self, game: str, platform: str) -> bool:
+        """Settle a verified base while retaining any requested update or DLC."""
+        with self._lock:
+            item = next((w for w in self.wanted
+                         if w.game.lower() == game.lower() and w.platform == platform), None)
+            if item is None:
+                return False
+            current = set(item.parts or ("base",))
+            if "base" not in current:
+                return False
+            remaining = current - {"base"}
+            if remaining:
+                item.parts = [part for part in ("update", "dlc") if part in remaining]
+            else:
+                self.wanted.remove(item)
+        self.save()
+        return True
 
     def unwant(self, game: str, platform: str) -> bool:
         """Drop a request nobody wants any more.

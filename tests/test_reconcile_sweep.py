@@ -113,6 +113,30 @@ def test_reconcile_does_not_drop_a_title_with_no_verified_dump(tmp_path):
     assert [w.game for w in s.store.wanted] == ["Bust-A-Move 2"]
 
 
+def test_reconcile_keeps_update_request_when_only_verified_base_exists(tmp_path):
+    dat = dat_for("Bloodborne")
+    service = svc(tmp_path, dat)
+    folder = tmp_path / "roms" / "ps4"
+    folder.mkdir(parents=True)
+    (folder / "Bloodborne.pkg").write_bytes(BODY)
+    service.store.want("Bloodborne", "ps4", parts=("update",))
+    result = service.reconcile_platform("ps4")
+    assert result["count"] == 0
+    assert [(row.game, row.parts) for row in service.store.wanted] == [("Bloodborne", ["update"])]
+
+
+def test_reconcile_settles_verified_base_from_base_and_update_request(tmp_path):
+    dat = dat_for("Bloodborne")
+    service = svc(tmp_path, dat)
+    folder = tmp_path / "roms" / "ps4"
+    folder.mkdir(parents=True)
+    (folder / "Bloodborne.pkg").write_bytes(BODY)
+    service.store.want("Bloodborne", "ps4", parts=("base", "update"))
+    result = service.reconcile_platform("ps4")
+    assert result["count"] == 0
+    assert [(row.game, row.parts) for row in service.store.wanted] == [("Bloodborne", ["update"])]
+
+
 def test_reconcile_keeps_sequels_and_series_games_wanted(tmp_path):
     """A verified game must not clear a wanted sequel or shorter series name."""
     cases = [
