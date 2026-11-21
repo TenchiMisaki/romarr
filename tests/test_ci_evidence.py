@@ -89,20 +89,18 @@ def test_skip_gate_rejects_missing_forged_or_nonallowlisted_records(args, monkey
     junit(args, '<testcase classname="tests.test_sample" name="test_network"><skipped message="network"/>'
           '</testcase>', skipped=1)
     ci.finalize(args)
-    good_manifest = {
-        name: __import__("hashlib").sha256((args.public / name).read_bytes()).hexdigest()
-        for name in ci.FILES
-    }
+    def reseal():
+        ci.write(args.public / "manifest.json", {
+            name: __import__("hashlib").sha256((args.public / name).read_bytes()).hexdigest()
+            for name in ci.FILES
+        })
     (args.public / "skips.json").unlink()
     assert not ci.gate(args)
     ci.write(args.public / "skips.json", [{"test": "../private", "reason": "network"}])
-    ci.write(args.public / "manifest.json", good_manifest)
+    reseal()
     assert not ci.gate(args)
     ci.write(args.public / "skips.json", [{"test": "tests.test_sample::test_network", "reason": "raw private text"}])
-    ci.write(args.public / "manifest.json", {
-        name: __import__("hashlib").sha256((args.public / name).read_bytes()).hexdigest()
-        for name in ci.FILES
-    })
+    reseal()
     assert not ci.gate(args)
 
 
