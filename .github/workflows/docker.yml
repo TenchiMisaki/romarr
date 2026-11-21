@@ -88,6 +88,7 @@ jobs:
           path: |
             ${{ runner.temp }}/romarr-evidence-public/summary.json
             ${{ runner.temp }}/romarr-evidence-public/cases.json
+            ${{ runner.temp }}/romarr-evidence-public/skips.json
             ${{ runner.temp }}/romarr-evidence-public/manifest.json
 
       - name: Require passing evidence and successful upload

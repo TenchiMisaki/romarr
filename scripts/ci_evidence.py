@@ -2,9 +2,10 @@
 """Record exact-source pytest evidence without publishing test inputs or logs.
 
 Independent implementation inspired by TenchiMisaki/romarr-ci-controller.
-Raw output stays in the private directory; only allowlisted aggregate facts
-and anonymous case outcomes enter the public artifact. This is an evidence
-quality guard, not a sandbox against malicious code on the same runner.
+Raw output stays in the private directory; only allowlisted aggregate facts,
+anonymous case outcomes, and sanitized skipped-test identifiers/reasons enter
+the public artifact. This is an evidence quality guard, not a sandbox against
+malicious code on the same runner.
 """
 from __future__ import annotations
 
@@ -33,7 +34,16 @@ def source_repository():
         raise ValueError("unexpected workflow repository")
     return value
 STATES = ("passed", "failed", "error", "skipped")
-FILES = {"summary.json", "cases.json"}
+FILES = {"summary.json", "cases.json", "skips.json"}
+TEST_MODULE = re.compile(r"^tests(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+TEST_NAME = re.compile(r"^test[A-Za-z0-9_]*$")
+SKIP_TEST_ID = re.compile(r"^(?:" + TEST_MODULE.pattern[1:-1] + r"::" + TEST_NAME.pattern[1:-1]
+                          + r"|" + TEST_MODULE.pattern[1:-1] + r"::module-collection)$")
+SKIP_REASONS = frozenset(("credentials or authentication required", "network or remote service unavailable",
+                          "dependency unavailable", "platform or runtime unavailable",
+                          "test-specific condition (details withheld)", "No reason provided"))
+SENSITIVE_REASON_MARKERS = ("credential", "authorization", "authentication", "token", "secret", "password",
+                             "api_key", "api-key", "apikey", "auth_config", "auth config", "bearer", "basic")
 STRUCTURAL = [f"tests/test_{name}.py" for name in (
     "wired", "ui_pages", "openapi", "security_claims", "brand", "docker_install", "repo_hygiene")]
 
@@ -116,8 +126,45 @@ def test_env():
             and not k.startswith(("GIT_", "ACTIONS_"))}
 
 
+def _skip_record(case):
+    """Expose a static test identity and an allowlisted skip-reason category."""
+    classname = case.attrib.get("classname", "")
+    name = case.attrib.get("name", "")
+    # Pytest parameter values can contain input data; keep only the static name.
+    name = name.split("[", 1)[0]
+    identifier = classname + "::" + name
+    module_skip = not classname and TEST_MODULE.fullmatch(name)
+    if module_skip:
+        identifier = name + "::module-collection"
+    elif not TEST_MODULE.fullmatch(classname) or not TEST_NAME.fullmatch(name):
+        raise ValueError("invalid skipped test identity")
+    if len(identifier) > 256 or not SKIP_TEST_ID.fullmatch(identifier):
+        raise ValueError("invalid skipped test identity")
+    skipped = case.find("skipped")
+    reason = "" if skipped is None else (skipped.attrib.get("message") or "")
+    if module_skip and skipped is not None and (skipped.text or "").strip():
+        reason = skipped.text.strip()
+    normalized = " ".join(reason.split()).lower()
+    if not normalized:
+        category = "No reason provided"
+    elif any(marker in normalized for marker in SENSITIVE_REASON_MARKERS):
+        category = "credentials or authentication required"
+    elif any(marker in normalized for marker in ("network", "dns", "http", "url", "socket", "connection",
+                                                   "connectivity", "remote", "internet")):
+        category = "network or remote service unavailable"
+    elif any(marker in normalized for marker in ("dependency", "dependencies", "package", "module", "import",
+                                                   "install", "installed", "optional")):
+        category = "dependency unavailable"
+    elif any(marker in normalized for marker in ("platform", "windows", "linux", "macos", "operating system",
+                                                   "runtime", "python", "unsupported")):
+        category = "platform or runtime unavailable"
+    else:
+        category = "test-specific condition (details withheld)"
+    return {"test": identifier, "reason": category}
+
+
 def collect(path):
-    """Reconcile declared JUnit totals with every serialized anonymous case."""
+    """Reconcile JUnit totals with every case and expose sanitized skips only."""
     if path.stat().st_size > 32 * 1024 * 1024:
         raise ValueError("oversized JUnit")
     root = ET.parse(path).getroot()
@@ -126,6 +173,7 @@ def collect(path):
         raise ValueError("invalid JUnit structure")
     counts = dict.fromkeys(STATES, 0)
     cases = []
+    skips = []
     for suite in suites:
         if suite.tag != "testsuite" or suite.find("testsuite") is not None:
             raise ValueError("invalid nested suite")
@@ -138,6 +186,8 @@ def collect(path):
             state = outcomes[0] if outcomes else "passed"
             actual[state] += 1
             cases.append({"id": len(cases) + 1, "outcome": state})
+            if state == "skipped":
+                skips.append(_skip_record(case))
         expected = {key: int(suite.attrib[key]) for key in ("tests", "failures", "errors", "skipped")}
         if (min(expected.values()) < 0 or expected["tests"] != sum(actual.values())
                 or expected["failures"] != actual["failed"] or expected["errors"] != actual["error"]
@@ -147,7 +197,7 @@ def collect(path):
             counts[state] += actual[state]
     if not cases:
         raise ValueError("no test cases")
-    return counts, cases
+    return counts, cases, skips
 
 
 def pin(args):
@@ -195,11 +245,12 @@ def finalize(args):
                 or (result["exit"] is not None and type(result["exit"]) is not int)):
             raise ValueError("invalid run status")
         summary.update({key: result[key] for key in ("environment", "test", "exit")})
-        counts, cases = collect(args.private / "junit.xml")
+        counts, cases, skips = collect(args.private / "junit.xml")
         summary.update(counts=counts, collection="PASS")
         if summary["exit"] == 0 and (counts["failed"] or counts["error"]):
             summary["test"] = "FAIL"
         write(args.public / "cases.json", cases)
+        write(args.public / "skips.json", skips)
     except (OSError, ValueError, KeyError, ET.ParseError):
         pass
     try:
@@ -224,11 +275,19 @@ def gate(args):
         return False
     summary = read(args.public / "summary.json")
     cases = read(args.public / "cases.json")
+    skips = read(args.public / "skips.json")
     counts = dict.fromkeys(STATES, 0)
     for index, case in enumerate(cases, 1):
         if set(case) != {"id", "outcome"} or case["id"] != index or case["outcome"] not in STATES:
             return False
         counts[case["outcome"]] += 1
+    if not isinstance(skips, list) or len(skips) != counts["skipped"]:
+        return False
+    for item in skips:
+        if (not isinstance(item, dict) or set(item) != {"test", "reason"}
+                or not isinstance(item["test"], str) or not SKIP_TEST_ID.fullmatch(item["test"])
+                or item["reason"] not in SKIP_REASONS):
+            return False
     return (bool(cases) and counts == summary["counts"] and not counts["failed"] and not counts["error"]
             and all(summary[key] == "PASS" for key in ("test", "environment", "collection"))
             and summary["source"] == "UNCHANGED" and summary["exit"] == 0

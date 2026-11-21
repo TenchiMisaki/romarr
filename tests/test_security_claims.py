@@ -8,8 +8,12 @@ quietly becoming fiction.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import threading
+from http.server import ThreadingHTTPServer
+from urllib.request import urlopen
 
 import pytest
 
@@ -98,10 +102,19 @@ def test_a_plugin_still_does_not_inherit_romarr_credentials(doc):
 def test_the_unauthenticated_health_response_is_one_bit(tmp_path):
     """It used to hand out library paths and client URLs for free."""
     service = ROMarr({"ROMARR_DATA": str(tmp_path / "s.json"), "ROMARR_API_KEY": "k"})
-    report = service.health_report() if hasattr(service, "health_report") else None
-    if report is None:
-        pytest.skip("no health_report to inspect directly")
-    assert set(report) <= {"ok"}
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(service))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urlopen(f"http://127.0.0.1:{httpd.server_port}/api/health", timeout=5) as response:
+            assert response.status == 200
+            report = json.load(response)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+    assert not thread.is_alive(), "health test server did not stop"
+    assert report == {"ok": True}
 
 
 def test_the_document_admits_what_is_not_protected(doc):
