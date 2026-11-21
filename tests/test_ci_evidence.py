@@ -59,7 +59,7 @@ def test_docker_workflow_uploads_only_the_allowlisted_public_evidence():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/docker.yml").read_text(encoding="utf-8")
     upload = workflow.split("name: Upload anonymous test evidence", 1)[1].split("- name:", 1)[0]
     paths = upload.split("path: |", 1)[1].split("if-no-files-found:", 1)[0]
-    uploaded = {line.strip() for line in paths.splitlines() if "romarr-evidence-public/" in line}
+    uploaded = {line.strip() for line in paths.splitlines() if line.strip()}
     assert uploaded == {
         "${{ runner.temp }}/romarr-evidence-public/summary.json",
         "${{ runner.temp }}/romarr-evidence-public/cases.json",
