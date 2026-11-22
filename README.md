@@ -236,6 +236,8 @@ You can use Cartridge alongside your existing setup or keep using your favorite 
 | Current work and requested features | [Roadmap](ROADMAP.md) |
 | Test evidence and known validation gaps | [Proof notes](docs/PROOF.md) — dated records, not a guarantee for every integration |
 
+For security vulnerabilities, use the [security policy](SECURITY.md); do not open a public issue for exploitable matters.
+
 If something fails, [open an issue](https://github.com/BlizzHacker/romarr/issues/new) with your ROMarr version, install method, the action you tried, and the relevant error or log. Remove passwords, API keys and webhook URLs. Existing-install settings are changed in the UI; most connection environment variables only seed the first run.
 
 ## Contribute
