@@ -196,24 +196,6 @@ def finalize(args):
             raise ValueError("invalid run status")
         summary.update({key: result[key] for key in ("environment", "test", "exit")})
         counts, cases = collect(args.private / "junit.xml")
-
-        # Temporary PR 33 diagnostics. Keep raw pytest output private.
-        if args.pr == "33" and source_repository() == "TenchiMisaki/romarr":
-            for case in ET.parse(args.private / "junit.xml").iter("testcase"):
-                for outcome in ("failure", "error", "skipped"):
-                    entry = case.find(outcome)
-                    if entry is None:
-                        continue
-                    case_id = ".".join(case.get(key, "") for key in ("classname", "name"))
-                    # Omit parameter values, which can contain fixture data.
-                    case_id = case_id.split("[", 1)[0][:240]
-                    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", case_id):
-                        case_id = "<unavailable>"
-                    if outcome == "skipped":
-                        reason = re.sub(r"[\x00-\x1f\x7f]+", " ", entry.get("message", ""))[:240]
-                        print(f"pytest skipped {case_id}: {reason}")
-                    else:
-                        print(f"pytest {outcome} {case_id}")
         summary.update(counts=counts, collection="PASS")
         if summary["exit"] == 0 and (counts["failed"] or counts["error"]):
             summary["test"] = "FAIL"
@@ -222,10 +204,14 @@ def finalize(args):
         pass
     try:
         observed = live(target["pr"], target["ref"])
-        if observed == {key: target[key] for key in ("head", "base")} and clean(args.root, target["head"]):
+        if observed != {key: target[key] for key in ("head", "base")}:
+            print("Source verification failed: live revision changed during testing.")
+        elif not clean(args.root, target["head"]):
+            print("Source verification failed: checkout revision or cleanliness check failed.")
+        else:
             summary["source"] = "UNCHANGED"
     except (OSError, ValueError, KeyError):
-        pass
+        print("Source verification failed: live GitHub metadata could not be verified.")
     write(args.public / "summary.json", summary)
     members = sorted(p.name for p in args.public.iterdir() if p.name in FILES)
     write(args.public / "manifest.json", {name: hashlib.sha256((args.public / name).read_bytes()).hexdigest()
@@ -242,9 +228,6 @@ def gate(args):
         return False
     summary = read(args.public / "summary.json")
     cases = read(args.public / "cases.json")
-    if args.pr == "33" and source_repository() == "TenchiMisaki/romarr":
-        print("PR33 gate:", {key: summary[key] for key in
-              ("test", "environment", "collection", "source", "exit", "counts")})
     counts = dict.fromkeys(STATES, 0)
     for index, case in enumerate(cases, 1):
         if set(case) != {"id", "outcome"} or case["id"] != index or case["outcome"] not in STATES:
