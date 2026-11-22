@@ -101,3 +101,10 @@ def test_judge_refuses_disguised_executables_before_scoring():
     assert "disguised" in verdict.verdict
     nes = judge(rel("Super Mario Bros (USA).nes.scr"), "Super Mario Bros", by_slug("nes"))
     assert nes.points <= -1500
+
+def test_full_region_name_after_demo_is_release_metadata():
+    assert demo_refusal("Super Metroid Demo (Europe).smc", "Super Metroid")
+
+
+def test_uppercase_trial_of_mana_request_does_not_allow_explicit_trial():
+    assert demo_refusal("TRIAL OF MANA (USA) (Trial).nsp", "TRIAL OF MANA")
