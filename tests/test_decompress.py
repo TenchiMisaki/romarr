@@ -13,6 +13,7 @@ that ROMarr's decisions do not change when the service misbehaves.
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -98,6 +99,7 @@ class FakeClient:
     def submit_job(self, *, file_path, mode, output_dir=None,
                    duplicate_action="skip", delete_on_verify=False):
         self.submitted.append({"file_path": file_path, "mode": mode,
+                               "output_dir": output_dir,
                                "delete_on_verify": delete_on_verify})
         # ROMarr never delegates deletion to the service -- the gate is
         # ROMarr's, and a submit that says otherwise is a bug.
@@ -109,9 +111,20 @@ class FakeClient:
                 job_id=job_id, status="failed", file_path=file_path,
                 error="service could not handle this file")
         else:
+            published = Path(out)
+            if output_dir:
+                target_dir = Path(output_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if published.is_dir():
+                    shutil.copytree(published, target_dir, dirs_exist_ok=True)
+                    published = target_dir
+                else:
+                    target = target_dir / published.name
+                    shutil.copy2(published, target)
+                    published = target
             self._jobs[job_id] = JobResult(
                 job_id=job_id, status="completed", file_path=file_path,
-                mode=mode, output_path=str(out))
+                mode=mode, output_path=str(published))
         return JobResult(job_id=job_id, status="queued", file_path=file_path)
 
     def job_status(self, job_id):

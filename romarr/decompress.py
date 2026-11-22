@@ -46,6 +46,7 @@ operator can see the blast radius before authorising a destructive one.
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import os
 import shutil
@@ -127,6 +128,7 @@ class DecompressItem:
     plan_note: str = ""          # why a file is extracted locally
     volumes: list[str] = field(default_factory=list)
     output_files: list[str] = field(default_factory=list)
+    service_output_dir: str = field(default="", repr=False)
     dat_match: str = ""          # verified | bad-dump | unknown | ""
     dat_detail: str = ""
     error: str = ""
@@ -267,15 +269,17 @@ def plan(work: Work) -> DecompressItem:
 # ----------------------------------------------------------- verification --
 
 def _output_files(output_path: str, published_files=()) -> list[str]:
-    """Every regular file the job explicitly published.
+    """Every regular file this job published.
 
-    Directory outputs are enumerated inside that job directory. A file-shaped
-    CUE/GDI output may include tracks only when the service explicitly returns
-    them in the same job's output_files list; adjacent files alone are not proof.
+    Directory outputs are enumerated within the isolated job directory. A
+    file-shaped CUE/GDI output may include tracks from that same directory;
+    unrelated neighboring files are never treated as part of the result.
     """
     if not output_path:
         return []
     out = Path(output_path)
+    if out.is_symlink():
+        return []
     if out.is_file():
         files = [out]
         job_root = out.parent.resolve()
@@ -285,13 +289,13 @@ def _output_files(output_path: str, published_files=()) -> list[str]:
             if not isinstance(value, (str, Path)):
                 continue
             candidate = Path(value)
-            if not candidate.is_file():
+            if candidate.is_symlink() or not candidate.is_file():
                 continue
             resolved = candidate.resolve()
             try:
                 resolved.relative_to(job_root)
             except ValueError:
-                return []
+                continue
             files.append(candidate)
     elif out.is_dir():
         files = [p for p in out.rglob("*") if p.is_file()]
@@ -497,17 +501,34 @@ def _gate_on_tools(client: CompressatoriumClient,
 
 def _submit_jobs(client: CompressatoriumClient, items: list[DecompressItem],
                  output_dir: str | Path | None, report: DecompressReport) -> None:
-    """Submit one job per item; the service works on them in the background."""
+    """Submit one job per item into an isolated output directory.
+
+    Compressatorium reports one output_path. A unique directory lets ROMarr
+    prove which adjacent tracks belong to that job without trusting unrelated
+    files that happened to be beside the descriptor before it ran.
+    """
     # Per-file jobs rather than /api/jobs/batch: the batch route takes ONE
     # mode for every file in the call, and a real library mixes CHD, RVZ,
     # 7z and NSZ in one directory. Grouping by mode to use the batch route
     # would buy one HTTP call per group and cost the per-file error
     # reporting that makes a failed batch diagnosable.
     for item in items:
+        output_root = Path(output_dir) if output_dir else Path(item.source).parent
+        try:
+            output_root.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(
+                prefix=f"{decompress_local.STAGING_PREFIX}service-",
+                dir=output_root))
+        except OSError as exc:
+            item.status = "failed"
+            item.error = f"could not prepare isolated service output directory: {exc}"
+            report.failed += 1
+            continue
+        item.service_output_dir = str(staging)
         result: JobResult = client.submit_job(
             file_path=item.source,
             mode=item.mode,
-            output_dir=str(output_dir) if output_dir else None,
+            output_dir=str(staging),
             duplicate_action="skip",
         )
         if not result.job_id:
@@ -536,6 +557,68 @@ def _wait_for_jobs(client: CompressatoriumClient, items: list[DecompressItem],
             _record_job(item, final.get(item.job_id), job_timeout, report)
 
 
+def _publish_service_outputs(item: DecompressItem) -> None:
+    """Publish one isolated service result beside its source or in output_dir.
+
+    Files are linked without clobbering when the filesystem permits it. A
+    verified exclusive copy is the fallback for filesystems without hard links.
+    Partial publication is rolled back only for destination inodes created here.
+    """
+    stage = Path(item.service_output_dir).resolve(strict=True)
+    output_root = stage.parent
+    planned: list[tuple[Path, Path]] = []
+    for name in item.output_files:
+        source = Path(name).resolve(strict=True)
+        try:
+            relative = source.relative_to(stage)
+        except ValueError as exc:
+            raise OSError(f"service output escaped its isolated directory: {name}") from exc
+        destination = output_root / relative
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(f"output already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        planned.append((source, destination))
+
+    created: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        for source, destination in planned:
+            try:
+                os.link(source, destination)
+                stat = os.lstat(destination)
+                created.append((destination, (stat.st_dev, stat.st_ino)))
+            except OSError as link_error:
+                if destination.exists() or destination.is_symlink():
+                    raise FileExistsError(f"output already exists: {destination}") from link_error
+                try:
+                    with source.open("rb") as src, destination.open("xb") as dst:
+                        stat = os.fstat(dst.fileno())
+                        created.append((destination, (stat.st_dev, stat.st_ino)))
+                        shutil.copyfileobj(src, dst)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    if not filecmp.cmp(source, destination, shallow=False):
+                        raise OSError(f"published copy did not match {source.name}")
+                except OSError:
+                    raise
+        item.output_files = [str(destination) for _, destination in planned]
+    except OSError:
+        for destination, identity in reversed(created):
+            try:
+                stat = os.lstat(destination)
+                if (stat.st_dev, stat.st_ino) == identity:
+                    destination.unlink()
+            except OSError:
+                pass
+        raise
+
+    try:
+        shutil.rmtree(stage)
+        item.service_output_dir = ""
+    except OSError as exc:
+        log.warning("decompress: published outputs but could not remove staging directory %s: %s",
+                    stage, exc)
+
+
 def _record_job(item: DecompressItem, status: JobResult | None,
                 job_timeout: int, report: DecompressReport) -> None:
     if status is None:
@@ -543,14 +626,48 @@ def _record_job(item: DecompressItem, status: JobResult | None,
         item.error = "job vanished from the service"
         report.failed += 1
     elif status.status == COMPLETED:
-        item.output_files = _output_files(status.output_path,
-                                          getattr(status, "output_files", ()))
+        stage = Path(item.service_output_dir).resolve() if item.service_output_dir else None
+        output = Path(status.output_path)
+        if stage is not None:
+            if not output.is_absolute():
+                output = stage / output
+            try:
+                resolved_output = output.resolve(strict=True)
+                resolved_output.relative_to(stage)
+            except (OSError, ValueError):
+                item.status = "failed"
+                item.error = "completed job output is missing or outside its isolated output directory"
+                report.failed += 1
+                log.warning("decompress: job %s returned an output outside its isolated directory",
+                            item.job_id)
+                return
+            published_files = []
+            for candidate in stage.rglob("*"):
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    candidate.resolve(strict=True).relative_to(stage)
+                except (OSError, ValueError):
+                    continue
+                published_files.append(str(candidate))
+            item.output_files = _output_files(str(resolved_output), published_files)
+        else:
+            item.output_files = _output_files(status.output_path)
         if not item.output_files:
             item.status = "failed"
             item.error = "completed job produced no usable output files"
             report.failed += 1
             log.warning("decompress: job %s completed without usable outputs", item.job_id)
             return
+        if stage is not None:
+            try:
+                _publish_service_outputs(item)
+            except OSError as exc:
+                item.status = "failed"
+                item.error = f"could not publish complete service output set: {exc}"
+                report.failed += 1
+                log.warning("decompress: job %s: %s", item.job_id, item.error)
+                return
         item.status = "decompressed"
         report.decompressed += 1
         log.info("decompress: job %s completed -> %d file(s)",
@@ -565,7 +682,7 @@ def _record_job(item: DecompressItem, status: JobResult | None,
         item.status = "failed"
         item.error = (f"job ended as {status.status!r}"
                       if status.status == CANCELLED else
-                      f"still {status.status} after {job_timeout}s")
+                      f"still {status.status!r} after {job_timeout}s")
         report.failed += 1
         log.warning("decompress: job %s: %s", item.job_id, item.error)
 

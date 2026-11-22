@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from romarr import decompress, decompress_local, library
-from romarr.compressatorium import CompressatoriumClient
+from romarr.compressatorium import JobResult
 from romarr.dat import Dat, DatIndex, Game, Rom, hash_bytes
 from tests.test_decompress import FakeClient
 
@@ -610,28 +610,30 @@ def test_listing_outside_a_session_keeps_no_archive_open(tmp_path):
         assert source._archive is None
 
 
-def test_service_file_cue_accepts_only_explicit_published_tracks(tmp_path):
-    cue = tmp_path / "Game.cue"
-    track = tmp_path / "Track 01.bin"
+def test_service_file_cue_uses_tracks_from_its_isolated_job_directory(tmp_path):
+    output_root = tmp_path / "published"
+    output_root.mkdir()
+    (output_root / "unrelated.bin").write_bytes(DISC_2)
+    stage = output_root / f"{decompress_local.STAGING_PREFIX}service-job-1"
+    stage.mkdir()
+    cue = stage / "Game.cue"
+    track = stage / "Track 01.bin"
     track.write_bytes(DISC_1)
-    cue.write_text('FILE "Track 01.bin" BINARY\n')
+    cue.write_text('FILE "Track 01.bin" BINARY')
+    item = decompress.DecompressItem(
+        source=str(tmp_path / "Game.chd"), status="submitted", job_id="job-1",
+        service_output_dir=str(stage))
+    report = decompress.DecompressReport(submitted=1)
 
-    assert decompress._output_files(
-        str(cue), published_files=[str(cue), str(track)]) == sorted([
-            str(cue.resolve()), str(track.resolve())])
-    assert decompress._output_files(str(cue)) == []
+    decompress._record_job(
+        item,
+        JobResult(job_id="job-1", status="completed", output_path=str(cue)),
+        job_timeout=60, report=report)
 
-
-def test_compressatorium_job_preserves_explicit_output_files():
-    class Response:
-        ok = True
-
-        def json(self):
-            return {"id": "job-1", "status": "completed",
-                    "output_path": "/library/Game.cue",
-                    "output_files": ["/library/Game.cue", "/library/Track.bin"]}
-
-    job = CompressatoriumClient._parse_job(None, Response())
-
-    assert job.output_path == "/library/Game.cue"
-    assert job.output_files == ("/library/Game.cue", "/library/Track.bin")
+    assert item.status == "decompressed"
+    assert {Path(path).name for path in item.output_files} == {
+        "Game.cue", "Track 01.bin"}
+    assert all(Path(path).parent == output_root for path in item.output_files)
+    assert (output_root / "unrelated.bin").read_bytes() == DISC_2
+    assert not stage.exists()
+    assert report.decompressed == 1 and report.failed == 0

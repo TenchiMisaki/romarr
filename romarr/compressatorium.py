@@ -213,7 +213,6 @@ class JobResult:
     output_path: str = ""
     error: str = ""
     progress: int = 0
-    output_files: tuple[str, ...] = ()
 
     @property
     def terminal(self) -> bool:
@@ -484,17 +483,12 @@ class CompressatoriumClient:
         job_id = str(payload.get("id") or payload.get("job_id") or "")
         if not job_id:
             return JobResult(job_id="", error="server returned no job id")
-        raw_output_files = payload.get("output_files", ())
-        output_files = (tuple(value for value in raw_output_files
-                              if isinstance(value, str) and value)
-                        if isinstance(raw_output_files, list) else ())
         return JobResult(
             job_id=job_id,
             status=str(payload.get("status") or QUEUED),
             file_path=str(payload.get("file_path") or ""),
             mode=str(payload.get("mode") or ""),
             output_path=str(payload.get("output_path") or ""),
-            output_files=output_files,
             error=str(payload.get("error_message") or ""),
             progress=int(payload.get("progress") or 0),
         )
