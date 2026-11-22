@@ -588,6 +588,11 @@ def _publish_service_outputs(item: DecompressItem) -> None:
         except ValueError as exc:
             raise OSError(f"service output escaped its isolated directory: {name}") from exc
         destination = output_root / relative
+        current = output_root
+        for part in relative.parent.parts:
+            current = current / part
+            if current.is_symlink():
+                raise OSError(f"publication parent is a symlink: {current}")
         try:
             destination.resolve().relative_to(output_root.resolve())
         except ValueError as exc:
@@ -595,6 +600,11 @@ def _publish_service_outputs(item: DecompressItem) -> None:
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(f"output already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        current = output_root
+        for part in relative.parent.parts:
+            current = current / part
+            if current.is_symlink():
+                raise OSError(f"publication parent became a symlink: {current}")
         planned.append((source, destination))
 
     created: list[tuple[Path, tuple[int, int]]] = []

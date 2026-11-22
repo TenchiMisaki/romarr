@@ -118,10 +118,12 @@ class FakeClient:
                 if published.is_dir():
                     shutil.copytree(published, target_dir, dirs_exist_ok=True)
                     published = target_dir
-                else:
+                elif published.is_file():
                     target = target_dir / published.name
                     shutil.copy2(published, target)
                     published = target
+                else:
+                    published = target_dir / published.name
             self._jobs[job_id] = JobResult(
                 job_id=job_id, status="completed", file_path=file_path,
                 mode=mode, output_path=str(published))
@@ -170,8 +172,12 @@ def library(tmp_path):
     source = games / "TestGame.gba.zip"
     source.write_bytes(b"fake zip bytes")
     output = games / "TestGame.gba"
+    service_dir = tmp_path / "service-output"
+    service_dir.mkdir()
+    service_output = service_dir / output.name
     return {
         "root": games, "source": source, "output": output,
+        "service_output": service_output,
         "content": content, "hashes": hashes,
         "dats": _dat_index_for("TestGame.gba", hashes),
     }
@@ -194,8 +200,8 @@ def _patch_client(monkeypatch, client):
 # ------------------------------------------------------- the happy path --
 
 def test_verified_output_allows_deletion(library, monkeypatch):
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -207,8 +213,8 @@ def test_verified_output_allows_deletion(library, monkeypatch):
 
 
 def test_without_the_flag_nothing_is_deleted(library, monkeypatch):
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=False)
@@ -227,8 +233,8 @@ def test_unknown_output_keeps_the_original(library, monkeypatch):
     index could not protect. A different size too, not just different bytes:
     same-size-wrong-hash is the BAD_DUMP case, covered next.
     """
-    library["output"].write_bytes(b"a" * 5000)  # no DAT entry at this size
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(b"a" * 5000)  # no DAT entry at this size
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -242,8 +248,8 @@ def test_unknown_output_keeps_the_original(library, monkeypatch):
 def test_bad_dump_keeps_the_original_and_fails_loudly(library, monkeypatch):
     """Right size, wrong bytes: corrupt or tampered. Kept, and reported."""
     # Same length as the DAT entry, different content -> BAD_DUMP verdict.
-    library["output"].write_bytes(bytes(reversed(library["content"])))
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(bytes(reversed(library["content"])))
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -262,8 +268,8 @@ def test_empty_dat_index_never_deletes(library, monkeypatch):
     must degrade to "extracted, kept everything" rather than "extracted,
     deleted everything it could not check".
     """
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = decompress.run_batch(
@@ -279,8 +285,8 @@ def test_empty_dat_index_never_deletes(library, monkeypatch):
 
 def test_no_dats_at_all_never_deletes(library, monkeypatch):
     """dats=None -- verification skipped entirely -- deletion stays shut."""
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = decompress.run_batch(
@@ -294,9 +300,9 @@ def test_no_dats_at_all_never_deletes(library, monkeypatch):
 
 def test_remote_match_cannot_authorize_source_deletion(library, monkeypatch):
     """A service identification response is insufficient destructive proof."""
-    library["output"].write_bytes(b"container bytes, not the DAT payload")
+    library["service_output"].write_bytes(b"container bytes, not the DAT payload")
     client = FakeClient(
-        {str(library["source"]): library["output"]},
+        {str(library["source"]): library["service_output"]},
         remote_matches={str(library["output"])})
     _patch_client(monkeypatch, client)
 
@@ -308,8 +314,8 @@ def test_remote_match_cannot_authorize_source_deletion(library, monkeypatch):
 
 
 def test_outputs_are_reverified_before_source_deletion(library, monkeypatch):
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
     original_verify = decompress._verify_outputs
 
@@ -368,7 +374,7 @@ def test_no_url_is_an_error_not_a_crash(tmp_path):
 
 
 def test_dry_run_submits_nothing(library, monkeypatch):
-    client = FakeClient({str(library["source"]): library["output"]})
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, dry_run=True, delete_originals=True)

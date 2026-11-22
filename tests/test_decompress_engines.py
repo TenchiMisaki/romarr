@@ -610,6 +610,39 @@ def test_listing_outside_a_session_keeps_no_archive_open(tmp_path):
         assert source._archive is None
 
 
+def test_service_publish_refuses_symlinked_output_parent(tmp_path, monkeypatch):
+    output_root = tmp_path / "published"
+    output_root.mkdir()
+    stage = output_root / f"{decompress_local.STAGING_PREFIX}service-job-2"
+    stage.mkdir()
+    nested = stage / "assets"
+    nested.mkdir()
+    payload = nested / "payload.bin"
+    payload.write_bytes(DISC_1)
+    symlink_parent = output_root / "assets"
+    symlink_parent.mkdir()
+    original_is_symlink = Path.is_symlink
+
+    def report_symlink(path):
+        return path == symlink_parent or original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", report_symlink)
+    item = decompress.DecompressItem(
+        source=str(tmp_path / "Game.chd"), status="submitted", job_id="job-2",
+        service_output_dir=str(stage))
+    report = decompress.DecompressReport(submitted=1)
+
+    decompress._record_job(
+        item,
+        JobResult(job_id="job-2", status="completed", output_path=str(nested)),
+        job_timeout=60, report=report)
+
+    assert item.status == "failed"
+    assert "publication parent is a symlink" in item.error
+    assert not (symlink_parent / "payload.bin").exists()
+    assert report.failed == 1 and report.decompressed == 0
+
+
 def test_service_file_cue_uses_tracks_from_its_isolated_job_directory(tmp_path):
     output_root = tmp_path / "published"
     output_root.mkdir()
