@@ -103,10 +103,6 @@ def clean(root, expected):
             tracked = sum(not entry.startswith("?? ") for entry in entries)
             print(f"Checkout verification: {tracked} tracked changes, "
                   f"{len(entries) - tracked} untracked entries.")
-            if os.environ.get("CI_EVIDENCE_PR") == "33":
-                for entry in entries:
-                    if re.fullmatch(r"\?\? [A-Za-z0-9_./-]{1,120}", entry):
-                        print("Generated checkout path:", entry[3:])
         return values == [expected, ""]
     except (OSError, subprocess.SubprocessError):
         return False
