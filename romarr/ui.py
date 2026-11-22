@@ -2343,7 +2343,8 @@ RENDER.missing=async()=>{
     if(typed===null)return;
     x.disabled=true;
     const r=await j('/api/v1/wanted/preferred-group',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({game:x.dataset.groupGame,platform:x.dataset.groupPlatform,group:typed})});
+      body:JSON.stringify({game:x.dataset.groupGame,platform:x.dataset.groupPlatform,group:typed})})
+      .catch(()=>({ok:false,error:'Could not set the group'}));
     if(version!==pageVersion||activePage!=='missing')return;
     if(r.ok) go('missing'); else {x.disabled=false; toast(r.error||'Could not set the group');}
   });

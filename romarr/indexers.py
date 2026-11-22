@@ -748,7 +748,9 @@ class Torznab:
             categories=categories,
             # A Usenet release is fetched from its NZB; _download_link prefers
             # a magnet, which a Usenet client cannot use.
-            download_url=(row["downloadUrl"] if protocol == "usenet"
+            download_url=(next((url for url in (row["downloadUrl"], row["guid"])
+                                if url.startswith(("http://", "https://"))), "")
+                          if protocol == "usenet"
                           else _download_link(row, private=self._config.private)),
             protocol=protocol,
             indexer=self._config.name,

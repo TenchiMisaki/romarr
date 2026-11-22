@@ -52,6 +52,8 @@ _METADATA_WORDS = frozenset({
     "internal", "readnfo", "eshop", "proper", "repack", "rerip", "dirfix",
     "nfofix", "multi", "nsw", "nsp", "xci", "nsz", "xcz", "pkg", "iso",
     "cso", "chd", "rvz", "wbfs", "cia", "3ds", "nds", "usa", "eur", "jpn",
+    "europe", "japan", "world", "asia", "australia", "korea", "china",
+    "canada", "brazil", "france", "germany", "italy", "spain", "united", "states",
     "pal", "ntsc", "en", "de", "fr", "es", "it", "ja", "rev", "disc", "eng",
 })
 _VERSION_TOKEN = re.compile(r"^v?\d+(?:\.\d+)*[a-z]?$", re.IGNORECASE)
@@ -132,7 +134,8 @@ def demo_refusal(title: str, wanted: str = "") -> str:
     reads as a demo too, the release is not refused for being one.
     """
     kind, explicit = _demo_kind(title)
-    if not kind or (wanted and demo_build(wanted)):
+    wanted_kind, wanted_explicit = _demo_kind(wanted)
+    if not kind or wanted_explicit or (wanted_kind and _bare_demo_word(_spaced(wanted).casefold())):
         return ""
     # "TRIAL.OF.MANA.USA" ends in metadata-looking capitals after TRIAL, and
     # the word is part of the game's own name: a bare word the request names
