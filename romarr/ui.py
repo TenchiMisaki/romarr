@@ -227,6 +227,24 @@ a:hover{text-decoration:underline;text-underline-offset:2px}
 
 .pgrid{display:grid;gap:12px;
   grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.pd-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:6px 0 12px}
+.pd-head h2{margin:0;font-size:22px}
+.pd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin:12px 0}
+.pd-box{background:var(--bg);border:1px solid var(--line);border-radius:var(--r-md);padding:16px}
+.pd-box h3{margin:0 0 10px;font-size:16px}
+.pd-box ol,.pd-box ul{margin:6px 0 0 18px;line-height:1.6}
+.pd-field{margin:0 0 14px}
+.pd-field label{display:block;font-weight:600;margin-bottom:4px}
+.pd-field input[type=text],.pd-field input[type=number],.pd-field input[type=password],.pd-field textarea{width:100%;font-size:15px}
+.pd-field textarea{min-height:70px}
+.pd-field .help{margin-top:4px}
+.pd-readme{line-height:1.6;max-width:960px;overflow-wrap:break-word}
+.pd-table code{white-space:nowrap}
+.pd-readme h3,.pd-readme h4,.pd-readme h5,.pd-readme h6{margin:16px 0 6px}
+.pd-code,.pd-out{white-space:pre-wrap;background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px;overflow:auto;font-size:13px}
+.pd-out{max-height:420px}
+.pd-table{border-collapse:collapse;margin:8px 0;font-size:14px}
+.pd-table td,.pd-table th{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}
 .pcard{background:var(--bg);border:1px solid var(--line);
   border-radius:var(--r-md);padding:15px 16px;display:flex;
   flex-direction:column;gap:9px;
@@ -242,6 +260,7 @@ a:hover{text-decoration:underline;text-underline-offset:2px}
 .pcard .foot{display:flex;gap:8px;align-items:center;
   border-top:1px solid var(--line-soft);padding-top:10px;margin-top:2px}
 .pcard .net{color:var(--dim);font-size:11px;margin-left:auto;text-align:right}
+.card .pcard p.help{margin:6px 0 0}
 .dot-ok{width:7px;height:7px;border-radius:50%;background:var(--ok);
   display:inline-block;flex:none}
 .dot-off{width:7px;height:7px;border-radius:50%;background:var(--surface-3);
@@ -842,6 +861,7 @@ def _theme_control_html() -> str:
         '<label class="sw pick" title="Any colour you like">'
         f'<input type="color" id="accent-pick" value="{ACCENTS[0][0]}" '
         'aria-label="Custom accent colour"></label>'
+        '<button id="notes-restore" type="button" hidden>Show hidden notices</button>'
         '</div></div></details>'
         '<a id="android-beta-link" href="https://play.google.com/apps/internaltest/4700888732790045566" '
         'target="_blank" rel="noopener noreferrer" class="nav" '
@@ -1327,6 +1347,183 @@ addEventListener('hashchange',()=>{
   if(page!==ROUTE_SPEC) go(page);
 });
 
+/* ---------------- plugin dashboard ---------------- */
+// A README rendered from Markdown. Everything is escaped first; only the
+// handful of constructs plugin READMEs use are turned back into markup, and
+// a link survives only when it is https.
+const mdLite=text=>{
+  const lines=String(text||'').replace(/\r/g,'').split('\n');
+  // Code spans are lifted out first and put back last, so `**x**` inside
+  // backticks stays literal instead of turning bold.
+  const inline=s=>{const codes=[];
+    const t=esc(s)
+      .replace(/`([^`]+)`/g,(m,c)=>'\u0000'+(codes.push(c)-1)+'\u0000')
+      .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
+      .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?![*\w])/g,'$1<i>$2</i>')
+      .replace(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g,
+        (m,label,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+label+'</a>');
+    return t.replace(/\u0000(\d+)\u0000/g,(m,n)=>'<code>'+codes[Number(n)]+'</code>');};
+  const cells=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>c.trim());
+  let html='', i=0;
+  while(i<lines.length){
+    const l=lines[i];
+    if(l.startsWith('```')){
+      const code=[]; i++;
+      while(i<lines.length&&!lines[i].startsWith('```')) code.push(lines[i++]);
+      i++; html+='<pre class="pd-code">'+esc(code.join('\n'))+'</pre>'; continue;
+    }
+    const h=l.match(/^(#{1,4})\s+(.*)/);
+    if(h){const n=h[1].length+2; html+='<h'+n+'>'+inline(h[2])+'</h'+n+'>'; i++; continue;}
+    if(l.trim().startsWith('|')){
+      const rows=[];
+      while(i<lines.length&&lines[i].trim().startsWith('|')) rows.push(lines[i++]);
+      const body=rows.filter(r=>!/^[\s|:-]+$/.test(r));
+      html+='<table class="pd-table">'+body.map((r,n)=>'<tr>'+cells(r).map(c=>
+        n?'<td>'+inline(c)+'</td>':'<th>'+inline(c)+'</th>').join('')+'</tr>').join('')+'</table>';
+      continue;
+    }
+    if(/^ {4}\S/.test(l)){
+      const code=[];
+      while(i<lines.length&&(/^ {4}/.test(lines[i])||!lines[i].trim())) code.push(lines[i++].slice(4));
+      html+='<pre class="pd-code">'+esc(code.join('\n').trim())+'</pre>'; continue;
+    }
+    if(/^\s*[-*]\s+/.test(l)){
+      const items=[];
+      while(i<lines.length&&/^\s*[-*]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*]\s+/,''));
+      html+='<ul>'+items.map(x=>'<li>'+inline(x)+'</li>').join('')+'</ul>'; continue;
+    }
+    if(/^\s*\d+[.)]\s+/.test(l)){
+      const items=[];
+      while(i<lines.length&&/^\s*\d+[.)]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*\d+[.)]\s+/,''));
+      html+='<ol>'+items.map(x=>'<li>'+inline(x)+'</li>').join('')+'</ol>'; continue;
+    }
+    if(!l.trim()){i++; continue;}
+    const para=[];
+    do{para.push(lines[i++]);}
+    while(i<lines.length&&lines[i].trim()&&!/^(#{1,4}\s|```|\s*\||\s*[-*]\s|\s*\d+[.)]\s| {4}\S)/.test(lines[i]));
+    html+='<p>'+inline(para.join(' '))+'</p>';
+  }
+  return html;
+};
+
+// One installed plugin's own page: what it is, what it still needs, its
+// settings from its manifest, how to use it, a way to try it, and its README.
+const pluginDashboard=async(slug,onBack)=>{
+  const p=$('#page');
+  p.innerHTML='<div class="empty">Opening '+esc(slug)+'…</div>';
+  let d;
+  try{d=await j('/api/v1/hub/plugin/detail?slug='+encodeURIComponent(slug));}
+  catch(e){d={ok:false,error:'ROMarr did not answer.'};}
+  const back='<button class="mini" id="pd-back">&larr; All plugins</button>';
+  const reopen=()=>pluginDashboard(slug,onBack);
+  if(!d.ok){
+    p.innerHTML=back+'<div class="panel-note panel-warn">'+esc(d.error||'Could not open this plugin.')+'</div>';
+    $('#pd-back').onclick=onBack; return;
+  }
+  const ACRONYMS={api:'API',url:'URL',id:'ID',ids:'IDs',ra:'RA',crc:'CRC',md5:'MD5',sha1:'SHA1',
+    ssh:'SSH',ftp:'FTP',http:'HTTP',https:'HTTPS',bios:'BIOS',rom:'ROM',roms:'ROMs',dat:'DAT',igdb:'IGDB'};
+  const label=k=>esc(k.split('_').map((w,n)=>ACRONYMS[w]||(n?w:w.charAt(0).toUpperCase()+w.slice(1))).join(' '));
+  const def=f=>(f.default===undefined||f.default===null||f.default===''||
+    (Array.isArray(f.default)&&!f.default.length))?'':'<br><span style="color:var(--dim)">Default: '+esc(Array.isArray(f.default)?f.default.join(', '):String(f.default))+'</span>';
+  const field=f=>{
+    const help=(f.help||def(f))?'<div class="help">'+esc(f.help||'')+def(f)+'</div>':'';
+    if(f.type==='secret') return '<div class="pd-field"><label>'+label(f.key)+' (secret)</label>'
+      +'<input type="password" data-ps="'+esc(f.key)+'" autocomplete="new-password" maxlength="4096" placeholder="'
+      +(f.set?'Saved. Leave blank to keep it':'Not set')+'">'
+      +(f.set?'<label class="help"><input type="checkbox" data-pclear="'+esc(f.key)+'"> Remove the saved value</label>':'')
+      +help+'</div>';
+    if(f.type==='bool') return '<div class="pd-field"><label><input type="checkbox" data-pk="'+esc(f.key)+'"'
+      +(f.value?' checked':'')+'> '+label(f.key)+'</label>'+help+'</div>';
+    if(f.type==='int') return '<div class="pd-field"><label>'+label(f.key)+'</label><input type="number" step="1" data-pk="'
+      +esc(f.key)+'" value="'+esc(f.value==null?'':String(f.value))+'">'+help+'</div>';
+    if(f.type==='list[str]') return '<div class="pd-field"><label>'+label(f.key)+' (one per line)</label><textarea data-pk="'
+      +esc(f.key)+'">'+esc((f.value||[]).join('\n'))+'</textarea>'+help+'</div>';
+    return '<div class="pd-field"><label>'+label(f.key)+'</label><input type="text" data-pk="'+esc(f.key)
+      +'" value="'+esc(f.value==null?'':String(f.value))+'">'+help+'</div>';
+  };
+  const caps=d.capabilities||[];
+  const tries=[];
+  if(caps.includes('search')) tries.push('<div class="pd-field"><label>Search this plugin only</label>'
+    +'<div class="row"><input type="text" id="pd-q" placeholder="Game title, for example Super Metroid" maxlength="200">'
+    +'<input type="text" id="pd-plat" placeholder="Platform (optional, e.g. snes)" maxlength="40">'
+    +'<button class="mini accent" data-run="search">Search</button></div></div>');
+  if(caps.includes('metadata')) tries.push('<div class="pd-field"><label>Enrich a RomM game</label>'
+    +'<div class="row"><input type="text" id="pd-rom" inputmode="numeric" placeholder="RomM game id, e.g. 61640" maxlength="12">'
+    +'<input type="text" id="pd-sid" placeholder="Exact name or hash (optional)" maxlength="300">'
+    +'<button class="mini accent" data-run="enrich">Enrich in RomM</button></div>'
+    +'<div class="help">This writes what the plugin finds to that game in RomM. Leave the exact name '
+    +'empty to match on the library\'s own name and hashes.</div></div>');
+  ['cores','assets','firmware'].filter(c=>caps.includes(c)).forEach(c=>tries.push(
+    '<button class="mini" data-run="'+c+'">List '+c+'</button> '));
+  p.innerHTML=back
+    +'<div class="pd-head"><h2>'+esc(d.name)+'</h2><span class="pill">v'+esc(d.version)+'</span>'
+    +'<span class="'+(d.enabled?'dot-ok':'dot-off')+'"></span><span>'+(d.enabled?'Enabled':'Disabled')+'</span>'
+    +'<button class="mini" id="pd-toggle">'+(d.enabled?'Disable':'Enable')+'</button>'
+    +(String(d.repository||'').startsWith('https://')?'<a href="'+esc(d.repository)+'" target="_blank" rel="noopener">Source and instructions</a>':'')
+    +'</div>'
+    +(d.description?'<p>'+esc(d.description)+'</p>':'')
+    +(d.needs||[]).map(n=>'<div class="panel-note panel-warn">'+esc(n)+'</div>').join('')
+    +'<div class="pd-grid">'
+    +'<div class="pd-box"><h3>What it does and how to use it</h3>'
+    +((d.guide||[]).map(g=>'<b>'+esc(g.title)+'</b><ul>'+g.steps.map(s=>'<li>'+esc(s)+'</li>').join('')+'</ul>').join('')
+      ||'<p class="help">This plugin declares no capabilities ROMarr knows how to use.</p>')
+    +((d.network||[]).length?'<p class="help">Connects to: '+esc(d.network.join(', '))+'</p>':'')
+    +((d.platforms||[]).length?'<p class="help">Covers '+d.platforms.length+' platforms.</p>':'')
+    +'</div>'
+    +'<div class="pd-box"><h3>Settings</h3>'
+    +((d.fields||[]).length?'<form id="pd-form" autocomplete="off">'+d.fields.map(field).join('')
+      +'<button class="btn" type="submit">Save settings</button></form>'
+      :'<p class="help">This plugin has no settings.</p>')
+    +'</div>'
+    +(tries.length?'<div class="pd-box"><h3>Try it</h3>'+tries.join('')+'<div id="pd-out"></div></div>':'')
+    +'</div>'
+    +(d.terms?'<div class="panel-note"><b>Terms.</b> '+esc(d.terms)+'</div>':'')
+    +(d.readme?'<details class="pd-box" open><summary><b>Instructions (README)</b></summary><div class="pd-readme">'
+      +mdLite(d.readme)+'</div></details>':'');
+  $('#pd-back').onclick=onBack;
+  $('#pd-toggle').onclick=async()=>{
+    const r=await fetch('/api/v1/hub/plugin',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slug,action:d.enabled?'disable':'enable'})}).then(r=>r.json()).catch(()=>({}));
+    toast(r.ok?(d.enabled?'Disabled ':'Enabled ')+d.name:(r.err||r.error||'Could not change it'));
+    reopen();
+  };
+  const form=$('#pd-form');
+  if(form) form.onsubmit=async e=>{
+    e.preventDefault();
+    const values={}, secrets={}, clear=[];
+    form.querySelectorAll('[data-pk]').forEach(el=>{
+      values[el.dataset.pk]=el.type==='checkbox'?el.checked:el.tagName==='TEXTAREA'
+        ?el.value.split('\n').map(x=>x.trim()).filter(Boolean):el.value;});
+    form.querySelectorAll('[data-ps]').forEach(el=>{if(el.value.trim())secrets[el.dataset.ps]=el.value;});
+    form.querySelectorAll('[data-pclear]').forEach(el=>{if(el.checked)clear.push(el.dataset.pclear);});
+    const btn=form.querySelector('button[type=submit]'); btn.disabled=true;
+    const r=await fetch('/api/v1/hub/plugin/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slug,values,secrets,clear})}).then(r=>r.json()).catch(()=>({error:'ROMarr did not answer.'}));
+    if(r.ok){toast('Settings saved'); reopen();}
+    else{btn.disabled=false; toast(r.error||'Could not save the settings');}
+  };
+  p.querySelectorAll('button[data-run]').forEach(b=>b.onclick=async()=>{
+    const action=b.dataset.run, out=$('#pd-out');
+    const payload={slug,action};
+    if(action==='search'){payload.query=$('#pd-q').value; payload.platform=$('#pd-plat').value;}
+    if(action==='enrich'){
+      payload.rom_id=$('#pd-rom').value.trim(); payload.source_id=$('#pd-sid').value.trim();
+      if(!confirm('Write '+d.name+' metadata to RomM game '+payload.rom_id+'?')) return;
+    }
+    b.disabled=true; out.innerHTML='<p class="help">Working… this can take a minute.</p>';
+    const r=await fetch('/api/v1/hub/plugin/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)}).then(r=>r.json()).catch(()=>({error:'ROMarr did not answer.'}));
+    b.disabled=false;
+    if(r.rows) out.innerHTML=(r.error?'<div class="panel-note panel-warn">'+esc(r.error)+'</div>':'')
+      +(r.rows.length?'<table class="pd-table"><tr><th>Title</th><th>Platform</th><th>Size</th></tr>'
+        +r.rows.map(x=>'<tr><td>'+esc(x.title||'')+'</td><td>'+esc(x.platform||'')+'</td><td>'
+          +(x.size_bytes?esc((x.size_bytes/1048576).toFixed(1)+' MB'):'')+'</td></tr>').join('')+'</table>'
+        :'<p class="help">No results from this plugin for that search.</p>');
+    else out.innerHTML=(r.error?'<div class="panel-note panel-warn">'+esc(r.error)+'</div>':'')
+      +((r.lines||[]).length?'<pre class="pd-out">'+esc(r.lines.join('\n'))+'</pre>':'');
+  });
+};
+
 /* ---------------- pages ---------------- */
 const RENDER={};
 RENDER.hub=async()=>{
@@ -1356,6 +1553,7 @@ RENDER.hub=async()=>{
     const action = pl.installed
       ? '<span class="'+(pl.enabled?'dot-ok':'dot-off')+'"></span>'
         +'<span class="help" style="margin:0">'+(pl.enabled?'Enabled':'Disabled')+'</span>'
+        +'<button class="mini accent" data-open="'+esc(pl.slug)+'">Open</button>'
         +'<button class="mini" data-act="'+(pl.enabled?'disable':'enable')+'" '
         +'data-slug="'+esc(pl.slug)+'">'+(pl.enabled?'Disable':'Enable')+'</button>'
       : '<button class="mini accent" data-act="install" data-slug="'+esc(pl.slug)+'">Install'
@@ -1778,6 +1976,8 @@ RENDER.hub=async()=>{
       await submitMd({clear_api_token:true},'Mister Download Manager API token cleared');
     };
 
+    const backToHub=async()=>{hs=await j('/api/v1/hub/status').catch(()=>hs); render(await load());};
+    p.querySelectorAll('button[data-open]').forEach(b=>b.onclick=()=>pluginDashboard(b.dataset.open,backToHub));
     p.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
       const slug=b.dataset.slug, action=b.dataset.act;
       b.disabled=true; b.textContent='Working…'; actionError='';
@@ -1796,6 +1996,10 @@ RENDER.hub=async()=>{
           +(e&&e.message?e.message:'ROMarr did not answer.');
       }
       hs=await j('/api/v1/hub/status').catch(()=>hs);
+      if(action==='install'&&!actionError){
+        toast('Installed. Here is what it does and how to set it up.');
+        return pluginDashboard(slug,backToHub);
+      }
       render(await load());
     });
 
@@ -3708,6 +3912,14 @@ function chatConfirmCard(ev,version){
   card.querySelector('[data-chat-ok]').onclick=()=>answer(true);
   card.querySelector('[data-chat-no]').onclick=()=>answer(false);
 }
+// A stored tool result failed only if it carries a real error, refusal or
+// cancellation. Every successful search result has `"error": null`, and the
+// word alone used to mark it failed.
+function chatToolFailed(content){
+  try{const o=JSON.parse(content);
+    return !!(o&&typeof o==='object'&&(o.error||o.declined||o.cancelled));}
+  catch(_){return /"(error|declined|cancelled)"\s*:\s*(true|"[^"])/.test(String(content||''));}
+}
 function chatRenderHistory(messages,pending,version){
   const log=$('#chat-log'); if(!log) return; log.innerHTML='';
   const results={};
@@ -3715,9 +3927,9 @@ function chatRenderHistory(messages,pending,version){
   messages.forEach(m=>{
     if(m.role==='user') chatAppend(esc(m.content),'chat-user');
     else if(m.role==='assistant'){
-      if(m.content) chatAppend(esc(m.content),'chat-bot');
+      if(m.content) chatAppend(mdLite(m.content),'chat-bot chat-md');
       (m.tool_calls||[]).forEach(c=>{const r=results[c.id];
-        chatAppend(chatToolHtml(c.name,c.arguments,r?r.content:undefined,r?!/"error"|"declined"|"cancelled"/.test(r.content):false),'chat-bot');});
+        chatAppend(chatToolHtml(c.name,c.arguments,r?r.content:undefined,r?!chatToolFailed(r.content):false),'chat-bot');});
     }
   });
   (pending||[]).forEach(ev=>chatConfirmCard(ev,version));
@@ -3739,7 +3951,7 @@ async function chatSend(url,payload,version){
       while((nl=buf.indexOf('\n'))>=0){
         const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1); if(!line) continue;
         let ev; try{ev=JSON.parse(line);}catch(_){continue;}
-        if(ev.type==='text'){const n=textNode(); n.textContent+=ev.delta;}
+        if(ev.type==='text'){const n=textNode(); n.classList.add('chat-md'); n.dataset.raw=(n.dataset.raw||'')+ev.delta; n.innerHTML=mdLite(n.dataset.raw);}
         else if(ev.type==='tool_call'){bot=null; tools[ev.id]=chatAppend(chatToolHtml(ev.name,ev.arguments),'chat-bot');}
         else if(ev.type==='tool_result'){const n=tools[ev.id]; if(n) n.innerHTML=chatToolHtml(ev.name,(JSON.parse(n.querySelector('pre').textContent||'{}')),ev.result,ev.ok);}
         else if(ev.type==='confirm'){bot=null; chatConfirmCard(ev,version);}
@@ -3770,7 +3982,7 @@ RENDER.assistant=async()=>{
   const num=(k,label)=>`<div class="field"><label>${label}</label><input id="chat-${k}" type="number" min="${cfg.limits[k][0]}" max="${cfg.limits[k][1]}" value="${esc(cfg[k])}"></div>`;
   $('#page').innerHTML=`
   <style>#chat-log{max-height:60vh;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px}
-  .chat-msg{max-width:92%;white-space:pre-wrap;line-height:1.45}.chat-user{align-self:flex-end;background:var(--bg);padding:8px 12px;border-radius:10px}
+  .chat-msg{max-width:92%;white-space:pre-wrap;line-height:1.45}.chat-md{white-space:normal}.chat-md p{margin:0 0 8px}.chat-md ul,.chat-md ol{margin:4px 0 8px 18px}.chat-md .pd-table{font-size:13px}.chat-user{align-self:flex-end;background:var(--bg);padding:8px 12px;border-radius:10px}
   .chat-bot{align-self:flex-start}.chat-pre{white-space:pre-wrap;max-height:240px;overflow:auto;font-size:12px;margin:4px 0}
   .chat-tool summary{cursor:pointer}</style>
   <details class="card" ${cfg.enabled&&cfg.model?'':'open'}><summary><b>Provider settings</b> <span class="pill">${cfg.enabled?'enabled':'disabled'}</span></summary>
@@ -5650,9 +5862,40 @@ RENDER.indexers=async()=>{
         </tr>`).join('')}</tbody></table></div>`
     :(d.error?`<div class="card"><h3>Via Prowlarr</h3>
         <p class="help" style="color:var(--warn)">${esc(d.error)}</p></div>`:'')}`;
+  $('#page').innerHTML+=`<div class="card"><h3>Hydra Launcher sources</h3>
+    <p class="help">Community download lists from <a href="https://library.hydra.wiki" target="_blank" rel="noopener">library.hydra.wiki</a>.
+      Console lists (Redump, No-Intro, Rutracker consoles) carry each game's platform. Magnets go to your torrent client,
+      file links to Mister Download Manager or Direct HTTP, and file-host links to Real-Debrid or AllDebrid.</p>
+    <div class="row"><input id="hy-q" type="search" placeholder="Filter sources" style="max-width:260px">
+      <button class="btn ghost" id="hy-load">Browse the library</button></div>
+    <div id="hy-list" style="margin-top:10px"></div></div>`;
   $('#i-add').onclick=()=>addItem('indexer');
   document.querySelectorAll('[data-iedit]').forEach(b=>b.onclick=()=>
     editItem('indexer', d.items[Number(b.dataset.iedit)]));
+
+  const have=new Set(d.items.map(it=>it.url));
+  let hySeq=0;
+  const hyLoad=async()=>{
+    const box=$('#hy-list'); box.innerHTML='<div class="empty">Loading…</div>';
+    const mine=++hySeq, ver=pageVersion;
+    const stale=()=>mine!==hySeq||ver!==pageVersion||activePage!=='indexers';
+    let r;
+    try{r=await j('/api/v1/hydra/library?q='+encodeURIComponent($('#hy-q').value||''));}
+    catch(_){ if(!stale())box.innerHTML='<p class="help" style="color:var(--warn)">The library did not answer. Try again.</p>'; return; }
+    if(stale())return;
+    if(r.error){box.innerHTML=`<p class="help" style="color:var(--warn)">${esc(r.error)}</p>`;return;}
+    box.innerHTML=(r.items||[]).length?`<table><thead><tr><th>Source</th><th>Status</th><th></th></tr></thead><tbody>
+      ${r.items.map((s,i)=>`<tr><td>${esc(s.name)}<div style="color:var(--dim);font-size:11.5px">${esc(s.url)}</div></td>
+        <td>${(s.status||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join(' ')}</td>
+        <td>${have.has(s.url)?'<span class="pill">added</span>':`<button class="mini" data-hy="${i}">Add</button>`}</td></tr>`).join('')}
+      </tbody></table>`:'<div class="empty">No sources match.</div>';
+    box.querySelectorAll('[data-hy]').forEach(b=>b.onclick=()=>{
+      const s=r.items[Number(b.dataset.hy)];
+      editItem('indexer',{type:'hydra',name:s.name,url:s.url,enable:true,priority:25,timeout:60});
+    });
+  };
+  $('#hy-load').onclick=hyLoad;
+  $('#hy-q').onkeydown=e=>{if(e.key==='Enter')hyLoad();};
 };
 
 RENDER.general=async()=>{
@@ -5701,6 +5944,23 @@ RENDER.general=async()=>{
      <div style="color:var(--dim);font-size:11.5px;margin-top:4px">
        Used host-side by ROM Hub plugins (such as GameFAQs, ModDB, and CurseForge web)
        when an upstream site serves a Cloudflare challenge.</div></div>`
+  +`<div class="field"><label>Extra plugin sources</label>
+     <input type="text" data-k="plugin_hosts"
+       value="${esc(SETTINGS.plugin_hosts||'')}"
+       placeholder="git.example.com, forge.example.org">
+     <div style="color:var(--dim);font-size:11.5px;margin-top:4px">
+       Plugins install from GitHub, GitLab, Codeberg, sourcehut, Bitbucket,
+       git.moveweight.com and git.romarr.app. Add the host of your own git forge here, comma separated.
+       Only https sources are accepted.</div></div>`
+  +`<div class="field"><label>GitHub token for ROM Hub plugins</label>
+     <input type="password" data-k="_github_token" autocomplete="new-password" maxlength="255"
+       placeholder="${SETTINGS.github_token_set?'Saved. Leave blank to keep it':'Not set'}">
+     <div style="color:var(--dim);font-size:11.5px;margin-top:4px">
+       Plugins that read GitHub (libretro thumbnails, cores, cheats, overlays, controller
+       profiles, Compressatorium, Mister Download Manager) share GitHub's limit of 60
+       requests an hour without one. Create a fine-grained token at github.com &rarr;
+       Settings &rarr; Developer settings with no repository access: public data needs
+       no permissions. Sent only to api.github.com, and never shown again.</div></div>`
   +chk('auto_import','Import completed downloads automatically',SETTINGS.auto_import)
   +`<div class="field"><label>Protocol</label>
      <select data-k="protocol">
@@ -7939,6 +8199,89 @@ def app_icon(size: int) -> bytes:
     return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
             + chunk(b'IDAT', zlib.compress(bytes(rows))) + chunk(b'IEND', b''))
 
+
+CSS += """
+/* ---- readability pass ------------------------------------------------------
+   Larger type and controls, steady gaps between a button and its text, and a
+   close button on every notice. Overrides only: the rules above stay the
+   source of colour and layout. */
+body{font-size:15px;line-height:1.6}
+.help,#page .help,#page p.help{font-size:13.5px;line-height:1.65}
+#navwrap a.nav{font-size:14px}
+#page .chip{font-size:13px;padding:5px 12px}
+th{font-size:12px;letter-spacing:.03em}
+td{font-size:14px}
+#top h1{font-size:19px}
+.btn{padding:10px 18px;font-size:14px;min-height:38px;line-height:1.3}
+.mini{padding:6px 14px;font-size:13px;min-height:32px;line-height:1.3}
+.row .mini,.rowact .mini,td .mini{margin-left:0}
+.row{gap:12px}
+.rowact{gap:8px}
+.pill{font-size:12.5px}
+input:not([type]),input[type=text],input[type=number],input[type=password],
+input[type=search],input[type=url],input[type=email],select,textarea{
+  font-size:14px;padding:10px 13px;min-height:38px}
+.panel-note{font-size:13.5px;line-height:1.6;padding:12px 44px 12px 14px;position:relative}
+.panel-note .note-x{position:absolute;top:8px;right:8px;width:28px;height:28px;
+  display:flex;align-items:center;justify-content:center;border:0;border-radius:6px;
+  background:transparent;color:var(--dim);font-size:18px;line-height:1;cursor:pointer}
+.panel-note .note-x:hover{background:var(--surface-2);color:var(--fg)}
+/* The rail's footer never covers the navigation: it scrolls inside a
+   shorter box, and the nav above it keeps its own scroll. */
+#railfoot{max-height:34vh;max-height:34dvh;overflow-y:auto}
+#page p.help.clamp{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#page .help-more{border:0;background:none;padding:0;margin:-6px 0 12px;color:var(--accent-text);font-size:12.5px;cursor:pointer}
+#notes-restore{display:block;margin:10px 0 0;padding:0;border:0;background:none;
+  color:var(--accent-text);font-size:12.5px;cursor:pointer;text-align:left}
+#notes-restore[hidden]{display:none}
+"""
+
+JS += r"""
+// ---- dismissible notices ----------------------------------------------------
+// Every .panel-note gets a close button. A closed note stays closed (per
+// browser) until "Show hidden notices" in Appearance brings them back. A note
+// that must stay -- an error being reported -- opts out with data-keep.
+(()=>{
+  const KEY='romarr.dismissedNotes';
+  const read=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'));}catch{return new Set();}};
+  const write=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s].slice(-400)));}catch{}};
+  const noteKey=el=>{const t=(el.textContent||'').replace(/\s+/g,' ').trim().slice(0,240);
+    let h=0;for(let i=0;i<t.length;i++)h=(h*31+t.charCodeAt(i))|0;return 'n'+(h>>>0).toString(36);};
+  const restore=()=>{const b=document.getElementById('notes-restore');if(b)b.hidden=!read().size;};
+  const decorate=()=>{
+    const gone=read();
+    document.querySelectorAll('#page .panel-note:not([data-keep]):not([data-note])').forEach(el=>{
+      const k=noteKey(el);el.dataset.note=k;
+      if(gone.has(k)){el.hidden=true;return;}
+      const x=document.createElement('button');x.type='button';x.className='note-x';
+      x.setAttribute('aria-label','Dismiss this notice');x.title='Dismiss';x.textContent='×';
+      x.onclick=()=>{const s=read();s.add(k);write(s);el.hidden=true;restore();};
+      el.appendChild(x);
+    });
+    // Long explanations fold to two lines with a More toggle: the first
+    // lines say what a thing is, the rest is there when somebody wants it.
+    document.querySelectorAll('#page p.help:not([data-fold])').forEach(p=>{
+      p.dataset.fold='1';
+      if((p.textContent||'').trim().length<220||p.closest('.modal'))return;
+      p.classList.add('clamp');
+      const b=document.createElement('button');b.type='button';b.className='help-more';b.textContent='More';
+      b.onclick=()=>{const open=p.classList.toggle('clamp');b.textContent=open?'More':'Less';};
+      p.after(b);
+    });
+    restore();
+  };
+  let queued=false;
+  const schedule=()=>{if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;decorate();});};
+  const start=()=>{
+    const page=document.getElementById('page');
+    if(page&&window.MutationObserver)new MutationObserver(schedule).observe(page,{childList:true,subtree:true});
+    const b=document.getElementById('notes-restore');
+    if(b)b.onclick=()=>{write(new Set());document.querySelectorAll('#page .panel-note[data-note]').forEach(el=>{el.hidden=false;});restore();};
+    schedule();
+  };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+})();
+"""
 
 APP_HEAD = ('<link rel="manifest" href="/manifest.webmanifest">'
             '<meta name="theme-color" content="#12141a">')
