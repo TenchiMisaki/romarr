@@ -272,33 +272,43 @@ def _output_files(output_path: str, published_files=()) -> list[str]:
     """Every regular file this job published.
 
     Directory outputs are enumerated within the isolated job directory. A
-    file-shaped CUE/GDI output may include tracks from that same directory;
-    unrelated neighboring files are never treated as part of the result.
+    file-shaped CUE/GDI output may include only its referenced tracks from that
+    same directory; unrelated neighboring files are never part of the result.
     """
     if not output_path:
         return []
     out = Path(output_path)
     if out.is_symlink():
         return []
+    published: set[Path] = set()
     if out.is_file():
         files = [out]
         job_root = out.parent.resolve()
-        if not isinstance(published_files, (list, tuple)):
-            published_files = ()
-        for value in published_files:
-            if not isinstance(value, (str, Path)):
-                continue
-            candidate = Path(value)
+        if isinstance(published_files, (list, tuple)):
+            for value in published_files:
+                if not isinstance(value, (str, Path)):
+                    continue
+                candidate = Path(value)
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(job_root)
+                except (OSError, ValueError):
+                    continue
+                published.add(resolved)
+    elif out.is_dir():
+        job_root = out.resolve()
+        files = []
+        for candidate in out.rglob("*"):
             if candidate.is_symlink() or not candidate.is_file():
                 continue
-            resolved = candidate.resolve()
             try:
+                resolved = candidate.resolve(strict=True)
                 resolved.relative_to(job_root)
-            except ValueError:
-                continue
-            files.append(candidate)
-    elif out.is_dir():
-        files = [p for p in out.rglob("*") if p.is_file()]
+            except (OSError, ValueError):
+                return []
+            files.append(resolved)
     else:
         return []
     expanded = {p.resolve() for p in files}
@@ -320,10 +330,14 @@ def _output_files(output_path: str, published_files=()) -> list[str]:
                 target.relative_to(root)
             except ValueError:
                 return []
-            if not target.is_file() or target not in expanded:
+            if not target.is_file():
                 return []
+            if target not in expanded:
+                if target not in published:
+                    return []
+                files.append(target)
+                expanded.add(target)
     return sorted(str(p) for p in expanded)
-
 
 def _disc_outputs_complete(files: list[str]) -> bool:
     """Require every CUE/GDI track to be among this extraction's published files."""
@@ -574,6 +588,10 @@ def _publish_service_outputs(item: DecompressItem) -> None:
         except ValueError as exc:
             raise OSError(f"service output escaped its isolated directory: {name}") from exc
         destination = output_root / relative
+        try:
+            destination.resolve().relative_to(output_root.resolve())
+        except ValueError as exc:
+            raise OSError(f"service output destination escaped output root: {destination}") from exc
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(f"output already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)

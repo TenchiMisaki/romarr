@@ -619,6 +619,7 @@ def test_service_file_cue_uses_tracks_from_its_isolated_job_directory(tmp_path):
     cue = stage / "Game.cue"
     track = stage / "Track 01.bin"
     track.write_bytes(DISC_1)
+    (stage / "service-temp.bin").write_bytes(DISC_2)
     cue.write_text('FILE "Track 01.bin" BINARY')
     item = decompress.DecompressItem(
         source=str(tmp_path / "Game.chd"), status="submitted", job_id="job-1",
@@ -635,5 +636,6 @@ def test_service_file_cue_uses_tracks_from_its_isolated_job_directory(tmp_path):
         "Game.cue", "Track 01.bin"}
     assert all(Path(path).parent == output_root for path in item.output_files)
     assert (output_root / "unrelated.bin").read_bytes() == DISC_2
+    assert not (output_root / "service-temp.bin").exists()
     assert not stage.exists()
     assert report.decompressed == 1 and report.failed == 0
