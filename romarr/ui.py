@@ -897,6 +897,7 @@ NAV = [
         ('peers', 'Friends', None),
         ('ecosystem', 'Ecosystem', None),
         ('agents', 'AI Agents', None),
+        ('assistant', 'Chat Agent', None),
     ]),
     ('Settings', [
         ('general', 'General', None),
@@ -1316,7 +1317,7 @@ function go(pageSpec){
     calendar:'Release Calendar',manualimport:'Manual Import',
     collections:'Collections \u2014 full sets and 1G1R',
     getstarted:'Get Started',setup:'Setup Guide',reports:'Reports & Help',
-    hub:'ROM Hub — Plugins',emulators:'Emulator Hub',portal:'Library & Devices',agents:'AI Agents (MCP)'};
+    hub:'ROM Hub — Plugins',emulators:'Emulator Hub',portal:'Library & Devices',assistant:'Chat Agent',agents:'AI Agents (MCP)'};
   $('#top h1').textContent=titles[page]||'ROMarr';
   $('#search').classList.toggle('hide', page !== 'library');
   (RENDER[page]||RENDER.library)();
@@ -1394,6 +1395,39 @@ RENDER.hub=async()=>{
         +(cm.api_key_set&&cm.source!=='env'?'<button class="mini" id="cm-clear" type="button">Clear API key</button>':'')
         +'</div></form>'
         +'<p class="help">'+esc(cm.credit||'')+'</p></div>' : '';
+    const md=hs.mdm||{};
+    const mdOpt=(value,label,current)=>'<option value="'+esc(value)+'"'
+      +(current===value?' selected':'')+'>'+esc(label)+'</option>';
+    // A failed status request must not show an editable form full of
+    // defaults: saving it would overwrite the shared configuration.
+    const mdForm=(pl.slug==='mdm'&&pl.installed&&!hs.mdm)
+      ?'<div style="margin-top:12px"><p class="help">Mister Download Manager settings could not be loaded. Reload the page to change them.</p></div>'
+      :(pl.slug==='mdm'&&pl.installed)
+      ?'<div style="margin-top:12px"><b>Mister Download Manager settings</b>'
+        +'<p class="help">'+(md.configured
+          ?'The Standalone Direct HTTP and BitTorrent (MDM) download clients use these settings ('
+            +esc(md.mode||'')+' mode). Saving either client changes them here too.'
+          :'Pick a mode to have the Standalone Direct HTTP and BitTorrent (MDM) download clients '
+            +'use these settings. Left unset, each client keeps its own.')+'</p>'
+        +'<form id="md-form" autocomplete="off">'
+        +'<div class="row"><select id="md-mode" title="Mode">'
+        +mdOpt('','Not set (clients keep their own)',md.mode||'')
+        +mdOpt('cli','Local MDM CLI',md.mode||'')
+        +mdOpt('remote','Remote MDM daemon or desktop (HTTPS)',md.mode||'')+'</select>'
+        +'<input id="md-url" type="url" placeholder="https://127.0.0.1:8463" maxlength="2048" '
+        +'title="Remote MDM URL" value="'+esc(md.remote_url||'')+'"></div>'
+        +'<div class="row"><input id="md-token" type="password" placeholder="'
+        +(md.api_token_set?'API token saved':'API token (Remote mode)')+'" '
+        +'autocomplete="new-password" maxlength="4096">'
+        +'<input id="md-conns" type="number" min="1" max="128" step="1" title="Connections (direct HTTP)" '
+        +'value="'+esc(String(md.connections||8))+'">'
+        +'<select id="md-cat" title="Category (Remote mode)">'
+        +[''].concat(md.categories||[]).map(c=>mdOpt(c,c||'No category',md.category||'')).join('')
+        +'</select></div>'
+        +'<div class="row"><button class="mini accent" type="submit">Save</button>'
+        +(md.api_token_set?'<button class="mini" id="md-clear" type="button">Clear API token</button>':'')
+        +'</div></form>'
+        +'<p class="help">'+esc(md.credit||'')+'</p></div>' : '';
     return '<div class="pcard'+(pl.installed?' installed':'')+'">'
       +'<h4>'+esc(pl.name)+(pl.author?'<span class="by">by '+esc(pl.author)+'</span>':'')+'</h4>'
       +'<div class="desc">'+esc(pl.description||'No description supplied.')+'</div>'
@@ -1403,7 +1437,7 @@ RENDER.hub=async()=>{
       +(pl.key_required?'<div class="help">Requires an account or key. Check the instructions before installing.</div>':'')
       +'<div class="foot">'+action
       +(net?'<span class="net">reaches '+esc(net)+'</span>':'')+'</div>'
-      +authForm+cmForm+'</div>';
+      +authForm+cmForm+mdForm+'</div>';
   };
 
   const render=d=>{
@@ -1672,31 +1706,31 @@ RENDER.hub=async()=>{
       await submitIaAuth({clear:true},'Could not clear Archive.org login','Archive.org credentials cleared');
     };
 
-    const cmF=$('#cm-form');
-    const cmClear=$('#cm-clear');
-    const submitCm=async(payload,okToast)=>{
+    // Saves a plugin settings card (Compressatorium, Mister Download Manager)
+    // and re-renders the Hub with what the server now holds.
+    const pluginSaver=(form,clearBtn,endpoint,failure)=>async(payload,okToast)=>{
       const opVer=typeof pageVersion==='number'?pageVersion:0;
       // A filter can re-render the Hub while Save is pending; then this form
       // is gone and a newer one may hold unsaved input, so leave it alone.
-      const formCurrent=()=>isCurrentHub(opVer)&&!!cmF&&cmF.isConnected;
-      const btn=cmF?cmF.querySelector('button[type="submit"]'):null;
+      const formCurrent=()=>isCurrentHub(opVer)&&!!form&&form.isConnected;
+      const btn=form?form.querySelector('button[type="submit"]'):null;
       // The fields stay locked until the save and refresh finish, so nothing
       // typed meanwhile is lost to the re-render.
-      const fields=cmF?[...cmF.querySelectorAll('input')]:[];
+      const fields=form?[...form.querySelectorAll('input,select')]:[];
       fields.forEach(f=>f.disabled=true);
-      if(btn)btn.disabled=true; if(cmClear)cmClear.disabled=true;
+      if(btn)btn.disabled=true; if(clearBtn)clearBtn.disabled=true;
       try{
         try{
-          const response=await fetch('/api/v1/hub/compressatorium',{
+          const response=await fetch(endpoint,{
             method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify(payload)});
           const result=await response.json();
           if(!formCurrent()) return;
-          actionError=result.ok?'':(result.error||'Could not save the Compressatorium settings');
+          actionError=result.ok?'':(result.error||failure);
           if(result.ok)toast(okToast);
         }catch(e){
           if(!formCurrent()) return;
-          actionError='Could not save the Compressatorium settings';
+          actionError=failure;
         }
         const nextHs=await j('/api/v1/hub/status').catch(()=>hs);
         if(!formCurrent()) return;
@@ -1705,9 +1739,13 @@ RENDER.hub=async()=>{
         if(!formCurrent()) return;
         render(nextData);
       }finally{
-        if(isCurrentHub(opVer)){fields.forEach(f=>f.disabled=false); if(btn)btn.disabled=false; if(cmClear)cmClear.disabled=false;}
+        if(isCurrentHub(opVer)){fields.forEach(f=>f.disabled=false); if(btn)btn.disabled=false; if(clearBtn)clearBtn.disabled=false;}
       }
     };
+    const cmF=$('#cm-form');
+    const cmClear=$('#cm-clear');
+    const submitCm=pluginSaver(cmF,cmClear,'/api/v1/hub/compressatorium',
+      'Could not save the Compressatorium settings');
     if(cmF) cmF.onsubmit=async e=>{
       e.preventDefault();
       // Send the address only when it was edited: a key-only save must not
@@ -1722,6 +1760,22 @@ RENDER.hub=async()=>{
     };
     if(cmClear) cmClear.onclick=async()=>{
       await submitCm({clear_api_key:true},'Compressatorium API key cleared');
+    };
+    const mdF=$('#md-form');
+    const mdClear=$('#md-clear');
+    const submitMd=pluginSaver(mdF,mdClear,'/api/v1/hub/mdm',
+      'Could not save the Mister Download Manager settings');
+    if(mdF) mdF.onsubmit=async e=>{
+      e.preventDefault();
+      const payload={mode:$('#md-mode').value,remote_url:$('#md-url').value.trim(),
+        connections:$('#md-conns').value.trim(),category:$('#md-cat').value};
+      // The token is sent only when typed: a blank field keeps the saved one.
+      const token=$('#md-token').value;
+      if(token)payload.api_token=token;
+      await submitMd(payload,'Mister Download Manager settings saved');
+    };
+    if(mdClear) mdClear.onclick=async()=>{
+      await submitMd({clear_api_token:true},'Mister Download Manager API token cleared');
     };
 
     p.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
@@ -3626,6 +3680,139 @@ RENDER.portal=async()=>{
   draw();
 };
 
+// Chat Agent: provider setup and a streaming chat with ROMarr's own tools.
+// Replies stream as NDJSON; tool calls and their results render inline, and
+// actions that change something wait for the Confirm button here.
+let CHAT_BUSY=false;
+const chatCurrent=v=>activePage==='assistant'&&pageVersion===v;
+const chatJson=s=>{try{return JSON.stringify(JSON.parse(s),null,2);}catch(_){return String(s||'');}};
+function chatToolHtml(name,args,result,ok){
+  const state=result===undefined?'running…':(ok?'done':'failed');
+  return `<details class="chat-tool"><summary><code>${esc(name)}</code> <span class="pill">${esc(state)}</span></summary>`
+    +`<div class="help">Arguments</div><pre class="chat-pre">${esc(JSON.stringify(args||{},null,2))}</pre>`
+    +(result===undefined?'':`<div class="help">Result</div><pre class="chat-pre">${esc(chatJson(result))}</pre>`)+`</details>`;
+}
+function chatAppend(html,cls){
+  const log=$('#chat-log'); if(!log) return null;
+  const div=document.createElement('div'); div.className='chat-msg '+(cls||''); div.innerHTML=html;
+  log.appendChild(div); log.scrollTop=log.scrollHeight; return div;
+}
+function chatConfirmCard(ev,version){
+  const card=chatAppend(`<div class="panel-note${ev.destructive?' panel-warn':''}"><b>${ev.destructive?'Confirm removal':'Confirm action'}:</b> ${esc(ev.summary)}`
+    +`<div class="row" style="margin-top:8px;gap:8px"><button class="btn" data-chat-ok>Confirm</button>`
+    +`<button class="btn ghost" data-chat-no>Cancel</button></div></div>`,'chat-confirm');
+  if(!card) return;
+  const answer=approve=>{card.querySelectorAll('button').forEach(b=>b.disabled=true);
+    chatSend('/api/v1/chat/confirm',{id:ev.id,approve},version);};
+  card.querySelector('[data-chat-ok]').onclick=()=>answer(true);
+  card.querySelector('[data-chat-no]').onclick=()=>answer(false);
+}
+function chatRenderHistory(messages,pending,version){
+  const log=$('#chat-log'); if(!log) return; log.innerHTML='';
+  const results={};
+  messages.forEach(m=>{if(m.role==='tool')results[m.tool_call_id]=m;});
+  messages.forEach(m=>{
+    if(m.role==='user') chatAppend(esc(m.content),'chat-user');
+    else if(m.role==='assistant'){
+      if(m.content) chatAppend(esc(m.content),'chat-bot');
+      (m.tool_calls||[]).forEach(c=>{const r=results[c.id];
+        chatAppend(chatToolHtml(c.name,c.arguments,r?r.content:undefined,r?!/"error"|"declined"|"cancelled"/.test(r.content):false),'chat-bot');});
+    }
+  });
+  (pending||[]).forEach(ev=>chatConfirmCard(ev,version));
+  if(!messages.length) chatAppend('<span class="help">Ask about your library: “what is missing from my SNES set?”, “find Chrono Trigger for snes”, “why was that release refused?”.</span>','chat-bot');
+}
+async function chatSend(url,payload,version){
+  if(CHAT_BUSY) return; CHAT_BUSY=true;
+  const send=$('#chat-send'); if(send) send.disabled=true;
+  let bot=null, tools={};
+  const textNode=()=>{if(!bot) bot=chatAppend('','chat-bot'); return bot;};
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok||!r.body){const e=await r.json().catch(()=>({}));throw new Error(e.error||('HTTP '+r.status));}
+    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    for(;;){
+      const {value,done}=await reader.read(); if(done) break;
+      if(!chatCurrent(version)){reader.cancel();return;}
+      buf+=dec.decode(value,{stream:true}); let nl;
+      while((nl=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1); if(!line) continue;
+        let ev; try{ev=JSON.parse(line);}catch(_){continue;}
+        if(ev.type==='text'){const n=textNode(); n.textContent+=ev.delta;}
+        else if(ev.type==='tool_call'){bot=null; tools[ev.id]=chatAppend(chatToolHtml(ev.name,ev.arguments),'chat-bot');}
+        else if(ev.type==='tool_result'){const n=tools[ev.id]; if(n) n.innerHTML=chatToolHtml(ev.name,(JSON.parse(n.querySelector('pre').textContent||'{}')),ev.result,ev.ok);}
+        else if(ev.type==='confirm'){bot=null; chatConfirmCard(ev,version);}
+        else if(ev.type==='notice'){chatAppend(`<span class="help">${esc(ev.message)}</span>`,'chat-bot');}
+        else if(ev.type==='error'){bot=null; chatAppend(`<div class="panel-note panel-warn">${esc(ev.message)}</div>`,'chat-bot');}
+      }
+      const log=$('#chat-log'); if(log) log.scrollTop=log.scrollHeight;
+    }
+  }catch(err){chatAppend(`<div class="panel-note panel-warn">${esc(err.message||err)}</div>`,'chat-bot');}
+  finally{CHAT_BUSY=false; const s=$('#chat-send'); if(s) s.disabled=false;}
+}
+function chatForm(){
+  const v=k=>$('#chat-'+k);
+  return {enabled:v('enabled').checked,provider:v('provider').value,base_url:v('base_url').value.trim(),
+    model:v('model').value.trim(),api_key:v('api_key').value,tool_mode:v('tool_mode').value,
+    max_steps:Number(v('max_steps').value),max_tokens:Number(v('max_tokens').value),
+    token_budget:Number(v('token_budget').value)};
+}
+RENDER.assistant=async()=>{
+  const version=pageVersion;
+  $('#page').innerHTML='<div class="empty">Loading the chat agent…</div>';
+  let cfg,hist;
+  try{
+    [cfg,hist]=await Promise.all([j('/api/v1/chat/config'),j('/api/v1/chat/history')]);
+  }catch(_){ if(chatCurrent(version)) $('#page').innerHTML='<div class="empty">Could not load the chat agent. Reopen the page to retry.</div>'; return; }
+  if(!chatCurrent(version)) return;
+  const opt=(val,label,cur)=>`<option value="${esc(val)}"${val===cur?' selected':''}>${esc(label)}</option>`;
+  const num=(k,label)=>`<div class="field"><label>${label}</label><input id="chat-${k}" type="number" min="${cfg.limits[k][0]}" max="${cfg.limits[k][1]}" value="${esc(cfg[k])}"></div>`;
+  $('#page').innerHTML=`
+  <style>#chat-log{max-height:60vh;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px}
+  .chat-msg{max-width:92%;white-space:pre-wrap;line-height:1.45}.chat-user{align-self:flex-end;background:var(--bg);padding:8px 12px;border-radius:10px}
+  .chat-bot{align-self:flex-start}.chat-pre{white-space:pre-wrap;max-height:240px;overflow:auto;font-size:12px;margin:4px 0}
+  .chat-tool summary{cursor:pointer}</style>
+  <details class="card" ${cfg.enabled&&cfg.model?'':'open'}><summary><b>Provider settings</b> <span class="pill">${cfg.enabled?'enabled':'disabled'}</span></summary>
+    <p class="help">Talk to your own model: a local Ollama, any OpenAI-compatible endpoint (LiteLLM, LM Studio, vLLM, OpenRouter…), or Anthropic. Actions that change your library always ask you to confirm here first.</p>
+    <label class="check"><input id="chat-enabled" type="checkbox"${cfg.enabled?' checked':''}> Enable the chat agent</label>
+    <div class="field"><label>Provider</label><select id="chat-provider">${cfg.providers.map(p=>opt(p.id,p.label,cfg.provider)).join('')}</select></div>
+    <div class="field"><label>Base URL</label><input id="chat-base_url" type="text" value="${esc(cfg.base_url)}" placeholder="${esc((cfg.providers.find(p=>p.id===cfg.provider)||{}).default_url||'')}"></div>
+    <div class="field"><label>API key</label><input id="chat-api_key" type="password" autocomplete="off" value="" placeholder="${cfg.api_key_set?'Saved — leave blank to keep it':'Not needed for a local Ollama'}"></div>
+    <div class="field"><label>Model</label><div class="row" style="gap:8px"><input id="chat-model" type="text" list="chat-models" value="${esc(cfg.model)}" placeholder="e.g. qwen2.5:7b" style="flex:1"><button class="btn ghost" id="chat-load">Load models</button></div><datalist id="chat-models"></datalist></div>
+    <div class="field"><label>Tool calling</label><select id="chat-tool_mode">${opt('auto','Auto (native, JSON fallback)',cfg.tool_mode)}${opt('native','Native tool calls only',cfg.tool_mode)}${opt('json','JSON mode (small models)',cfg.tool_mode)}</select></div>
+    <div class="row" style="gap:10px;flex-wrap:wrap">${num('max_steps','Max steps')}${num('max_tokens','Max tokens per reply')}${num('token_budget','Token budget per message')}</div>
+    <div class="row" style="gap:8px"><button class="btn" id="chat-save">Save</button><button class="btn ghost" id="chat-test">Test</button></div>
+    <div id="chat-msg" class="testline"></div>
+  </details>
+  <div class="card"><div class="row" style="justify-content:space-between"><b>Chat</b><button class="btn ghost" id="chat-clear">Clear conversation</button></div>
+    <div id="chat-log" aria-live="polite"></div>
+    <div class="row" style="gap:8px;margin-top:10px"><textarea id="chat-input" rows="2" maxlength="4000" style="flex:1" placeholder="${hist.enabled?'Ask ROMarr…':'Enable the chat agent above first'}"></textarea><button class="btn" id="chat-send">Send</button></div>
+  </div>`;
+  chatRenderHistory(hist.messages||[],hist.pending||[],version);
+  const say=t=>{const m=$('#chat-msg'); if(m) m.textContent=t;};
+  const post=(url,body)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  $('#chat-load').onclick=async()=>{say('Asking the provider…');
+    const r=await post('/api/v1/chat/models',chatForm()).catch(e=>({ok:false,error:String(e)}));
+    if(!chatCurrent(version)) return;
+    if(!r.ok){say(r.error||'Could not list models.');return;}
+    $('#chat-models').innerHTML=r.models.map(m=>`<option value="${esc(m)}">`).join('');
+    say(r.models.length?`${r.models.length} model(s) found; pick one in the Model box.`:'The provider lists no models.');};
+  $('#chat-test').onclick=async()=>{say('Testing…');
+    const r=await post('/api/v1/chat/test',chatForm()).catch(e=>({ok:false,error:String(e)}));
+    if(chatCurrent(version)) say(r.ok?r.message:(r.error||'Test failed.'));};
+  $('#chat-save').onclick=async()=>{
+    const r=await fetch('/api/v1/chat/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(chatForm())});
+    const d=await r.json().catch(()=>({}));
+    if(!chatCurrent(version)) return;
+    if(!r.ok){say(d.error||'Could not save.');return;}
+    say('Saved.'); go('assistant');};
+  $('#chat-clear').onclick=async()=>{await fetch('/api/v1/chat/history',{method:'DELETE'});
+    if(chatCurrent(version)) chatRenderHistory([],[],version);};
+  const submit=()=>{const box=$('#chat-input'); const text=box.value.trim(); if(!text||CHAT_BUSY) return;
+    box.value=''; chatAppend(esc(text),'chat-user'); chatSend('/api/v1/chat',{message:text},version);};
+  $('#chat-send').onclick=submit;
+  $('#chat-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();}};
+};
 RENDER.agents=async()=>{
   const version=pageVersion;
   const mcp=await j('/api/v1/mcp').catch(()=>({tools:[],mcp_client_config:{}}));
@@ -5279,6 +5466,16 @@ RENDER.clients=async()=>{
            <div style="margin-top:6px"><button class="btn ghost" id="mdm-install">Install MDM (${esc(mdm.release_tag||'v0.5.2')})</button>
            <span class="help" id="mdm-install-msg" style="margin-left:8px"></span></div>`
         :`<span style="color:var(--warn)">${esc(mdm.reason)}</span>`}
+    ${mdm.plugin&&mdm.plugin.configured
+      ?`<div style="margin-top:6px">Both MDM clients take their settings from the
+         <a href="#hub">${esc(mdm.plugin.label)}</a> plugin (${esc(mdm.plugin.mode)} mode${
+         mdm.plugin.remote_url?', '+esc(mdm.plugin.remote_url):''}). Saving an MDM client
+         here updates the plugin too.</div>`
+      :mdm.plugin&&mdm.plugin.plugin_enabled
+        ?`<div style="margin-top:6px">Set a mode on the
+           <a href="#hub">${esc(mdm.plugin.label)}</a> plugin to manage both MDM
+           clients in one place.</div>`
+        :''}
   </div>`:'';
   $('#page').innerHTML=`<div class="card">
     <div class="row" style="margin-bottom:12px">

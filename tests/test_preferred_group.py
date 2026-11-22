@@ -75,3 +75,31 @@ def test_store_keeps_the_group_per_wanted_entry(tmp_path):
     assert again.preferred_group("Okami", "ps2") == "Kamui"
     assert again.set_preferred_group("Okami", "ps2", "")
     assert again.preferred_group("Okami", "ps2") == ""
+
+
+def test_preferred_group_ranks_a_frozen_multidisc_release_set():
+    """A preferred group wins among the real PSX release-title competitors."""
+    psx = resolve("psx")
+    preferred_disc = _rel("Final Fantasy VII (USA) (Disc 1)-Kamui")
+    other_disc = _rel("Final Fantasy VII (USA) (Disc 1)-Alpha")
+    second_disc = _rel("Final Fantasy VII (USA) (Disc 2)-Alpha")
+    compilation = _rel("Final Fantasy VII + Final Fantasy VIII (USA)")
+    releases = [second_disc, compilation, other_disc, preferred_disc]
+
+    ranked = sorted(
+        releases,
+        key=lambda release: judge(
+            release, "Final Fantasy VII", psx, preferred_group="Kamui"
+        ).points,
+        reverse=True,
+    )
+
+    assert [release.title for release in ranked] == [
+        preferred_disc.title,
+        second_disc.title,
+        other_disc.title,
+        compilation.title,
+    ]
+    assert best_release(
+        releases, "Final Fantasy VII", psx, preferred_group="Kamui"
+    ) is preferred_disc

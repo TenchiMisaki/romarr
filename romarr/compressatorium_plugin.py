@@ -15,21 +15,25 @@ them here.
 Preinstalled, not forced: ROMarr installs the plugin once, the first time it
 starts with ROM Hub available, and records that it did. An operator who
 disables the plugin (ROM Hub has no uninstall) or deletes it keeps it that way.
+The install itself is shared with ROMarr's other preinstalled plugins, in
+`preinstalled_plugins`.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import shutil
-import tempfile
 import threading
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
-from . import hub
+from . import hub, preinstalled_plugins
+from .preinstalled_plugins import (  # noqa: F401 - part of this module's API
+    DEFAULT_BUNDLED_DIR,
+    MARKER_NAME,
+    SOURCES_DIR,
+    bundled_dir,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,130 +45,34 @@ UPSTREAM_URL = "https://github.com/pacnpal/compressatorium"
 CREDIT = ("Compressatorium is by pacnpal (https://github.com/pacnpal/compressatorium). "
           "ROMarr talks to it over its HTTP API and includes none of its code.")
 
-#: Where the Docker image and desktop packages put plugins they ship with.
-DEFAULT_BUNDLED_DIR = Path("/opt/romarr/bundled-plugins")
-
-#: Inside ROM_HUB_HOME: the plugins ROMarr has preinstalled there, ever.
-MARKER_NAME = "romarr-preinstalled.json"
-
-_lock = threading.Lock()
 #: Guards the url/api_key pair, so a reader never sees one field from before a
-#: save and the other from after it. Separate from `_lock`, which is held
-#: across the preinstall's git work.
+#: save and the other from after it. Separate from the preinstall lock, which
+#: is held across the preinstall's git work.
 _config_lock = threading.Lock()
-
-
-def bundled_dir(env: Mapping[str, str] | None = None) -> Path:
-    env = os.environ if env is None else env
-    return Path(env.get("ROMARR_BUNDLED_PLUGINS") or DEFAULT_BUNDLED_DIR)
-
-
-def _marker(home: Path) -> Path:
-    return home / MARKER_NAME
-
-
-def _read_marker(home: Path) -> dict:
-    try:
-        data = json.loads(_marker(home).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_marker(home: Path, data: dict) -> None:
-    path = _marker(home)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def preinstall(*, home: Path | None = None,
                env: Mapping[str, str] | None = None) -> str:
     """Install the plugin once, if ROM Hub is here and it never was.
 
-    Returns what happened, for the log and for tests: `no-hub`, `offered`
-    (installed before; left as the operator has it), `present` (already
-    installed by hand), `installed`, or `failed: <reason>`. A failure is not
-    recorded, so the next start tries again.
+    See `preinstalled_plugins.preinstall` for the outcomes it returns.
     """
-    if not hub.available():
-        return "no-hub"
-    home = Path(home or hub.HOME)
-    with _lock:
-        marker = _read_marker(home)
-        if SLUG in marker:
-            return "offered"
-        try:
-            _, registry = hub._import()
-            reg = registry.Registry(home)
-            if any(p.slug == SLUG for p in reg.installed()):
-                outcome = "present"
-            else:
-                bundled = bundled_dir(env) / SLUG
-                if (bundled / "manifest.toml").is_file():
-                    _install_bundled(reg, bundled, home)
-                else:
-                    reg.install(PLUGIN_REPO, ref=PLUGIN_REF)
-                outcome = "installed"
-            marker[SLUG] = PLUGIN_REF
-            _write_marker(home, marker)
-        except Exception as exc:  # the host is optional; never block startup
-            log.warning("could not preinstall the %s plugin: %s", SLUG, exc)
-            return f"failed: {exc}"
-    log.info("compressatorium plugin: %s", outcome)
-    return outcome
-
-
-#: Inside ROM_HUB_HOME: the runtime-owned copies bundled plugins install from.
-SOURCES_DIR = "bundled-sources"
-
-
-def _install_bundled(reg, bundled: Path, home: Path) -> None:
-    """Install the bundled checkout from a copy the runtime user owns.
-
-    The image builds the checkout as root, while ROMarr runs as PUID. Git
-    refuses a local clone from a repository another user owns, so installing
-    straight from the bundled folder failed on every start. A copy under
-    ROM_HUB_HOME avoids that without loosening git's ownership check, and it
-    is kept: ROM Hub records it as the plugin's source, and a later plugin
-    update clones from it again.
-    """
-    sources = home / SOURCES_DIR
-    sources.mkdir(parents=True, exist_ok=True)
-    target = sources / SLUG
-    with tempfile.TemporaryDirectory(prefix=".copy-", dir=sources) as stage:
-        staged = Path(stage) / SLUG
-        shutil.copytree(bundled, staged, symlinks=True)
-        if target.exists():
-            shutil.rmtree(target)
-        os.replace(staged, target)
-    reg.install(str(target))
+    return preinstalled_plugins.preinstall(SLUG, PLUGIN_REPO, PLUGIN_REF,
+                                           home=home, env=env)
 
 
 def preinstall_in_background() -> None:
     """`preinstall` on a daemon thread, so a slow git never delays serving."""
-    threading.Thread(target=preinstall, name="preinstall-plugins",
-                     daemon=True).start()
+    preinstalled_plugins.preinstall_in_background(SLUG, PLUGIN_REPO, PLUGIN_REF)
 
 
 def _plugin(home: Path):
     """The installed, enabled plugin, or None."""
-    try:
-        _, registry = hub._import()
-        plugin = registry.Registry(home).get(SLUG)
-    except Exception:
-        return None
-    return plugin if getattr(plugin, "enabled", True) else None
+    return preinstalled_plugins.enabled_plugin(SLUG, home)
 
 
 def _secret(home: Path, key: str) -> str:
-    try:
-        from rom_hub import secrets
-        value = secrets.open_store(home).get(SLUG, key)
-    except Exception as exc:
-        log.warning("cannot read the %s plugin's %s: %s", SLUG, key, exc)
-        return ""
-    return str(value or "")
+    return preinstalled_plugins.secret(SLUG, home, key)
 
 
 def connection(env: Mapping[str, str], *, home: Path | None = None) -> tuple[str, str, str]:
@@ -177,11 +85,7 @@ def connection(env: Mapping[str, str], *, home: Path | None = None) -> tuple[str
     """
     url = str(env.get("COMPRESSATORIUM_URL") or "").strip()
     if url:
-        key = str(env.get("COMPRESSATORIUM_API_KEY") or "")
-        if key and (_origin(url) or ("", "", None))[0] != "https":
-            log.warning("Compressatorium API key withheld because its URL is not HTTPS")
-            key = ""
-        return url, key, "env"
+        return url, str(env.get("COMPRESSATORIUM_API_KEY") or ""), "env"
     home = Path(home or hub.HOME)
     with _config_lock:
         plugin = _plugin(home)
@@ -190,11 +94,7 @@ def connection(env: Mapping[str, str], *, home: Path | None = None) -> tuple[str
         url = str((getattr(plugin, "config", None) or {}).get("url") or "").strip()
         if not url:
             return "", "", ""
-        key = _secret(home, "api_key")
-        if key and (_origin(url) or ("", "", None))[0] != "https":
-            log.warning("Compressatorium API key withheld because its URL is not HTTPS")
-            key = ""
-        return url, key, "plugin"
+        return url, _secret(home, "api_key"), "plugin"
 
 
 def _valid_url(url: str) -> str:
@@ -209,21 +109,6 @@ def _valid_url(url: str) -> str:
     return ""
 
 
-def _origin(url: str) -> tuple[str, str, int | None] | None:
-    """Normalize the credential destination for service-origin comparisons."""
-    try:
-        parts = urlsplit(url)
-        if not parts.scheme or not parts.hostname:
-            return None
-        port = parts.port
-    except ValueError:
-        return None
-    scheme = parts.scheme.casefold()
-    if port is None:
-        port = 443 if scheme == "https" else 80 if scheme == "http" else None
-    return scheme, parts.hostname.casefold(), port
-
-
 def configure(*, url: str | None = None, api_key: str | None = None,
               clear_api_key: bool = False, home: Path | None = None) -> dict:
     """Save the plugin's `url` and/or secret `api_key` from the Hub page.
@@ -233,40 +118,28 @@ def configure(*, url: str | None = None, api_key: str | None = None,
     secret store, never into the plugin config that `state.json` holds.
     """
     home = Path(home or hub.HOME)
+    try:
+        _, registry = hub._import()
+        reg = registry.Registry(home)
+        plugin = reg.get(SLUG)
+    except Exception:
+        return {"ok": False, "error": "Install the Compressatorium plugin first"}
     if url is not None:
         url = str(url).strip()
         problem = _valid_url(url) if url else ""
         if problem:
             return {"ok": False, "error": problem}
     with _config_lock:
-        try:
-            _, registry = hub._import()
-            reg = registry.Registry(home)
-            plugin = reg.get(SLUG)
-        except Exception:
-            return {"ok": False, "error": "Install the Compressatorium plugin first"}
-        current_config = dict(getattr(plugin, "config", None) or {})
-        old_url = str(current_config.get("url") or "").strip()
-        target_url = url if url is not None else old_url
-        if api_key and (_origin(target_url) or ("", "", None))[0] != "https":
-            return {"ok": False,
-                    "error": "API keys require an https:// Compressatorium URL"}
-        origin_changed = (
-            url is not None and _origin(url) != _origin(old_url))
-        # A saved secret belongs to the service origin it was entered for.
-        # Clear it automatically when the destination changes unless a new
-        # key is supplied in this same operation.
-        clear_old_key = clear_api_key or (origin_changed and not api_key)
         # The key is saved first and the url only once it is, so a failure
         # never leaves a new address paired with the old key -- that pairing
         # would send the old key to a service it was never meant for.
         store = previous = None
-        if clear_old_key or api_key:
+        if clear_api_key or api_key:
             try:
                 from rom_hub import secrets
                 store = secrets.open_store(home)
                 previous = store.get(SLUG, "api_key")
-                if clear_old_key:
+                if clear_api_key:
                     store.delete(SLUG, "api_key")
                 else:
                     store.set(SLUG, "api_key", str(api_key))
@@ -274,7 +147,7 @@ def configure(*, url: str | None = None, api_key: str | None = None,
                 return {"ok": False, "error": f"could not save the API key: {exc}"}
         if url is not None:
             try:
-                config = dict(current_config)
+                config = dict(getattr(plugin, "config", None) or {})
                 config["url"] = url.rstrip("/")
                 reg.set_config(SLUG, config)
             except Exception as exc:
