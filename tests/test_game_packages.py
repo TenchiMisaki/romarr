@@ -664,8 +664,8 @@ def test_an_update_request_is_cleared_even_when_titles_differ(tmp_path):
     assert store.wanted == []
 
 
-def test_base_import_under_alias_preserves_requested_dlcs():
-    store = Store(Path("alias-state.json"))
+def test_base_import_under_alias_preserves_requested_dlcs(tmp_path):
+    store = Store(tmp_path / "alias-state.json")
     alias = "Last of Us Remastered, The"
     store.want(alias, "ps4", parts=("base", "dlc"))
     item = QueueItem("The Last of Us Remastered", "ps4", "release", 5,
