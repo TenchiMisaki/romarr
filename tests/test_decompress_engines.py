@@ -277,6 +277,13 @@ def test_incomplete_service_cue_output_cannot_be_verified(tmp_path):
     assert decompress._output_files(str(cue)) == []
 
 
+def test_file_output_rejects_declared_missing_published_file(tmp_path):
+    output = tmp_path / "Game.bin"
+    missing_cue = tmp_path / "Game.cue"
+    output.write_bytes(DISC_1)
+    assert decompress._output_files(str(output), [str(output), str(missing_cue)]) == []
+
+
 def test_dry_run_names_the_engine_and_writes_nothing(tmp_path, monkeypatch):
     _zip(tmp_path / "Set.zip", {"a.bin": DISC_1, "b.bin": DISC_2})
     (tmp_path / "Game.rvz").write_bytes(b"x")
