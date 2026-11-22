@@ -203,6 +203,19 @@ def _validated(config: dict) -> tuple[dict, str]:
             "category": category}, ""
 
 
+def _remote_origin(url: str) -> tuple[str, str, int] | None:
+    """Compare the destination of stored credentials across URL edits."""
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        default_port = 443 if parts.scheme == "https" else 80
+        port = parts.port
+        return parts.scheme, parts.hostname.casefold(), default_port if port is None else port
+    except ValueError:
+        return None
+
+
 def configure(*, mode: str | None = None, remote_url: str | None = None,
               api_token: str | None = None, clear_api_token: bool = False,
               connections: int | str | None = None, category: str | None = None,
@@ -237,7 +250,7 @@ def configure(*, mode: str | None = None, remote_url: str | None = None,
         if problem:
             return {"ok": False, "error": problem}
         clear_api_token = clear_api_token or (
-            clean["remote_url"] != old_url and not api_token)
+            _remote_origin(clean["remote_url"]) != _remote_origin(old_url) and not api_token)
         # The token is saved first and the config only once it is, so a
         # failure never leaves a new address paired with the old token --
         # that pairing would send the old token to a service it was never

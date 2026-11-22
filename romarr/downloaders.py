@@ -2189,7 +2189,7 @@ class DebridClient:
         self._probe_state = threading.local()
         self._fetched_lock = threading.RLock()
         self._fetched_local: dict[str, dict] = {}
-        self._copy_failures: dict[str, int] = {}
+        self._copy_failures: dict[tuple[str, str], int] = {}
 
     @property
     def configured(self) -> bool:
@@ -2317,17 +2317,24 @@ class DebridClient:
             return []
         rows = []
         with self._fetched_lock:
-            names = {str(item[0]) for item in finished if item}
-            self._copy_failures = {name: count for name, count in self._copy_failures.items()
-                                   if name in names}
+            live = {self._copy_identity(item) for item in finished if item}
+            self._copy_failures = {key: count for key, count in self._copy_failures.items()
+                                   if key in live}
             for item in finished:
-                if not item or self._copy_failures.get(str(item[0]), 0) >= 3:
+                if not item or self._copy_failures.get(self._copy_identity(item), 0) >= 3:
                     continue
                 row = {"name": str(item[0]), "worker_active": True, "progress": 1.0}
                 if len(item) > 2 and item[2]:
                     row["hash"] = str(item[2])
                 rows.append(row)
         return rows
+
+    @staticmethod
+    def _copy_identity(item) -> tuple[str, str]:
+        """Identify copy retries by infohash when the service reports it."""
+        if len(item) > 2 and item[2]:
+            return "hash", str(item[2]).strip().lower()
+        return "name", str(item[0])
 
     def _finished(self) -> list[tuple[str, list]]:
         """`(name, links)` for every one of our items the cloud has finished.
@@ -2528,12 +2535,13 @@ class DebridClient:
                 target = Path(self._config.save_path) / name
                 copied = self._fetch_links(links, target, fetch=fetch)
                 if fetch:
+                    key = self._copy_identity(entry)
                     with self._fetched_lock:
                         if copied:
-                            self._copy_failures.pop(str(name), None)
+                            self._copy_failures.pop(key, None)
                         else:
-                            failures = self._copy_failures.get(str(name), 0)
-                            self._copy_failures[str(name)] = min(failures + 1, 3)
+                            failures = self._copy_failures.get(key, 0)
+                            self._copy_failures[key] = min(failures + 1, 3)
                 if copied:
                     row = {"name": name, "content_path": str(target),
                            "save_path": self._config.save_path,

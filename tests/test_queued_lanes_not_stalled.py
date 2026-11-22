@@ -106,6 +106,10 @@ def test_debrid_activity_keeps_the_hash_and_expires_after_failed_copies(tmp_path
     for _ in range(3):
         assert client.completed() == []
     assert client.active_downloads() == []
+    monkeypatch.setattr(client, "_finished", lambda: [
+        ("Game", ["link"], "a" * 40), ("Game", ["other"], "b" * 40),
+    ])
+    assert [row["hash"] for row in client.active_downloads()] == ["b" * 40]
 
 
 def test_a_library_browser_url_beats_the_global_public_url(tmp_path):
