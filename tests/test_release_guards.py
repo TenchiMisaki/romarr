@@ -4,7 +4,7 @@ import pytest
 
 from romarr.platforms import by_slug
 from romarr.release_guards import demo_build, demo_refusal, executable_refusal
-from romarr.selection import Release, judge
+from romarr.selection import Release, best_release, judge
 
 
 def rel(title, *, size=512 * 1024, cats=(1030,)):
@@ -102,8 +102,19 @@ def test_judge_refuses_disguised_executables_before_scoring():
     nes = judge(rel("Super Mario Bros (USA).nes.scr"), "Super Mario Bros", by_slug("nes"))
     assert nes.points <= -1500
 
-def test_full_region_name_after_demo_is_release_metadata():
-    assert demo_refusal("Super Metroid Demo (Europe).smc", "Super Metroid")
+@pytest.mark.parametrize("title", [
+    "Super Metroid Demo (Europe).smc",
+    "Super Metroid Demo Europe",
+    "Super Metroid Trial Japan",
+    "Super Metroid Preview Australia",
+])
+def test_full_region_name_after_demo_is_release_metadata(title):
+    """The full game wins against a demo with a full region name."""
+    wanted = "Super Metroid"
+    demo = rel(title)
+    full = rel("Super Metroid (Europe).smc")
+    assert demo_refusal(title, wanted)
+    assert best_release([demo, full], wanted, by_slug("snes")) is full
 
 
 def test_uppercase_trial_of_mana_request_does_not_allow_explicit_trial():

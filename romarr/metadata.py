@@ -594,12 +594,14 @@ class Metadata:
         term, how = lookup_key(verification, filename)
         context = lookup_context(verification, filename, platform)
         if not term:
-            if not any(context.get(key) for key in ("sha1", "md5", "crc")):
+            term = next((context[key] for key in ("sha1", "md5", "crc")
+                         if context.get(key)), "")
+            if not term:
                 return GameInfo()
             how = "hash"
 
         for cfg, spec in self._enabled():
-            if spec.get("artwork") or (not term and not spec.get("context")):
+            if spec.get("artwork") or (how == "hash" and not spec.get("context")):
                 continue
             info = self._ask(spec, cfg, term, context)
             if info.found:

@@ -73,7 +73,7 @@ RUN if [ "$TARGETARCH" != "arm" ]; then \
                   scummvm-freeware:v0.2.0 universal-db:v0.2.0; do \
         git clone --quiet --depth 1 --branch "${spec#*:}" \
           "https://github.com/BlizzHacker/rom-hub-${spec%%:*}" \
-          "/opt/romarr/bundled-plugins/${spec%%:*}"; \
+          "/opt/romarr/bundled-plugins/${spec%%:*}" || exit 1; \
       done; \
     fi
 

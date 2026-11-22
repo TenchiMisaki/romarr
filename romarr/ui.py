@@ -3702,7 +3702,8 @@ function chatConfirmCard(ev,version){
     +`<div class="row" style="margin-top:8px;gap:8px"><button class="btn" data-chat-ok>Confirm</button>`
     +`<button class="btn ghost" data-chat-no>Cancel</button></div></div>`,'chat-confirm');
   if(!card) return;
-  const answer=approve=>{card.querySelectorAll('button').forEach(b=>b.disabled=true);
+  const answer=approve=>{if(CHAT_BUSY||!chatCurrent(version)) return;
+    card.querySelectorAll('button').forEach(b=>b.disabled=true);
     chatSend('/api/v1/chat/confirm',{id:ev.id,approve},version);};
   card.querySelector('[data-chat-ok]').onclick=()=>answer(true);
   card.querySelector('[data-chat-no]').onclick=()=>answer(false);
@@ -3747,7 +3748,7 @@ async function chatSend(url,payload,version){
       }
       const log=$('#chat-log'); if(log) log.scrollTop=log.scrollHeight;
     }
-  }catch(err){chatAppend(`<div class="panel-note panel-warn">${esc(err.message||err)}</div>`,'chat-bot');}
+  }catch(err){if(chatCurrent(version)) chatAppend(`<div class="panel-note panel-warn">${esc(err.message||err)}</div>`,'chat-bot');}
   finally{CHAT_BUSY=false; const s=$('#chat-send'); if(s) s.disabled=false;}
 }
 function chatForm(){

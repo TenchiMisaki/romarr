@@ -621,7 +621,8 @@ def _loop(service, user: str, cfg: dict, messages: list[dict]) -> Iterator[dict]
         wire = [{"role": "system", "content": system}] + _wire(messages, json_mode)
         text, calls, reported = "", [], 0
         try:
-            for kind, value in providers.stream(cfg, wire, None if json_mode else specs,
+            for kind, value in providers.stream({**cfg, "_reply_deadline": deadline},
+                                                wire, None if json_mode else specs,
                                                 max_tokens=cfg["max_tokens"], json_mode=json_mode):
                 if kind == "text":
                     text += value
@@ -687,10 +688,19 @@ def _cancel_pending(user: str, messages: list[dict]) -> None:
     with _lock:
         for pid in [k for k, v in _pending.items() if v["user"] == user]:
             _pending.pop(pid, None)
-    answered = {m.get("tool_call_id") for m in messages if m["role"] == "tool"}
     repaired = []
-    for m in messages:
+    for index, m in enumerate(messages):
+        if m["role"] == "tool":
+            continue
         repaired.append(m)
+        results = []
+        for following in range(index + 1, len(messages)):
+            result = messages[following]
+            if result["role"] != "tool":
+                break
+            results.append(result)
+        repaired.extend(results)
+        answered = {result.get("tool_call_id") for result in results}
         for call in m.get("tool_calls") or [] if m["role"] == "assistant" else []:
             if call.get("id") not in answered:
                 repaired.append({"role": "tool", "tool_call_id": call.get("id"), "name": call.get("name"),
@@ -710,8 +720,8 @@ def _session(service, user: str, step: Callable[[list[dict]], Iterator[dict]]) -
         return
     messages = load_history(service, user)
     try:
-        yield from step(messages)
-        yield from _loop(service, user, cfg, messages)
+        if (yield from step(messages)) is not False:
+            yield from _loop(service, user, cfg, messages)
     finally:
         save_history(service, user, messages)
         lock.release()
@@ -735,19 +745,19 @@ def chat(service, identity: str, text: str) -> Iterator[dict]:
 def confirm(service, identity: str, pid: str, approve: bool) -> Iterator[dict]:
     """Run (or decline) one pending action, then let the model continue."""
     user = user_key(identity)
-    with _lock:
-        for key in [k for k, v in _pending.items() if time.monotonic() - v["created"] > CONFIRM_SECONDS]:
-            _pending.pop(key, None)
-        pending = _pending.get(str(pid or ""))
-        if pending is None or pending["user"] != user:
-            pending = None
-        else:
-            _pending.pop(pid, None)
-    if pending is None:
-        return iter([{"type": "error", "message": "That confirmation has expired or was already used."}])
-    tool = {t["name"]: t for t in tools()}[pending["tool"]]
-
     def step(messages):
+        with _lock:
+            for key in [k for k, v in _pending.items() if time.monotonic() - v["created"] > CONFIRM_SECONDS]:
+                _pending.pop(key, None)
+            pending = _pending.get(str(pid or ""))
+            if pending is not None and pending["user"] == user:
+                _pending.pop(pid)
+            else:
+                pending = None
+        if pending is None:
+            yield {"type": "error", "message": "That confirmation has expired or was already used."}
+            return False
+        tool = {t["name"]: t for t in tools()}[pending["tool"]]
         yield {"type": "tool_call", "id": pending["call_id"], "name": tool["name"],
                "arguments": pending["arguments"], "confirmed": approve}
         if approve:

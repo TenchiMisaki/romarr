@@ -2189,6 +2189,7 @@ class DebridClient:
         self._probe_state = threading.local()
         self._fetched_lock = threading.RLock()
         self._fetched_local: dict[str, dict] = {}
+        self._copy_failures: dict[str, int] = {}
 
     @property
     def configured(self) -> bool:
@@ -2314,8 +2315,19 @@ class DebridClient:
             finished = self._finished()
         except Exception:
             return []
-        return [{"name": str(item[0]), "worker_active": True, "progress": 1.0}
-                for item in finished if item]
+        rows = []
+        with self._fetched_lock:
+            names = {str(item[0]) for item in finished if item}
+            self._copy_failures = {name: count for name, count in self._copy_failures.items()
+                                   if name in names}
+            for item in finished:
+                if not item or self._copy_failures.get(str(item[0]), 0) >= 3:
+                    continue
+                row = {"name": str(item[0]), "worker_active": True, "progress": 1.0}
+                if len(item) > 2 and item[2]:
+                    row["hash"] = str(item[2])
+                rows.append(row)
+        return rows
 
     def _finished(self) -> list[tuple[str, list]]:
         """`(name, links)` for every one of our items the cloud has finished.
@@ -2514,7 +2526,15 @@ class DebridClient:
                 # third element; the others still return `(name, links)`.
                 name, links, *rest = entry
                 target = Path(self._config.save_path) / name
-                if self._fetch_links(links, target, fetch=fetch):
+                copied = self._fetch_links(links, target, fetch=fetch)
+                if fetch:
+                    with self._fetched_lock:
+                        if copied:
+                            self._copy_failures.pop(str(name), None)
+                        else:
+                            failures = self._copy_failures.get(str(name), 0)
+                            self._copy_failures[str(name)] = min(failures + 1, 3)
+                if copied:
                     row = {"name": name, "content_path": str(target),
                            "save_path": self._config.save_path,
                            "state": self.DONE_STATE}

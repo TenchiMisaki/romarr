@@ -19,6 +19,7 @@ back from the provider.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from urllib.parse import urlsplit
 
@@ -61,9 +62,11 @@ def normalise_url(provider: str, url: str) -> str:
 
 def _scrub(text: str, cfg: dict) -> str:
     """Shorten provider text and remove the configured key if it was echoed."""
-    text = " ".join(str(text or "").split())[:300]
+    text = str(text or "")
     key = str(cfg.get("api_key") or "")
-    return text.replace(key, "[key]") if len(key) >= 4 else text
+    if key:
+        text = text.replace(key, "[key]")
+    return " ".join(text.split())[:300]
 
 
 def _headers(cfg: dict) -> dict:
@@ -107,6 +110,10 @@ def _request(cfg: dict, method: str, path: str, *, body=None, stream=False, time
     """One provider request; every failure becomes a readable ProviderError."""
     label = LABELS[cfg["provider"]]
     url = _endpoint(cfg, path)
+    parts = urlsplit(url)
+    if cfg.get("api_key") and parts.scheme != "https" and parts.hostname not in (
+            "localhost", "127.0.0.1", "::1"):
+        raise ProviderError("Provider API keys require HTTPS outside loopback.")
     try:
         response = requests.request(method, url, headers=_headers(cfg), json=body,
                                     stream=stream, timeout=timeout, allow_redirects=False)
@@ -145,22 +152,32 @@ def list_models(cfg: dict) -> list[str]:
     return sorted({n for n in names if n})[:MAX_MODELS]
 
 
-def _lines(response) -> Iterator[str]:
+def _lines(response, deadline: float = float("inf")) -> Iterator[str]:
     """Decoded, bounded lines from a streamed response."""
     try:
-        for raw in response.iter_lines(chunk_size=1024, decode_unicode=False):
-            if len(raw) > MAX_LINE:
-                raise ProviderError("The provider sent an oversized stream line.")
-            yield raw.decode("utf-8", "replace")
+        pending = bytearray()
+        for chunk in response.iter_content(chunk_size=1024):
+            if time.monotonic() > deadline:
+                raise ProviderError("Stopped: the provider stream exceeded the reply deadline.")
+            parts = chunk.split(b"\n")
+            for index, part in enumerate(parts):
+                if len(pending) + len(part) > MAX_LINE:
+                    raise ProviderError("The provider sent an oversized stream line.")
+                pending.extend(part)
+                if index < len(parts) - 1:
+                    yield pending.decode("utf-8", "replace").rstrip("\r")
+                    pending.clear()
+        if pending:
+            yield pending.decode("utf-8", "replace").rstrip("\r")
     except requests.RequestException:
         raise ProviderError("The provider connection dropped mid-reply.") from None
     finally:
         response.close()
 
 
-def _sse(response) -> Iterator[dict]:
+def _sse(response, deadline: float = float("inf")) -> Iterator[dict]:
     """JSON payloads of a server-sent-event stream (`data:` lines)."""
-    for line in _lines(response):
+    for line in _lines(response, deadline):
         if not line.startswith("data:"):
             continue
         data = line[5:].strip()
@@ -210,7 +227,7 @@ def _ollama(cfg, messages, tools, max_tokens, json_mode):
         body["format"] = "json"
     response = _request(cfg, "POST", "/api/chat", body=body, stream=True)
     calls = 0
-    for line in _lines(response):
+    for line in _lines(response, cfg.get("_reply_deadline", float("inf"))):
         if not line.strip():
             continue
         try:
@@ -256,7 +273,7 @@ def _openai(cfg, messages, tools, max_tokens, json_mode):
         body["tools"] = [{"type": "function", "function": t} for t in tools]
     response = _request(cfg, "POST", "/chat/completions", body=body, stream=True)
     pending: dict[int, dict] = {}
-    for chunk in _sse(response):
+    for chunk in _sse(response, cfg.get("_reply_deadline", float("inf"))):
         if chunk.get("error"):
             raise ProviderError(f"{LABELS['openai']}: {_scrub(_detail_of(chunk), cfg)}")
         usage = chunk.get("usage")
@@ -325,7 +342,7 @@ def _anthropic(cfg, messages, tools, max_tokens, json_mode):
                           "input_schema": t["parameters"]} for t in tools]
     response = _request(cfg, "POST", "/messages", body=body, stream=True)
     blocks: dict[int, dict] = {}
-    for event in _sse(response):
+    for event in _sse(response, cfg.get("_reply_deadline", float("inf"))):
         kind = event.get("type")
         if kind == "error":
             raise ProviderError(f"Anthropic: {_scrub(_detail_of(event), cfg)}")

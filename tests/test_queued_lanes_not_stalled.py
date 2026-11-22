@@ -96,6 +96,18 @@ def test_a_debrid_item_finished_in_the_cloud_is_active_while_it_copies(tmp_path,
     assert rd.active_downloads() == []
 
 
+def test_debrid_activity_keeps_the_hash_and_expires_after_failed_copies(tmp_path, monkeypatch):
+    """A cloud completion protects a queued copy until local retries fail."""
+    from romarr.downloaders import RealDebrid, RealDebridConfig
+    client = RealDebrid(RealDebridConfig(api_token="t", save_path=str(tmp_path)))
+    monkeypatch.setattr(client, "_finished", lambda: [("Game", ["link"], "a" * 40)])
+    monkeypatch.setattr(client, "_fetch_links", lambda *args, **kwargs: False)
+    assert client.active_downloads()[0]["hash"] == "a" * 40
+    for _ in range(3):
+        assert client.completed() == []
+    assert client.active_downloads() == []
+
+
 def test_a_library_browser_url_beats_the_global_public_url(tmp_path):
     service = ROMarr({"ROMARR_DATA": str(tmp_path / "state.json")})
     service.store.settings["romm_public_url"] = "https://global.example"

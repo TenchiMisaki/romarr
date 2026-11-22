@@ -228,6 +228,7 @@ def configure(*, mode: str | None = None, remote_url: str | None = None,
         except Exception:
             return {"ok": False, "error": f"Install the {LABEL} plugin first"}
         config = dict(getattr(plugin, "config", None) or {})
+        old_url = str(config.get("remote_url") or "").strip().rstrip("/")
         for key, value in (("mode", mode), ("remote_url", remote_url),
                            ("connections", connections), ("category", category)):
             if value is not None:
@@ -235,6 +236,8 @@ def configure(*, mode: str | None = None, remote_url: str | None = None,
         clean, problem = _validated(config)
         if problem:
             return {"ok": False, "error": problem}
+        clear_api_token = clear_api_token or (
+            clean["remote_url"] != old_url and not api_token)
         # The token is saved first and the config only once it is, so a
         # failure never leaves a new address paired with the old token --
         # that pairing would send the old token to a service it was never
@@ -296,14 +299,14 @@ def sync_from_client(submitted: dict, *, home: Path | None = None) -> dict:
     token, clear = token_update(submitted)
     category = str(submitted.get("category") or "").strip().lower()
     result = configure(
-        mode=str(submitted.get("mode") or "cli").strip().lower(),
-        remote_url=str(submitted.get("remote_url") or ""),
+        mode=str(submitted.get("mode") or "cli").strip().lower() if "mode" in submitted else None,
+        remote_url=str(submitted.get("remote_url") or "") if "remote_url" in submitted else None,
         api_token=token, clear_api_token=clear,
         # A torrent row has no connections field; leave the plugin's as it is.
         connections=submitted.get("connections") if kind == "mdm_http" else None,
         # ROMarr's torrent rows default to the label "romarr", which MDM has
         # no category for and ignores; store that as "no category".
-        category=category if category in MDM_CATEGORIES else "",
+        category=(category if category in MDM_CATEGORIES else "") if "category" in submitted else None,
         home=home,
     )
     return {**result, "synced": bool(result.get("ok"))}

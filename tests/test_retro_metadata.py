@@ -95,6 +95,22 @@ def test_identify_asks_screenscraper_by_hash(monkeypatch):
     assert "sha1=de5822f4" in seen[0]
 
 
+def test_hash_only_lookup_asks_screenscraper_with_a_nonempty_rom_name(monkeypatch):
+    """Verified hashes can identify a ROM without a filename or DAT title."""
+    seen = []
+
+    def fetch(url, headers=None):
+        seen.append(parse_qs(urlsplit(url).query))
+        return 200, json.dumps({"header": {"success": "true"}, "response": {"jeu": JEU}})
+
+    monkeypatch.setattr(rm, "_fetch", fetch)
+    match = Match(status="verified", rom=Rom(name="", sha1="ab" * 20))
+    info = Metadata([SS_CFG]).identify(verification=match, platform="snes")
+    assert info.title == "Chrono Trigger" and info.matched_by == "hash"
+    assert len(seen) == 1
+    assert seen[0]["sha1"] == seen[0]["romnom"] == ["ab" * 20]
+
+
 def test_quota_or_missing_credentials_answer_nothing(monkeypatch):
     monkeypatch.setattr(rm, "_fetch", lambda url, headers=None: (430, ""))
     assert not rm.screenscraper(SS_CFG, "x").found

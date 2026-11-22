@@ -331,7 +331,19 @@ def test_a_client_save_writes_back_to_a_set_plugin(installed):
     assert result == {"ok": True, "synced": True}
     current = mp.settings(home=installed)
     assert current == mp.Settings(mode="remote", remote_url="https://new.lan:8463",
-                                  api_token="keep-me", connections=32, category="programs")
+                                  api_token="", connections=32, category="programs")
+
+
+def test_a_partial_client_save_preserves_unsupplied_plugin_settings(installed):
+    """A connection count edit keeps the existing URL, mode and key."""
+    _remote(installed, token="keep-me")
+    previous = mp.settings(home=installed)
+    result = mp.sync_from_client({"type": "mdm_http", "connections": 32}, home=installed)
+    assert result == {"ok": True, "synced": True}
+    current = mp.settings(home=installed)
+    assert (current.mode, current.remote_url, current.api_token, current.category) == (
+        previous.mode, previous.remote_url, previous.api_token, previous.category)
+    assert current.connections == 32
 
 
 def test_a_torrent_save_keeps_connections_and_drops_its_label(installed):
@@ -447,13 +459,13 @@ def test_a_client_edit_round_trips_to_the_plugin(server):
     assert code == 200 and saved["api_token"] in ("", mp.SECRET_PLACEHOLDER)
     current = mp.settings()
     assert (current.remote_url, current.category, current.api_token) == (
-        "https://edited.lan:8463", "videos", "first")
+        "https://edited.lan:8463", "videos", "")
     [client] = [c for c in service.clients if isinstance(c, MdmTorrentClient)]
     assert client._remote.base_url == "https://edited.lan:8463"
-    # What the form shows is what is in force, token masked.
+    # The form reflects that the new destination has no saved token.
     [row] = service.safe_settings()["download_clients"]
     assert row["remote_url"] == "https://edited.lan:8463"
-    assert row["api_token"] == mp.SECRET_PLACEHOLDER
+    assert row["api_token"] == ""
     assert "first" not in json.dumps(settings) + json.dumps(service.safe_settings())
 
 

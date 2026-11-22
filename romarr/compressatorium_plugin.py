@@ -85,7 +85,11 @@ def connection(env: Mapping[str, str], *, home: Path | None = None) -> tuple[str
     """
     url = str(env.get("COMPRESSATORIUM_URL") or "").strip()
     if url:
-        return url, str(env.get("COMPRESSATORIUM_API_KEY") or ""), "env"
+        key = str(env.get("COMPRESSATORIUM_API_KEY") or "")
+        if key and (_origin(url) or ("", "", None))[0] != "https":
+            log.warning("Compressatorium API key withheld because its URL is not HTTPS")
+            key = ""
+        return url, key, "env"
     home = Path(home or hub.HOME)
     with _config_lock:
         plugin = _plugin(home)
@@ -94,7 +98,11 @@ def connection(env: Mapping[str, str], *, home: Path | None = None) -> tuple[str
         url = str((getattr(plugin, "config", None) or {}).get("url") or "").strip()
         if not url:
             return "", "", ""
-        return url, _secret(home, "api_key"), "plugin"
+        key = _secret(home, "api_key")
+        if key and (_origin(url) or ("", "", None))[0] != "https":
+            log.warning("Compressatorium API key withheld because its URL is not HTTPS")
+            key = ""
+        return url, key, "plugin"
 
 
 def _valid_url(url: str) -> str:
@@ -109,6 +117,21 @@ def _valid_url(url: str) -> str:
     return ""
 
 
+def _origin(url: str) -> tuple[str, str, int | None] | None:
+    """Normalize the credential destination for service-origin comparisons."""
+    try:
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.hostname:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.casefold()
+    if port is None:
+        port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, parts.hostname.casefold(), port
+
+
 def configure(*, url: str | None = None, api_key: str | None = None,
               clear_api_key: bool = False, home: Path | None = None) -> dict:
     """Save the plugin's `url` and/or secret `api_key` from the Hub page.
@@ -118,28 +141,40 @@ def configure(*, url: str | None = None, api_key: str | None = None,
     secret store, never into the plugin config that `state.json` holds.
     """
     home = Path(home or hub.HOME)
-    try:
-        _, registry = hub._import()
-        reg = registry.Registry(home)
-        plugin = reg.get(SLUG)
-    except Exception:
-        return {"ok": False, "error": "Install the Compressatorium plugin first"}
     if url is not None:
         url = str(url).strip()
         problem = _valid_url(url) if url else ""
         if problem:
             return {"ok": False, "error": problem}
     with _config_lock:
+        try:
+            _, registry = hub._import()
+            reg = registry.Registry(home)
+            plugin = reg.get(SLUG)
+        except Exception:
+            return {"ok": False, "error": "Install the Compressatorium plugin first"}
+        current_config = dict(getattr(plugin, "config", None) or {})
+        old_url = str(current_config.get("url") or "").strip()
+        target_url = url if url is not None else old_url
+        if api_key and (_origin(target_url) or ("", "", None))[0] != "https":
+            return {"ok": False,
+                    "error": "API keys require an https:// Compressatorium URL"}
+        origin_changed = (
+            url is not None and _origin(url) != _origin(old_url))
+        # A saved secret belongs to the service origin it was entered for.
+        # Clear it automatically when the destination changes unless a new
+        # key is supplied in this same operation.
+        clear_old_key = clear_api_key or (origin_changed and not api_key)
         # The key is saved first and the url only once it is, so a failure
         # never leaves a new address paired with the old key -- that pairing
         # would send the old key to a service it was never meant for.
         store = previous = None
-        if clear_api_key or api_key:
+        if clear_old_key or api_key:
             try:
                 from rom_hub import secrets
                 store = secrets.open_store(home)
                 previous = store.get(SLUG, "api_key")
-                if clear_api_key:
+                if clear_old_key:
                     store.delete(SLUG, "api_key")
                 else:
                     store.set(SLUG, "api_key", str(api_key))
@@ -147,7 +182,7 @@ def configure(*, url: str | None = None, api_key: str | None = None,
                 return {"ok": False, "error": f"could not save the API key: {exc}"}
         if url is not None:
             try:
-                config = dict(getattr(plugin, "config", None) or {})
+                config = dict(current_config)
                 config["url"] = url.rstrip("/")
                 reg.set_config(SLUG, config)
             except Exception as exc:
