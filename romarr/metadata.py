@@ -592,12 +592,14 @@ class Metadata:
         asked to name a game, only to fill in a missing cover afterwards.
         """
         term, how = lookup_key(verification, filename)
-        if not term:
-            return GameInfo()
         context = lookup_context(verification, filename, platform)
+        if not term:
+            if not any(context.get(key) for key in ("sha1", "md5", "crc")):
+                return GameInfo()
+            how = "hash"
 
         for cfg, spec in self._enabled():
-            if spec.get("artwork"):
+            if spec.get("artwork") or (not term and not spec.get("context")):
                 continue
             info = self._ask(spec, cfg, term, context)
             if info.found:

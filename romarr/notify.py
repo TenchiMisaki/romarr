@@ -81,6 +81,11 @@ class Message:
         return "\n".join(lines)
 
 
+class _NoWebhookRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _post(url: str, *, data: bytes | None = None, headers: dict | None = None,
           method: str = "POST") -> bool:
     _last.reason = ""
@@ -94,7 +99,9 @@ def _post(url: str, *, data: bytes | None = None, headers: dict | None = None,
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        opener = (urllib.request.build_opener(_NoWebhookRedirect()).open
+                  if headers and "X-ROMarr-Signature" in headers else urllib.request.urlopen)
+        with opener(request, timeout=TIMEOUT) as response:
             _last.status = response.status
             return 200 <= response.status < 300
     except urllib.error.HTTPError as exc:
@@ -213,6 +220,10 @@ def _webhook(cfg: dict, message: Message) -> bool:
     }).encode()
     url = cfg.get("url", "")
     secret = str(cfg.get("secret") or "")
+    if secret and not str(url).lower().startswith("https://"):
+        _last.reason = "Signed webhooks require HTTPS"
+        _last.status = 0
+        return False
 
     def attempt() -> bool:
         headers = {"Content-Type": "application/json",
