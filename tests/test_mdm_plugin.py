@@ -379,10 +379,12 @@ def test_a_refused_client_save_changes_nothing(installed):
 
 def test_test_uses_the_plugin_token_for_a_placeholder(installed):
     _remote(installed, token="plugin-token")
-    submitted = {"type": "mdm_http", "api_token": mp.SECRET_PLACEHOLDER}
+    submitted = {"type": "mdm_http", "remote_url": REMOTE, "api_token": mp.SECRET_PLACEHOLDER}
 
     assert mp.for_test(submitted, {**submitted, "api_token": "row-token"})["api_token"] == \
         "plugin-token"
+    changed = {**submitted, "remote_url": "https://other.lan:8463"}
+    assert mp.for_test(changed, {**changed, "api_token": "row-token"})["api_token"] == ""
     assert mp.for_test({"type": "mdm_http", "api_token": "typed"},
                        {"type": "mdm_http", "api_token": "typed"})["api_token"] == "typed"
     # An emptied field tests as no token, even though merge_secrets put the

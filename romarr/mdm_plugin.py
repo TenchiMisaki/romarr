@@ -338,7 +338,9 @@ def for_test(submitted: dict, merged: dict) -> dict:
         current = settings()
         if current is not None:
             if submitted.get("api_token") == SECRET_PLACEHOLDER:
-                out["api_token"] = current.api_token
+                target = _remote_origin(str(out.get("remote_url") or "").strip())
+                saved = _remote_origin(current.remote_url)
+                out["api_token"] = current.api_token if target is not None and target == saved else ""
             elif submitted.get("api_token") == "":
                 # An emptied field tests as no token, exactly as Save would
                 # clear it -- not as the row's old token merge_secrets restored.
