@@ -244,7 +244,7 @@ _SERIAL_PLATFORMS = {
 }
 #: PlayStation serials: PS4/PS5, PS3, Vita and PSP disc and digital prefixes.
 _TITLE_ID_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<tid>(?:" + "|".join(_SERIAL_PLATFORMS) + r")[-_]?\d{5})(?![0-9])",
+    r"(?<![A-Za-z0-9])(?P<tid>(?:" + "|".join(_SERIAL_PLATFORMS) + r")[-_]?\d{5})(?![A-Za-z0-9])",
     re.IGNORECASE)
 _SWITCH_TID_RE = re.compile(r"\[([0-9a-fA-F]{16})\]")
 _HIGH_WORD_TID_RE = re.compile(r"(?<![0-9a-fA-F])(000[45][0-9a-fA-F]{4})([0-9a-fA-F]{8})(?![0-9a-fA-F])")
@@ -361,11 +361,19 @@ def identify(text: str, platform_slug: str) -> tuple[str, str]:
     return "", ""
 
 
-def has_conflicting_ids(text: str, platform_slug: str) -> bool:
-    """Whether one filename contains distinct recognized package identities."""
+def has_conflicting_ids(text: str, platform_slug: str, *,
+                        allow_same_family_roles: bool = False) -> bool:
+    """Whether text contains conflicting identities for this platform.
+
+    Release titles may describe one game with several package roles. A single
+    selected filename still requires one unambiguous identity unless explicitly
+    called in release-title mode.
+    """
     text = str(text or "")
     if platform_slug in _SWITCH:
         matches = {(base_tid_of(tid), classify_tid(tid)) for tid in _SWITCH_TID_RE.findall(text)}
+        if allow_same_family_roles:
+            return len({family for family, _ in matches}) > 1
         return len(matches) > 1
     roles = _HIGH_WORD_ROLES.get(platform_slug)
     if roles:
@@ -374,6 +382,11 @@ def has_conflicting_ids(text: str, platform_slug: str) -> bool:
                    if high.lower() in roles}
         return len(matches) > 1
     return False
+
+
+def has_switch2_specific_id(text: str) -> bool:
+    """Whether a Switch title ID has the platform-specific 0x04 prefix."""
+    return any(tid.lower().startswith("04") for tid in _SWITCH_TID_RE.findall(str(text or "")))
 
 
 def names_platform(text: str, platform_slug: str) -> bool:
@@ -397,9 +410,15 @@ def held_parts(title: str, wanted: str, platform_slug: str) -> frozenset[str]:
     "Game [0004000E001B4000]" is a 3DS update whatever its words say; a
     combined pack ("Game + Update + DLC") keeps every part its words name.
     """
-    if has_conflicting_ids(title, platform_slug):
+    if has_conflicting_ids(title, platform_slug, allow_same_family_roles=True):
         return frozenset()
     parts = release_parts(title, wanted)
+    if platform_slug in _SWITCH:
+        ids = _SWITCH_TID_RE.findall(str(title or ""))
+        families = {base_tid_of(tid) for tid in ids}
+        if len(families) == 1 and len(ids) > 1:
+            id_parts = {classify_tid(tid) for tid in ids} & set(PARTS)
+            return frozenset(set(parts) | id_parts)
     by_id = identify(title, platform_slug)[1]
     return frozenset({by_id}) if by_id and len(parts) == 1 else parts
 

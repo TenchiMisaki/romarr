@@ -1423,7 +1423,9 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
                switch_extras: bool = False,
                member_paths: list[Path] | None = None,
                package_folders: bool = False, game_title: str = "",
-               package_roles: dict[str, str] | None = None) -> list[ImportResult]:
+               package_roles: dict[str, str] | None = None,
+               expected_destinations: dict[str, str] | None = None,
+               previously_imported_paths=()) -> list[ImportResult]:
     """Place every ROM from a finished download into the library.
 
     A cartridge zip may hold several games (a 3-in-1 collection, a bundle)
@@ -1479,7 +1481,9 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
             requested_game=requested_game, catalog_platforms=catalog_platforms,
             hash_index=hash_index, duplicate_roots=duplicate_roots,
             switch_extras=switch_extras, package_folders=package_folders,
-            game_title=game_title, package_roles=package_roles)
+            game_title=game_title, package_roles=package_roles,
+            expected_destinations=expected_destinations,
+            previously_imported_paths=previously_imported_paths)
     finally:
         source.close()
 
@@ -1493,7 +1497,8 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                             requested_game=None, catalog_platforms=None,
                             hash_index=None, duplicate_roots=(),
                             switch_extras=False, package_folders=False, game_title="",
-                            package_roles=None):
+                            package_roles=None, expected_destinations=None,
+                            previously_imported_paths=()):
     """Finish import while the validated source and its scratch ZIPs remain open."""
     if selected_primaries is not None:
         selected = set(selected_primaries)
@@ -1592,16 +1597,25 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
             elif folder_routes is not None:
                 # A reviewed import keeps the name the person confirmed; a DAT
                 # rename would write somewhere the review never showed.
-                name = Path(chosen.primary).name if package_roles else destination.name
+                name = (Path(chosen.primary.replace("\\", "/")).name
+                        if package_roles else destination.name)
                 destination = target_dir / folder_routes[chosen.primary] / name
                 attached[destination] = target_dir
             # Libraries without RomM game folders still attach Switch extras
             # to a game folder that already exists.
             elif switch_extras and platform.slug in ATTACH_PLATFORMS:
-                attach = switch_attach_dir(Path(chosen.primary).name, target_dir)
+                attach = switch_attach_dir(
+                    Path(chosen.primary.replace("\\", "/")).name, target_dir)
                 if attach is not None:
                     destination = attach / destination.name
                     attached[destination] = target_dir
+        if expected_destinations is not None:
+            expected = expected_destinations.get(chosen.primary)
+            if expected is None or Path(expected) != destination:
+                results.append(ImportResult(
+                    False, destination,
+                    "actual import destination differs from the reviewed destination; review the bundle again"))
+                continue
         destination_keys = {Path(str(destination).casefold())}
         if not chosen.is_multi_file and bundle_routes is not None:
             destination_keys.add(Path(str(destination.parent.resolve() / destination.name).casefold()))
@@ -1623,6 +1637,11 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 destination_parents[parent] = chosen.primary
         planned.append((chosen, verdict, destination))
 
+    if expected_destinations is not None and (
+            results or {group.primary for group, _, _ in planned} != set(expected_destinations)):
+        return [ImportResult(False, None,
+                             "could not reproduce the complete reviewed import plan; review the bundle again")]
+
     for chosen, verdict, destination in planned:
         if isinstance(source, _PathSource):
             source.transfers = {}
@@ -1639,6 +1658,15 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 continue
             name = destination.name
             if destination.exists() and (not overwrite or destination.stat().st_size == 0):
+                if str(destination) in previously_imported_paths:
+                    source_hashes = source.hash(chosen.primary, suffix=destination.suffix)
+                    with destination.open("rb") as published:
+                        existing_sha1 = stream_sha1(published)
+                    if source_hashes and source_hashes.get("sha1") == existing_sha1:
+                        results.append(ImportResult(
+                            True, destination, verification=verdict, sha1=existing_sha1,
+                            import_method="already-published-for-this-queue-item"))
+                        continue
                 results.append(ImportResult(False, destination, _existing_destination(destination)))
                 continue
             try:

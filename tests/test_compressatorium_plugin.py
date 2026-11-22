@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 
 import pytest
 
@@ -238,6 +239,51 @@ def test_configure_replaces_the_key_without_touching_the_url(home, bundled):
 
     cp.configure(clear_api_key=True, home=home)
     assert cp.connection({}, home=home) == ("https://comp:8443", "", "plugin")
+
+
+def test_overlapping_configuration_saves_cannot_pair_a_key_with_the_wrong_origin(
+        home, bundled, monkeypatch):
+    cp.preinstall(home=home, env={"ROMARR_BUNDLED_PLUGINS": str(bundled)})
+    cp.configure(url="https://a:8443", api_key="key-a", home=home)
+    real_registry = _registry.Registry
+    first_read = threading.Event()
+    release_first = threading.Event()
+    second_read = threading.Event()
+    results = {}
+
+    class GatedRegistry(real_registry):
+        def get(self, slug):
+            plugin = super().get(slug)
+            if threading.current_thread().name == "key-only-save":
+                first_read.set()
+                assert release_first.wait(5)
+            elif threading.current_thread().name == "origin-save":
+                second_read.set()
+            return plugin
+
+    monkeypatch.setattr(_registry, "Registry", GatedRegistry)
+    first = threading.Thread(
+        name="key-only-save",
+        target=lambda: results.update(first=cp.configure(
+            api_key="key-a-new", home=home)))
+    second = threading.Thread(
+        name="origin-save",
+        target=lambda: results.update(second=cp.configure(
+            url="https://b:9443", api_key="key-b", home=home)))
+    first.start()
+    assert first_read.wait(5)
+    second.start()
+    # With the configuration lock held before Registry.get, the second reader
+    # cannot observe a stale plugin snapshot while the first save is paused.
+    if second_read.wait(0.1):
+        assert release_first.wait(0.01) is False
+    release_first.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert results["first"]["ok"] and results["second"]["ok"]
+    assert cp.connection({}, home=home) == ("https://b:9443", "key-b", "plugin")
 
 
 def test_configure_clears_a_key_when_the_service_origin_changes(home, bundled):

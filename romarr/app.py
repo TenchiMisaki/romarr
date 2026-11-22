@@ -2825,7 +2825,7 @@ class ROMarr:
         return key
 
     def _automatic_request(self, game: str, platform_name: str,
-                           external_request_id: str = "") -> dict:
+                           external_request_id: str = "", parts=None) -> dict:
         """Request a replacement from a background sweep at most once."""
         platform = resolve(platform_name)
         if platform is None:
@@ -2836,21 +2836,25 @@ class ROMarr:
                     "error": "a download is already in flight"}
         try:
             if external_request_id:
-                return self.request(game, platform.slug,
-                                    external_request_id=external_request_id)
-            return self.request(game, platform.slug)
+                return (self.request(game, platform.slug,
+                                     external_request_id=external_request_id,
+                                     parts=parts) if parts is not None else
+                        self.request(game, platform.slug,
+                                     external_request_id=external_request_id))
+            return (self.request(game, platform.slug, parts=parts)
+                    if parts is not None else self.request(game, platform.slug))
         finally:
             with self._lock:
                 self._automatic_grab_reservations.discard(key)
 
-    def _automatic_grab(self, pick, game: str, platform_slug: str) -> dict:
+    def _automatic_grab(self, pick, game: str, platform_slug: str, *, parts=None) -> dict:
         """Hand an RSS-selected release off only if no download is in flight."""
         key = self._reserve_automatic_grab(game, platform_slug)
         if key is None:
             return {"ok": False, "skipped": True,
                     "error": "a download is already in flight"}
         try:
-            return self.grab(pick, game, platform_slug)
+            return self.grab(pick, game, platform_slug, parts=parts)
         finally:
             with self._lock:
                 self._automatic_grab_reservations.discard(key)
@@ -3491,7 +3495,12 @@ class ROMarr:
             with self._lock:
                 self.queue = [q for n, q in enumerate(self.queue)
                               if n != index]
-            return self.request(item.game, item.platform)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == item.platform
+                            and w.game.casefold() == item.game.casefold()), None)
+            parts = (current.parts if current is not None else item.parts) or None
+            return (self.request(item.game, item.platform, parts=parts)
+                    if parts is not None else self.request(item.game, item.platform))
         return {"ok": False, "error": f"unknown action {action!r}"}
 
     def clear_queue(self, state: str = "") -> dict:
@@ -4472,11 +4481,17 @@ class ROMarr:
             # Back on the Wanted list first: the replacement search can fail
             # too, and a request that has lost its dead download and never
             # reached Wanted is one nothing will ever look for again.
-            self.store.want(row.game, row.platform)
+            self.store.ensure_wanted(row.game, row.platform,
+                                     parts=row.parts or None)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == row.platform
+                            and w.game.casefold() == row.game.casefold()), None)
+            parts = (current.parts if current is not None else row.parts) or None
             try:
                 if self._automatic_request(
                         row.game, row.platform,
-                        external_request_id=row.external_request_id).get("ok"):
+                        external_request_id=row.external_request_id,
+                        parts=parts).get("ok"):
                     regrabbed += 1
             except Exception as err:      # one bad row must not stop the rest
                 log.warning("replacement grab for %r failed: %s", row.game, err)
@@ -4961,19 +4976,18 @@ class ROMarr:
     _RECONCILE_CACHE_MAX = 50_000
 
     def _reconcile_file_hashes(self, path: Path, platform) -> tuple[dict, ...]:
-        """Return streamed DAT hashes for every member of ``path``.
+        """Return DAT hashes parsed from the exact library-file snapshot read.
 
-        Caches computed hash dicts by ``(path, archive_is_the_rom, size,
-        mtime_ns, ctime_ns)`` so repeated reconciles skip rehashing unchanged
-        library files while still re-evaluating ``self.dats`` on DAT reloads.
+        The file identity and timestamps keep unchanged files cacheable. On a
+        miss, copy the already-open file descriptor to a temporary sibling and
+        hash/parse that snapshot so a path replacement cannot split the cache
+        key from the bytes that were indexed.
         """
         from .library import _source_for
+        import shutil
+        import tempfile
 
-        st = path.stat()
         archive_as_rom = bool(getattr(platform, "archive_is_the_rom", False))
-        sig = (st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-        cache_key = (str(path), archive_as_rom, *sig)
-
         cache = getattr(self, "_reconcile_hash_cache", None)
         lock = getattr(self, "_reconcile_cache_lock", None)
         if cache is None or lock is None:
@@ -4982,32 +4996,45 @@ class ROMarr:
             self._reconcile_hash_cache = cache
             self._reconcile_cache_lock = lock
 
-        with lock:
-            cached = cache.get(cache_key)
-            if cached is not None:
-                cache.move_to_end(cache_key)
-                return cached
-
-        source = _source_for(path, platform)
-        computed: list[dict] = []
-        complete = True
-        for member in source.names():
-            suffix = Path(member.replace("\\", "/")).suffix
-            hashes = source.hash(member, suffix=suffix)
-            if hashes is None:
-                complete = False
-                continue
-            computed.append(hashes)
-        result = tuple(computed)
-
-        st_after = path.stat()
-        if complete and (st_after.st_size, st_after.st_mtime_ns, st_after.st_ctime_ns) == sig:
+        with path.open("rb") as original:
+            before = os.fstat(original.fileno())
+            sig = (before.st_dev, before.st_ino, before.st_size,
+                   before.st_mtime_ns, before.st_ctime_ns)
+            cache_key = (str(path), archive_as_rom, *sig)
             with lock:
-                cache[cache_key] = result
-                cache.move_to_end(cache_key)
-                while len(cache) > self._RECONCILE_CACHE_MAX:
-                    cache.popitem(last=False)
-        return result
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    cache.move_to_end(cache_key)
+                    return cached
+
+            computed: list[dict] = []
+            complete = True
+            unchanged = False
+            with tempfile.TemporaryDirectory(prefix="romarr-reconcile-") as scratch:
+                snapshot = Path(scratch) / ("snapshot" + path.suffix)
+                with snapshot.open("wb") as copied:
+                    shutil.copyfileobj(original, copied, length=1024 * 1024)
+                after = os.fstat(original.fileno())
+                unchanged = (before.st_dev, before.st_ino, before.st_size,
+                             before.st_mtime_ns, before.st_ctime_ns) == (
+                                 after.st_dev, after.st_ino, after.st_size,
+                                 after.st_mtime_ns, after.st_ctime_ns)
+                source = _source_for(snapshot, platform)
+                for member in source.names():
+                    suffix = Path(member.replace("\\", "/")).suffix
+                    hashes = source.hash(member, suffix=suffix)
+                    if hashes is None:
+                        complete = False
+                        continue
+                    computed.append(hashes)
+            result = tuple(computed)
+            if complete and unchanged:
+                with lock:
+                    cache[cache_key] = result
+                    cache.move_to_end(cache_key)
+                    while len(cache) > self._RECONCILE_CACHE_MAX:
+                        cache.popitem(last=False)
+            return result
 
     def reconcile_platform(self, platform_slug: str = "") -> dict:
         """Drop Wanted entries whose verified dump is already in the library.
@@ -5022,6 +5049,7 @@ class ROMarr:
         ``POST /api/v1/collection/reconcile``.
         """
         from .dat import VERIFIED as _VERIFIED
+        from .game_packages import BASE as _BASE, imported_role
 
         platform = resolve(platform_slug)
         if platform is None:
@@ -5044,6 +5072,8 @@ class ROMarr:
                 if not path.is_file():
                     continue
                 try:
+                    if imported_role(path, platform_slug=platform_slug) != _BASE:
+                        continue
                     for hashes in self._reconcile_file_hashes(path, platform):
                         match = self.dats.lookup(**hashes)
                         if match.status == _VERIFIED and match.game:
@@ -5099,7 +5129,8 @@ class ROMarr:
                 monitored = item.monitored
         return PendingParts(pending, monitored)
 
-    def _settle_parts(self, queue_item, platform, outcomes, pending: "PendingParts") -> None:
+    def _settle_parts(self, queue_item, platform, outcomes, pending: "PendingParts",
+                      *, wanted_game: str | None = None) -> None:
         """Leave on Wanted exactly the asked-for package parts the import did not bring.
 
         What arrived is read from the imported files (header, RomM folder,
@@ -5111,11 +5142,12 @@ class ROMarr:
         arrived = {imported_role(o.destination, queue_item.game, platform.slug)
                    for o in outcomes if o.ok and o.destination}
         missing = tuple(p for p in PARTS if p in pending.asked and p not in arrived)
+        game = wanted_game or queue_item.game
         self.store.settle_parts(
-            queue_item.game, platform.slug, missing, monitored=pending.monitored,
+            game, platform.slug, missing, monitored=pending.monitored,
             settled=pending.asked - set(missing))
         if missing:
-            self.store.record(Event(kind="wanted", game=queue_item.game, platform=platform.slug,
+            self.store.record(Event(kind="wanted", game=game, platform=platform.slug,
                                     detail=f"still wanted: {describe_parts(missing)}"))
 
     def collection_plan(self, dat_name: str = "", platform: str = "",
@@ -7748,13 +7780,24 @@ class ROMarr:
             platform = resolve(item.platform)
             if platform is None:
                 continue
+            selected_parts = self._request_parts(
+                item.game, platform, item.parts if item.parts else None)
             pick = best_release(releases, item.game, platform,
                                profile=self.profile_for(platform), blocklist=self.blocklist,
-                               parts=(self._request_parts(item.game, platform, item.parts)
-                                      if item.parts else None))
+                               parts=selected_parts)
             if pick is None or not pick.download_url:
                 continue
-            result = self._automatic_grab(pick, item.game, platform.slug)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == platform.slug
+                            and w.game.casefold() == item.game.casefold()), None)
+            if current is None:
+                continue
+            current_parts = self._request_parts(
+                current.game, platform, current.parts if current.parts else None)
+            if current_parts != selected_parts:
+                continue
+            result = self._automatic_grab(pick, item.game, platform.slug,
+                                          parts=selected_parts)
             if result.get("skipped"):
                 skipped_in_flight += 1
             elif result.get("ok"):
@@ -9101,6 +9144,7 @@ class ROMarr:
             target_folders = self.platform_folders(target_cfg)
             selected_primaries = None
             bundle_routes = None
+            reviewed_destinations = None
             if queue_item is not None and path.exists():
                 from .import_intent import (package_destinations, preview_import, queue_identity,
                                             reviewed_roles, reviewed_selection)
@@ -9147,6 +9191,8 @@ class ROMarr:
                     results.append({"name": name, "ok": False, "reason": queue_item.detail})
                     continue
                 if intent:
+                    if intent.get("package_destinations"):
+                        reviewed_destinations = package_destinations(preview, intent)
                     selected_primaries = [c["primary"] for c in intent["choices"]]
                     if intent.get("routes"):
                         try:
@@ -9185,7 +9231,11 @@ class ROMarr:
                 member_paths=members,
                 **self._import_hash_options(),
                 **({"selected_primaries": selected_primaries} if selected_primaries is not None else {}),
-                **({"bundle_routes": bundle_routes} if bundle_routes is not None else {}))
+                **({"bundle_routes": bundle_routes} if bundle_routes is not None else {}),
+                **({"expected_destinations": reviewed_destinations}
+                   if reviewed_destinations is not None else {}),
+                **({"previously_imported_paths": tuple(queue_item.imported_paths)}
+                   if queue_item is not None and queue_item.imported_paths else {}))
             game_title = (queue_item.game if queue_item and getattr(queue_item, "game", "") else name)
             if not outcomes:
                 self.store.record(Event(kind="failed", game=game_title,
@@ -9204,6 +9254,10 @@ class ROMarr:
 
             outcomes = confirm_in_library(outcomes, self.library_root(target_cfg))
             all_ok = all(o.ok for o in outcomes)
+            if queue_item is not None:
+                queue_item.imported_paths = list(dict.fromkeys(
+                    [*queue_item.imported_paths,
+                     *(str(o.destination) for o in outcomes if o.ok and o.destination)]))
             fulfils_base = not (queue_item and queue_item.import_intent.get("existing_game"))
             for outcome in outcomes:
                 if outcome.ok:
@@ -9268,22 +9322,27 @@ class ROMarr:
                                 assets=imported_paths,
                                 status="available")
                 pending = self._pending_parts(queue_item, platform)
-                for w in (list(self.store.wanted) if fulfils_base else []):
-                    if w.platform != platform.slug:
+                matched_wanted = []
+                for wanted in (list(self.store.wanted) if fulfils_base else []):
+                    if wanted.platform != platform.slug or not _title_key(wanted.game):
                         continue
-                    wanted_key = _title_key(w.game)
-                    if not wanted_key:
-                        continue
-                    # A wanted title may not substring-match the release it
-                    # arrived under (punctuation, region tags, or a short
-                    # IGDB/GG title versus the full no-intro name). What the
-                    # bytes *are* is known by hash verification, so match the
-                    # wanted title against the verified identities as well as
-                    # the client-reported download name.
-                    if any(_titles_are_same(w.game, identity)
+                    # Match against verified import identities without deleting
+                    # the Wanted row first: it may contain update/DLC parts under
+                    # a title alias different from the queue's display title.
+                    if any(_titles_are_same(wanted.game, identity)
                            for identity in _fulfil_identities(name, outcomes)):
-                        self.store.fulfil(w.game, w.platform)
-                self._settle_parts(queue_item, platform, outcomes, pending)
+                        matched_wanted.append(wanted)
+                for wanted in matched_wanted:
+                    asked = (set(_asked(queue_item.parts))
+                             if queue_item is not None and
+                             (queue_item.parts or not queue_item.manual) else set())
+                    asked |= _asked(wanted.parts)
+                    self._settle_parts(
+                        queue_item, platform, outcomes,
+                        PendingParts(asked, wanted.monitored), wanted_game=wanted.game)
+                if not any(w.game.casefold() == queue_item.game.casefold()
+                           for w in matched_wanted):
+                    self._settle_parts(queue_item, platform, outcomes, pending)
                 # Close the aliasing gap on this platform: drop wanted titles
                 # that are already present and verified in the library but were
                 # never fulfilled (word-order/alias titles, pre-existing stale

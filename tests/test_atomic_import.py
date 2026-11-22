@@ -126,7 +126,7 @@ def test_partial_import_never_cleans_source_or_fulfils_request(tmp_path, monkeyp
     assert not result[0]["ok"] and result[0]["reason"] == "failed second ROM"
     assert item.state == "import-failed"
     assert not removed and not updated and not rescanned and not reconciled
-    assert not item.imported_paths
+    assert item.imported_paths == [str(root / "first.gb")]
     assert source.read_bytes() == b"payload"
 
 

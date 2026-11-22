@@ -237,15 +237,35 @@ def test_a_member_escaping_the_archive_is_not_written(tmp_path):
     assert (tmp_path / "Game (USA).iso").exists()
 
 
-def test_service_cue_output_includes_every_track_before_verification(tmp_path):
-    cue = tmp_path / "Game.cue"
-    (tmp_path / "Track 01.bin").write_bytes(DISC_1)
-    (tmp_path / "Track 02.bin").write_bytes(DISC_2)
+def test_service_cue_output_includes_tracks_published_by_the_same_job(tmp_path):
+    output = tmp_path / "job-output"
+    output.mkdir()
+    cue = output / "Game.cue"
+    (output / "Track 01.bin").write_bytes(DISC_1)
+    (output / "Track 02.bin").write_bytes(DISC_2)
     cue.write_text('FILE "Track 01.bin" BINARY\nFILE "Track 02.bin" BINARY\n')
 
-    assert decompress._output_files(str(cue)) == sorted([
-        str(cue.resolve()), str((tmp_path / "Track 01.bin").resolve()),
-        str((tmp_path / "Track 02.bin").resolve())])
+    assert decompress._output_files(str(output)) == sorted([
+        str(cue.resolve()), str((output / "Track 01.bin").resolve()),
+        str((output / "Track 02.bin").resolve())])
+
+
+def test_service_cue_cannot_claim_a_preexisting_adjacent_track(tmp_path):
+    cue = tmp_path / "Game.cue"
+    (tmp_path / "Track 01.bin").write_bytes(DISC_1)
+    cue.write_text('FILE "Track 01.bin" BINARY\n')
+
+    assert decompress._output_files(str(cue)) == []
+
+
+def test_local_cue_requires_every_track_in_its_published_set(tmp_path):
+    cue = tmp_path / "Game.cue"
+    track = tmp_path / "Track 01.bin"
+    track.write_bytes(DISC_1)
+    cue.write_text('FILE "Track 01.bin" BINARY\n')
+
+    assert decompress._disc_outputs_complete([str(cue), str(track)])
+    assert not decompress._disc_outputs_complete([str(cue)])
 
 
 def test_incomplete_service_cue_output_cannot_be_verified(tmp_path):

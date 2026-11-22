@@ -233,18 +233,18 @@ def configure(*, url: str | None = None, api_key: str | None = None,
     secret store, never into the plugin config that `state.json` holds.
     """
     home = Path(home or hub.HOME)
-    try:
-        _, registry = hub._import()
-        reg = registry.Registry(home)
-        plugin = reg.get(SLUG)
-    except Exception:
-        return {"ok": False, "error": "Install the Compressatorium plugin first"}
     if url is not None:
         url = str(url).strip()
         problem = _valid_url(url) if url else ""
         if problem:
             return {"ok": False, "error": problem}
     with _config_lock:
+        try:
+            _, registry = hub._import()
+            reg = registry.Registry(home)
+            plugin = reg.get(SLUG)
+        except Exception:
+            return {"ok": False, "error": "Install the Compressatorium plugin first"}
         current_config = dict(getattr(plugin, "config", None) or {})
         old_url = str(current_config.get("url") or "").strip()
         target_url = url if url is not None else old_url

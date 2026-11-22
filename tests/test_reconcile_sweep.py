@@ -137,6 +137,21 @@ def test_reconcile_settles_verified_base_from_base_and_update_request(tmp_path):
     assert [(row.game, row.parts) for row in service.store.wanted] == [("Bloodborne", ["update"])]
 
 
+def test_reconcile_does_not_settle_base_from_verified_update_folder(tmp_path):
+    dat = dat_for("Bloodborne")
+    service = svc(tmp_path, dat)
+    update_folder = tmp_path / "roms" / "ps4" / "Bloodborne" / "update"
+    update_folder.mkdir(parents=True)
+    (update_folder / "Bloodborne.pkg").write_bytes(BODY)
+    service.store.want("Bloodborne", "ps4", parts=("base", "update"))
+
+    result = service.reconcile_platform("ps4")
+
+    assert result["count"] == 0
+    assert [(row.game, row.parts) for row in service.store.wanted] == [
+        ("Bloodborne", ["base", "update"])]
+
+
 def test_reconcile_keeps_sequels_and_series_games_wanted(tmp_path):
     """A verified game must not clear a wanted sequel or shorter series name."""
     cases = [
@@ -256,6 +271,31 @@ def test_reconcile_streams_plain_headered_and_zip_without_whole_reads(tmp_path, 
     assert result["verified"] == 2
     assert result["count"] == 2
     assert s.store.wanted == []
+
+
+def test_cache_miss_hashes_and_parses_one_open_file_snapshot(tmp_path, monkeypatch):
+    from romarr import library as lib
+    from romarr.platforms import resolve
+
+    service = svc(tmp_path, dat_for("Snapshot Game"))
+    path = tmp_path / "roms" / "snes" / "snapshot.sfc"
+    path.parent.mkdir(parents=True)
+    original = b"first-file-snapshot-" + b"a" * 100
+    replacement = b"replacement-file-bytes-" + b"b" * 100
+    path.write_bytes(original)
+    real_source_for = lib._source_for
+    observed = {}
+
+    def replace_after_snapshot(snapshot, platform):
+        observed["parsed"] = snapshot.read_bytes()
+        path.write_bytes(replacement)
+        return real_source_for(snapshot, platform)
+
+    monkeypatch.setattr(lib, "_source_for", replace_after_snapshot)
+    hashes = service._reconcile_file_hashes(path, resolve("snes"))
+
+    assert observed["parsed"] == original
+    assert hashes[0]["sha1"] == hashlib.sha1(original).hexdigest()
 
 
 def test_reconcile_skips_walk_when_no_dats_loaded(tmp_path, monkeypatch):

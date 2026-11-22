@@ -186,10 +186,14 @@ def _place_all(names: list[str], staging: Path, root: Path, stem: str) -> list[s
                     directory.mkdir()
                     made.append(directory)
             staged_path = staging / name
-            st = staged_path.lstat()
-            owned[target] = (st.st_dev, st.st_ino, st.st_size,
-                             st.st_mtime_ns, st.st_ctime_ns)
+            staged_stat = staged_path.lstat()
+            staged_identity = (staged_stat.st_dev, staged_stat.st_ino)
             _place(staged_path, target)
+            published = target.lstat()
+            if (published.st_dev, published.st_ino) != staged_identity:
+                raise OSError(f"published member identity changed: {target.name}")
+            owned[target] = (published.st_dev, published.st_ino, published.st_size,
+                             published.st_mtime_ns, published.st_ctime_ns)
             placed.append(target)
     except BaseException:
         # Undo only what this run put there: its own files, then its own

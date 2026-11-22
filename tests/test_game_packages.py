@@ -10,11 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from romarr.app import ROMarr, make_handler
+from romarr.app import PendingParts, ROMarr, make_handler
 from romarr.import_intent import preview_import
 from romarr.library import ImportResult, import_rom
 from romarr.platforms import resolve
-from romarr.game_packages import (DEFAULT_PARTS, extras_are_parts, file_role, game_folder_name, identify, imported_role,
+from romarr.game_packages import (DEFAULT_PARTS, extras_are_parts, file_role, game_folder_name, held_parts, identify, imported_role,
                                   normalise_parts,
                                  parse_header, plan_game_folder, release_parts, title_before_parts,
                                  title_id)
@@ -44,6 +44,8 @@ def header(content_type=0x1A, flags=0, content_id=CONTENT_ID, size=0x80):
 
 BASE_PKG = header()
 PATCH_PKG = header(flags=0x40000000)
+PATCH_BLOODBORNE_PKG = header(flags=0x40000000,
+                              content_id="UP9000-CUSA03173_00-BLOODBORNE00000")
 FIRST_PATCH_PKG = header(flags=0x00100000)
 DELTA_PKG = header(content_type=0x1E)
 DLC_PKG = header(content_type=0x1B, content_id="UP9000-CUSA00552_00-TLOUREMLEFTBEHND")
@@ -406,6 +408,19 @@ def unmarked(title, categories=(1000,)):
     return Release(title, 0, 0, categories, "https://nzb.example/get/1", "usenet")
 
 
+def test_requested_package_coverage_ranks_before_seeders():
+    base = rel("Bloodborne PS4", seeders=20)
+    pack = rel("Bloodborne PS4 + Update 1.09", seeders=1)
+    assert best_release([base, pack], "Bloodborne", PS4,
+                        parts=("base", "update")) is pack
+
+
+def test_ampersand_compilation_does_not_match_raw_package_title():
+    verdict = judge(rel("Bloodborne PS4 & Dark Souls III with Update"),
+                    "Bloodborne", PS4, parts=("base", "update"))
+    assert verdict.verdict == "title does not match 'Bloodborne'"
+
+
 def test_package_points_never_make_an_unmarked_release_usable():
     verdict = judge(unmarked("The Last of Us Remastered + Update 1.11 + 3 DLC"), GAME, PS4)
     assert not verdict.accepted and verdict.verdict.startswith("no Sony PlayStation 4 evidence")
@@ -448,6 +463,37 @@ def test_import_files_base_update_and_dlc_in_one_game_folder(tmp_path):
                                             str(game / "update" / "UP9000-CUSA00552-patch.pkg"),
                                             str(game / "dlc" / "Left Behind.pkg")])
     assert (game / "update" / "UP9000-CUSA00552-patch.pkg").read_bytes() == PATCH_PKG + b"patch"
+
+
+def test_partial_package_import_retry_reuses_only_recorded_matching_output(tmp_path):
+    download = download_with(tmp_path, FILES)
+    library = tmp_path / "library"
+    base_name = "UP9000-CUSA00552.pkg"
+    base_destination = library / "ps4" / "The Last of Us Remastered" / base_name
+    first, = import_rom(download, PS4, library, package_folders=True,
+                        game_title="The Last of Us Remastered",
+                        selected_primaries=[base_name])
+    assert first.ok and first.destination == base_destination
+
+    retried = import_rom(download, PS4, library, package_folders=True,
+                         game_title="The Last of Us Remastered",
+                         previously_imported_paths=[str(base_destination)])
+    assert all(result.ok for result in retried)
+    assert any(result.destination == base_destination and result.ok for result in retried)
+    assert (library / "ps4" / "The Last of Us Remastered" / "update"
+            / "UP9000-CUSA00552-patch.pkg").is_file()
+
+
+def test_partial_retry_does_not_accept_unrecorded_preexisting_output(tmp_path):
+    download = download_with(tmp_path, {"UP9000-CUSA00552.pkg": BASE_PKG})
+    library = tmp_path / "library"
+    destination = library / "ps4" / "UP9000-CUSA00552.pkg"
+    make(destination.parent, destination.name, BASE_PKG)
+
+    result, = import_rom(download, PS4, library,
+                         previously_imported_paths=[])
+
+    assert not result.ok and "already in the library" in result.reason
 
 
 def test_import_keeps_the_flat_layout_when_switched_off(tmp_path):
@@ -611,9 +657,25 @@ def test_an_update_request_is_cleared_even_when_titles_differ(tmp_path):
     fake = SimpleNamespace(store=store)
     pending = ROMarr._pending_parts(fake, item, PS4)
     # No title match: the fulfilment loop leaves the entry alone.
-    patch = make(tmp_path / "library", "ps4/Bloodborne/update/CUSA03173-patch.pkg", PATCH_PKG)
+    patch = make(tmp_path / "library", "ps4/Bloodborne/update/CUSA03173-patch.pkg",
+                 PATCH_BLOODBORNE_PKG)
     ROMarr._settle_parts(fake, item, PS4, [ImportResult(True, patch)], pending)
     assert store.wanted == []
+
+
+def test_base_import_under_alias_preserves_requested_dlcs():
+    store = Store(Path("alias-state.json"))
+    alias = "Last of Us Remastered, The"
+    store.want(alias, "ps4", parts=("base", "dlc"))
+    item = QueueItem("The Last of Us Remastered", "ps4", "release", 5,
+                     "grabbed", parts=["base"])
+    outcome = ImportResult(True, Path("library/ps4/The Last of Us Remastered/base.pkg"))
+    fake = SimpleNamespace(store=store)
+
+    ROMarr._settle_parts(fake, item, PS4, [outcome],
+                         PendingParts({"base", "dlc"}, True), wanted_game=alias)
+
+    assert [(row.game, row.parts) for row in store.wanted] == [(alias, ["dlc"])]
 
 
 def test_a_game_folder_named_like_a_marker_is_still_the_base(tmp_path):
@@ -868,6 +930,32 @@ def test_ampersand_in_requested_title_is_not_a_package_separator():
                  resolve("win"), parts=["update", "dlc"]).accepted
     assert judge(rel("Cyberpunk 2077 + Update 2.1-TENOKE", GB), "Cyberpunk 2077",
                  resolve("win"), parts=["update"]).accepted
+
+
+def test_same_switch_game_with_base_and_update_ids_is_not_a_compilation():
+    title = "Bayonetta 2 [01007960049A0000] [01007960049A0800] Switch"
+    assert held_parts(title, "Bayonetta 2", "switch") == {"base", "update"}
+    assert identify(title, "switch") == ("", "")
+
+
+def test_shared_console_formats_need_console_specific_evidence():
+    switch_2 = resolve("switch-2")
+    generic_switch_id = unmarked("Bayonetta 2 [01007960049A0000]", (1000,))
+    explicit_switch_2 = unmarked("Donkey Kong Bananza [040074A01BF12000]")
+    assert not judge(generic_switch_id, "Bayonetta 2", switch_2).accepted
+    assert judge(explicit_switch_2, "Donkey Kong Bananza", switch_2).accepted
+    assert not judge(explicit_switch_2, "Donkey Kong Bananza", resolve("switch")).accepted
+
+    ps5 = resolve("ps5")
+    conflicting_ps4_id = unmarked("Bloodborne.pkg CUSA03173", (1000,))
+    ps5_id = unmarked("Game.pkg PPSA12345")
+    assert not judge(conflicting_ps4_id, "Bloodborne", ps5).accepted
+    assert judge(ps5_id, "Game", ps5).accepted
+
+
+def test_playstation_serial_requires_a_following_delimiter():
+    assert title_id("CUSA12345") == "CUSA12345"
+    assert title_id("CUSA12345X") == ""
 
 
 def test_a_title_id_says_what_a_release_is():

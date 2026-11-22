@@ -16,7 +16,8 @@ from dataclasses import dataclass
 
 from .platforms import DISC, PLATFORMS, Platform, all_extensions, by_slug, resolve, same_machine
 from .game_packages import (BASE, DLC, PACKAGE_PLATFORMS, UPDATE, describe_parts,
-                           PLATFORM_CATEGORIES, extras_are_parts, held_parts, names_platform,
+                           PLATFORM_CATEGORIES, extras_are_parts, has_switch2_specific_id,
+                           held_parts, names_platform,
                            normalise_parts, title_before_parts)
 
 log = logging.getLogger(__name__)
@@ -432,7 +433,7 @@ _BRACKET_GROUP_RE = re.compile(
 )
 _INVERTED_ARTICLE_RE = re.compile(rf",\s*(?:the|an?)(?=\s*$|\s*[:{_DASH_CHARS}])", re.IGNORECASE)
 _LEADING_ARTICLE_RE = re.compile(r"^\s*(?:the|an?)\s+", re.IGNORECASE)
-_PLUS_SEP_RE = re.compile(r"\s*\+\s*")
+_PLUS_SEP_RE = re.compile(r"\s*\+\s*|\s+&\s+")
 _PLATFORM_SEP_RE = re.compile(rf"\s+[{_DASH_CHARS}]\s+|:\s+")
 _TRAILING_SUBTITLE_SEP_RE = re.compile(rf"^\s*(?::|[{_DASH_CHARS}]+(?=\s))")
 _TRAILING_CHUNK_SPLIT_RE = re.compile(rf"\s*:\s*|\s+[{_DASH_CHARS}]+\s+")
@@ -832,7 +833,10 @@ def judge(release: Release, wanted: str,
         if all(4000 <= c < 5000 for c in release.categories):
             return Judgement(-300, verdict="a PC release (PC categories)")
     packaged = platform is not None and platform.slug in PACKAGE_PLATFORMS
-    if not (title_matches(release.title, wanted)
+    raw_title_match = title_matches(release.title, wanted)
+    if raw_title_match and packaged:
+        raw_title_match = extras_are_parts(release.title, wanted, PC_RELEASE_MARKERS)
+    if not (raw_title_match
             or (packaged and _package_title_matches(release.title, wanted))):
         return Judgement(-500, verdict=f"title does not match {wanted!r}")
 
@@ -1100,6 +1104,33 @@ def judge(release: Release, wanted: str,
     # Award the title-match tie-breaker when no platform was constrained, when
     # the release came from a platform-scoped ROM Hub, or when positive platform
     # evidence exists — so an unmarked indexer upload cannot qualify on title alone.
+    if platform is not None:
+        platform_category = bool(set(PLATFORM_CATEGORIES.get(platform.slug, ()))
+                                 & set(release.categories))
+        if platform.slug in ("ps4", "ps5"):
+            other_console = "ps5" if platform.slug == "ps4" else "ps4"
+            if names_platform(release.title, other_console):
+                return Judgement(-300, verdict=f"conflicting {other_console.upper()} package identity")
+            distinguishes = (names_platform(release.title, platform.slug)
+                             or names_plat or names_explicit_name or platform_category
+                             or path_confirms_platform or release.protocol == "hub")
+            if _has_extension(lowered, platform.extensions) and not distinguishes:
+                return Judgement(-300, verdict=f"shared package format does not identify {platform.name}")
+        elif platform.slug in ("switch", "switch-2"):
+            says_switch_2 = any(_mentions(lowered, marker)
+                                for marker in ("switch 2", "switch2", "nsw2"))
+            says_switch = any(_mentions(lowered, marker)
+                              for marker in ("nintendo switch", "switch", "nsw"))
+            switch2_id = has_switch2_specific_id(release.title)
+            if platform.slug == "switch" and (says_switch_2 or switch2_id):
+                return Judgement(-300, verdict="release identifies Nintendo Switch 2")
+            if platform.slug == "switch-2" and says_switch and not says_switch_2:
+                return Judgement(-300, verdict="release identifies Nintendo Switch")
+            if platform.slug == "switch-2" and not (
+                    says_switch_2 or switch2_id or path_confirms_platform
+                    or release.protocol == "hub"):
+                return Judgement(-300, verdict="no Nintendo Switch 2-specific evidence")
+
     has_platform_evidence = (
         platform is None
         or release.protocol == "hub"
@@ -1304,26 +1335,32 @@ def best_release(releases: list[Release], wanted: str,
                  platform: Platform | None = None, *,
                  profile=None, blocklist=None, parts=None) -> Release | None:
     """The highest-scoring usable release, or None if nothing qualifies."""
-    ranked = [(judge(r, wanted, platform, profile=profile,
-                     blocklist=blocklist, parts=parts).points, r) for r in releases]
-    ranked = [(s, r) for s, r in ranked if s > 0]
+    requested = set(normalise_parts(parts)) if platform and platform.slug in PACKAGE_PLATFORMS else set()
+    ranked = []
+    for release in releases:
+        verdict = judge(release, wanted, platform, profile=profile,
+                        blocklist=blocklist, parts=parts)
+        if verdict.points > 0:
+            coverage = (len(held_parts(release.title, wanted, platform.slug) & requested)
+                        if requested else 0)
+            ranked.append((coverage, verdict.points, release))
     if not ranked:
         return None
     # Sort by score, then break the tie on size -- according to profile.size_preference
     # or the medium's default.
     size_pref = (getattr(profile, "size_preference", "") or "auto").lower() if profile else "auto"
     if size_pref == "smaller":
-        ranked.sort(key=lambda pair: (-pair[0], pair[1].size))
+        ranked.sort(key=lambda pair: (-pair[0], -pair[1], pair[2].size))
     elif size_pref == "larger":
-        ranked.sort(key=lambda pair: (-pair[0], -pair[1].size))
+        ranked.sort(key=lambda pair: (-pair[0], -pair[1], -pair[2].size))
     elif size_pref == "none":
-        ranked.sort(key=lambda pair: (-pair[0],))
+        ranked.sort(key=lambda pair: (-pair[0], -pair[1]))
     else:
         if platform is not None and platform.is_disc:
-            ranked.sort(key=lambda pair: (-pair[0], -pair[1].size))
+            ranked.sort(key=lambda pair: (-pair[0], -pair[1], -pair[2].size))
         else:
-            ranked.sort(key=lambda pair: (-pair[0], pair[1].size))
-    return ranked[0][1]
+            ranked.sort(key=lambda pair: (-pair[0], -pair[1], pair[2].size))
+    return ranked[0][2]
 
 
 _EXTRA_SUFFIXES = (

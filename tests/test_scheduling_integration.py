@@ -141,6 +141,46 @@ def test_rss_sync_grabs_a_wanted_match_through_the_scorer(tmp_path, monkeypatch)
     assert sent == ["magnet:?xt=urn:btih:abc"]
 
 
+def test_rss_handoff_uses_scored_parts_and_skips_changed_wanted_selection(tmp_path, monkeypatch):
+    s = svc(tmp_path, PROWLARR_URL="http://prowlarr:9696")
+    s.store.want("Bloodborne", "ps4", parts=("update",))
+    feed = [rel("Bloodborne PS4 Update 1.09")]
+    monkeypatch.setattr(s.prowlarr, "search", lambda term, **kw: feed)
+    handed = []
+
+    def choose_then_change(*args, **kwargs):
+        s.store.want("Bloodborne", "ps4", parts=("base", "update"))
+        return feed[0]
+
+    monkeypatch.setattr("romarr.app.best_release", choose_then_change)
+    monkeypatch.setattr(s, "_automatic_grab",
+                        lambda *args, **kwargs: handed.append(kwargs.get("parts")) or {"ok": True})
+
+    s.rss_sync()
+
+    assert handed == []
+
+
+def test_rss_handoff_passes_the_same_parts_used_for_scoring(tmp_path, monkeypatch):
+    s = svc(tmp_path, PROWLARR_URL="http://prowlarr:9696")
+    s.store.want("Bloodborne", "ps4", parts=("update",))
+    feed = [rel("Bloodborne PS4 Update 1.09")]
+    monkeypatch.setattr(s.prowlarr, "search", lambda term, **kw: feed)
+    seen = {}
+
+    def choose(*args, **kwargs):
+        seen["scored"] = kwargs.get("parts")
+        return feed[0]
+
+    monkeypatch.setattr("romarr.app.best_release", choose)
+    monkeypatch.setattr(s, "_automatic_grab",
+                        lambda *args, **kwargs: seen.update(handed=kwargs.get("parts")) or {"ok": True})
+
+    s.rss_sync()
+
+    assert seen["scored"] == seen["handed"] == ("update",)
+
+
 def test_rss_sync_skips_a_game_already_downloading(tmp_path, monkeypatch):
     s = svc(tmp_path, PROWLARR_URL="http://prowlarr:9696")
     s.store.want("Super Metroid", "snes")

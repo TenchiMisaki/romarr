@@ -304,10 +304,37 @@ def _output_files(output_path: str) -> list[str]:
                 target.relative_to(root)
             except ValueError:
                 return []
-            if not target.is_file():
+            if not target.is_file() or target not in expanded:
                 return []
-            expanded.add(target)
     return sorted(str(p) for p in expanded)
+
+
+def _disc_outputs_complete(files: list[str]) -> bool:
+    """Require every CUE/GDI track to be among this extraction's published files."""
+    published = {Path(value).resolve() for value in files}
+    for value in files:
+        sheet = Path(value)
+        if sheet.suffix.casefold() not in (".cue", ".gdi"):
+            continue
+        try:
+            names = _cue_and_gdi_names(sheet.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return False
+        if not names:
+            return False
+        root = sheet.parent.resolve()
+        for name in names:
+            relative = Path(name.replace("\\", "/"))
+            if relative.is_absolute() or ":" in name:
+                return False
+            target = (root / relative).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                return False
+            if target not in published or not target.is_file():
+                return False
+    return True
 
 
 def _second_opinion(fpath: str,
@@ -504,8 +531,14 @@ def _record_job(item: DecompressItem, status: JobResult | None,
         item.error = "job vanished from the service"
         report.failed += 1
     elif status.status == COMPLETED:
-        item.status = "decompressed"
         item.output_files = _output_files(status.output_path)
+        if not item.output_files:
+            item.status = "failed"
+            item.error = "completed job produced no usable output files"
+            report.failed += 1
+            log.warning("decompress: job %s completed without usable outputs", item.job_id)
+            return
+        item.status = "decompressed"
         report.decompressed += 1
         log.info("decompress: job %s completed -> %d file(s)",
                  item.job_id, len(item.output_files))
@@ -542,6 +575,12 @@ def _run_local(items: list[DecompressItem], output_dir: str | Path | None,
             report.failed += 1
             log.warning("decompress: could not extract %s: %s",
                         source.name, result.error)
+            continue
+        if not _disc_outputs_complete(result.output_files):
+            item.status = "failed"
+            item.error = "local extraction did not publish a complete CUE/GDI set"
+            report.failed += 1
+            log.warning("decompress: %s", item.error)
             continue
         item.status = "decompressed"
         item.output_files = result.output_files
@@ -650,6 +689,8 @@ def _delete_if_unchanged(path: Path, expected) -> str:
     """
     if not expected:
         return f"{path.name}: not seen before extraction, kept"
+    if _identity(path) != list(expected):
+        return f"{path.name}: changed since it was extracted, kept"
     aside = path.with_name(f".{path.name}.romarr-deleting-{uuid.uuid4().hex[:8]}")
     try:
         os.rename(path, aside)
@@ -657,7 +698,11 @@ def _delete_if_unchanged(path: Path, expected) -> str:
         return "missing"
     except OSError as err:
         return f"{path.name}: {err}"
-    if _identity(aside) != list(expected):
+    # rename changes ctime on POSIX. The complete snapshot was checked just
+    # before the atomic move; after it, require the same inode and content-size
+    # metadata while allowing the rename's ctime update.
+    moved = _identity(aside)
+    if moved is None or moved[:4] != list(expected)[:4]:
         if _restore_aside(aside, path):
             return f"{path.name}: changed since it was extracted, kept"
         return f"{path.name}: changed since it was extracted, kept as {aside.name}"
@@ -683,10 +728,10 @@ def _backup_rar_set(paths: list[Path], identities: dict[str, Any]) -> tuple[Path
             if not expected or _identity(path) != list(expected):
                 raise OSError(f"{path.name} changed since it was extracted")
             backup = backup_dir / path.name
-            try:
-                os.link(path, backup)
-            except OSError:
-                shutil.copyfile(path, backup)
+            # A hard link increments the source inode's link count and changes
+            # ctime on POSIX, invalidating the recorded identity. Independent
+            # copies keep the source metadata stable for the cleanup check.
+            shutil.copyfile(path, backup)
             if (hash_file(path) != hash_file(backup)
                     or _identity(path) != list(expected)):
                 raise OSError(f"could not verify rollback copy of {path.name}")
@@ -755,8 +800,11 @@ def _delete_originals(items: list[DecompressItem],
                         Path(item.source).name)
             continue
         if item.skipped_members:
+            item.status = "kept"
             item.error = ("original kept: some members could not be extracted safely: "
                           + ", ".join(item.skipped_members[:5]))
+            report.verified -= 1
+            report.kept += 1
             log.warning("decompress: kept %s: %s", Path(item.source).name, item.error)
             continue
         failures = []
@@ -771,6 +819,15 @@ def _delete_originals(items: list[DecompressItem],
             except OSError as err:
                 item.status = "kept"
                 item.error = f"split RAR set kept; rollback copy failed: {err}"
+                report.verified -= 1
+                report.kept += 1
+                log.warning("decompress: %s", item.error)
+                continue
+            if not _outputs_locally_verified(item.output_files, dats):
+                shutil.rmtree(backup_dir, ignore_errors=True)
+                item.status = "kept"
+                item.dat_match = UNKNOWN
+                item.error = "split RAR outputs changed during backup; originals kept"
                 report.verified -= 1
                 report.kept += 1
                 log.warning("decompress: %s", item.error)
@@ -797,7 +854,8 @@ def _delete_originals(items: list[DecompressItem],
                               "remain at " + ", ".join(restore_failures))
             else:
                 item.error = "could not delete original set; all removed volumes restored"
-            shutil.rmtree(backup_dir, ignore_errors=True)
+            if not restore_failures:
+                shutil.rmtree(backup_dir, ignore_errors=True)
             item.status = "kept"
             report.verified -= 1
             report.kept += 1
