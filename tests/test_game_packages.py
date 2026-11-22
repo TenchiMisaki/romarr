@@ -984,11 +984,11 @@ def test_a_playstation_serial_is_evidence_for_its_own_console_only(slug, accepte
 
 
 def test_switch_extra_only_ids_do_not_count_as_base_for_ranking():
-    base = rel("Bayonetta 2 [01007960049A0000] Switch", seeders=1)
+    base = rel("Bayonetta 2 [01007960049A0000] Switch", size=4 * GB, seeders=1)
     update = rel("Bayonetta 2 [01007960049A0800] [01007960049A0800] Switch",
-                 seeders=100)
+                 size=4 * GB, seeders=100)
     dlc = rel("Bayonetta 2 [01007960049A1001] [01007960049A1001] Switch",
-              seeders=200)
+              size=4 * GB, seeders=200)
 
     assert held_parts(update.title, "Bayonetta 2", "switch") == {"update"}
     assert held_parts(dlc.title, "Bayonetta 2", "switch") == {"dlc"}
