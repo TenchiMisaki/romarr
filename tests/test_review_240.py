@@ -84,13 +84,19 @@ FEED = """<?xml version="1.0"?>
 <item><title>Chrono Trigger (USA)</title>
 <enclosure url="https://idx.example/dl/9.torrent" type="application/x-bittorrent" length="1"/>
 <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd"/></item>
+<item><title>Final Fantasy VII (USA) (Disc 1)</title>
+<enclosure url="HTTPS://IDX.example/get/Upper?source=feed" type="application/x-nzb" length="1000"/>
+</item>
 </channel></rss>"""
 
 
 def test_a_usenet_release_keeps_its_nzb_link_and_a_torrent_keeps_its_magnet():
     rows = {r.title: r for r in Torznab(TorznabConfig("https://idx.example/api", "k")).parse(FEED)}
     nzb, torrent = rows["Ratchet Clank (USA)"], rows["Chrono Trigger (USA)"]
+    mixed_case_nzb = rows["Final Fantasy VII (USA) (Disc 1)"]
     assert nzb.protocol == "usenet" and nzb.download_url == "https://idx.example/get/abc"
+    assert mixed_case_nzb.protocol == "usenet"
+    assert mixed_case_nzb.download_url == "HTTPS://IDX.example/get/Upper?source=feed"
     assert torrent.protocol == "torrent" and torrent.download_url.startswith("magnet:")
 
 

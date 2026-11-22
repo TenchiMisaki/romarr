@@ -731,9 +731,9 @@ class Torznab:
         # the conventional fallback. Either is safe for a browser, which the
         # download link is not.
         info_url = text("comments") or ""
-        if not info_url.startswith(("http://", "https://")):
+        if not info_url.lower().startswith(("http://", "https://")):
             guid = text("guid") or ""
-            info_url = guid if guid.startswith(("http://", "https://")) else ""
+            info_url = guid if guid.lower().startswith(("http://", "https://")) else ""
 
         # The protocol is read from the raw link, before _download_link can
         # rewrite it: an NZB in a Torznab feed belongs to the Usenet client.
@@ -749,7 +749,7 @@ class Torznab:
             # A Usenet release is fetched from its NZB; _download_link prefers
             # a magnet, which a Usenet client cannot use.
             download_url=(next((url for url in (row["downloadUrl"], row["guid"])
-                                if url.startswith(("http://", "https://"))), "")
+                                if url.lower().startswith(("http://", "https://"))), "")
                           if protocol == "usenet"
                           else _download_link(row, private=self._config.private)),
             protocol=protocol,
