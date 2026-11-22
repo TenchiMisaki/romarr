@@ -290,7 +290,7 @@ def _output_files(output_path: str, published_files=()) -> list[str]:
                     continue
                 candidate = Path(value)
                 if candidate.is_symlink() or not candidate.is_file():
-                    continue
+                    return []
                 try:
                     resolved = candidate.resolve(strict=True)
                     resolved.relative_to(job_root)
