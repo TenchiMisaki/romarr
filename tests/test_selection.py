@@ -801,15 +801,17 @@ def test_an_installable_switch_release_beats_a_nup(slug, base, wanted, nsp, nup,
     assert best_release([installable, container], wanted, platform) is installable
 
 
-@pytest.mark.parametrize("slug", ["switch", "switch-2"])
+@pytest.mark.parametrize(("slug", "base", "wanted"), [
+    ("switch", _TOTK, "the legend of zelda tears of the kingdom"),
+    ("switch-2", _BANANZA, "donkey kong bananza"),
+])
 @pytest.mark.parametrize("suffix", [".nup", " (NUP)", " [nup]"])
-def test_a_lone_nup_is_still_taken(slug, suffix):
+def test_a_lone_nup_is_still_taken(slug, base, wanted, suffix):
     """A tag with no extension has no +60 to absorb the penalty, which stops at 1."""
-    container = rel(_TOTK + suffix, size=_SWITCH_GB, seeders=1)
+    container = rel(base + suffix, size=_SWITCH_GB, seeders=1)
 
-    assert score(container, "the legend of zelda tears of the kingdom", by_slug(slug)) > 0
-    assert best_release([container], "the legend of zelda tears of the kingdom",
-                        by_slug(slug)) is container
+    assert score(container, wanted, by_slug(slug)) > 0
+    assert best_release([container], wanted, by_slug(slug)) is container
 
 
 def test_two_tagged_nups_keep_the_usual_ordering():
@@ -865,7 +867,8 @@ def test_installable_tag_outranks_nup_extension_in_both_orders(platform):
     """Format preference applies equally to tags and real extensions."""
     from romarr.selection import best_release
     from romarr.platforms import by_slug
-    installable = rel("Example Game (NSP)", seeders=1)
-    container = rel("Example Game.nup", seeders=50)
+    marker = "Nintendo Switch 2" if platform == "switch-2" else "Nintendo Switch"
+    installable = rel(f"Example Game ({marker}) (NSP)", seeders=1)
+    container = rel(f"Example Game ({marker}).nup", seeders=50)
     for pair in ([installable, container], [container, installable]):
         assert best_release(pair, "Example Game", by_slug(platform)) == installable

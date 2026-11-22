@@ -96,6 +96,13 @@ def clean(root, expected):
         for args in (("rev-parse", "HEAD"), ("status", "--porcelain", "--untracked-files=all")):
             values.append(subprocess.check_output(["git", "-C", str(root), *args],
                 env=env, stderr=subprocess.DEVNULL, text=True, timeout=15).strip())
+        if values[0] != expected:
+            print("Checkout verification: HEAD differs from pinned revision.")
+        if values[1]:
+            entries = values[1].splitlines()
+            tracked = sum(not entry.startswith("?? ") for entry in entries)
+            print(f"Checkout verification: {tracked} tracked changes, "
+                  f"{len(entries) - tracked} untracked entries.")
         return values == [expected, ""]
     except (OSError, subprocess.SubprocessError):
         return False
@@ -204,10 +211,14 @@ def finalize(args):
         pass
     try:
         observed = live(target["pr"], target["ref"])
-        if observed == {key: target[key] for key in ("head", "base")} and clean(args.root, target["head"]):
+        if observed != {key: target[key] for key in ("head", "base")}:
+            print("Source verification failed: live revision changed during testing.")
+        elif not clean(args.root, target["head"]):
+            print("Source verification failed: checkout revision or cleanliness check failed.")
+        else:
             summary["source"] = "UNCHANGED"
     except (OSError, ValueError, KeyError):
-        pass
+        print("Source verification failed: live GitHub metadata could not be verified.")
     write(args.public / "summary.json", summary)
     members = sorted(p.name for p in args.public.iterdir() if p.name in FILES)
     write(args.public / "manifest.json", {name: hashlib.sha256((args.public / name).read_bytes()).hexdigest()

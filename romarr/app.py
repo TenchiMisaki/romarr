@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from copy import copy, deepcopy
 import logging
+from typing import NamedTuple
 import os
 import pathlib
 import re
@@ -67,8 +68,8 @@ from .emulators import EmulatorHub
 from .libretro import CoreHub
 from .cartridge import CartridgeHub
 from .emulator_catalog import resource_catalog
-from .dat import DatIndex, parse_dat
-from .decompress import run_batch as run_decompress_batch, scan_compressed
+from .dat import DatIndex, dat_from_record, parse_dat
+from .decompress import run_batch as run_decompress_batch
 from .switch_report import report as build_switch_report
 from .titled import classify_tid, TitleDBIndex, build_index as build_titled_index, validate_switch_rom
 from .downloaders import (
@@ -99,6 +100,8 @@ from .upgrade import is_upgrade, merge_tags, scan as scan_directory
 from .metadata import (Metadata, calendar as metadata_calendar,
                        igdb_catalog_config, igdb_catalog_platforms, igdb_catalog_search)
 from .metadata import discover as metadata_discover
+from .metadata import browse_platform as metadata_browse_platform
+from .metadata import rawg_platforms
 from .openapi import spec as openapi_spec
 from .ops import (LogRing, RateLimiter, make_backup, read_backup,
                   render_metrics, to_csv)
@@ -119,7 +122,10 @@ LIST_SECRETS = ("api_key", "openxbl_key", "npsso", "itchio_key",
                 "battlenet_cookie", "humble_cookie")
 from .scheduler import Scheduler, next_search_due
 from .selection import (Release, best_release, infer_platform, judge, score,
-                        collection_content_kind, collection_content_refusal)
+                        collection_content_kind, collection_content_refusal,
+                        package_class)
+from .game_packages import (BASE, DEFAULT_PARTS, GAME_FOLDER_LIBRARIES, PACKAGE_PLATFORMS, PARTS,
+                            describe_parts, imported_role, normalise_parts)
 from .store import Event, QueueItem, SeerrRequest, Store
 from .ui import favicon_svg as ui_favicon_svg
 from .ui import web_manifest, service_worker, app_icon
@@ -131,6 +137,21 @@ from .sidecars import read_nfo
 from .build_info import get_build_info
 
 log = logging.getLogger(__name__)
+
+
+class PendingParts(NamedTuple):
+    """The package parts an import should settle, and whether Wanted watches them."""
+
+    asked: set
+    monitored: bool
+
+
+def _asked(parts) -> set:
+    """A stored part selection as a set; empty means the game itself."""
+    try:
+        return set(normalise_parts(parts or None))
+    except ValueError:   # a hand-edited state file
+        return {BASE}
 
 # Derived, never typed here. A number that has to be retyped on every release is
 # how v1.7.0 shipped calling itself 1.6.0 while the Update page offered an
@@ -761,7 +782,7 @@ class ROMarr:
         game, api = self._soundtrack_target(game_id)
         return self.soundtrack_store(game["library_scope"]).undo(game, api)
 
-    def __init__(self, env: dict[str, str] | None = None):
+    def __init__(self, env: dict[str, str] | None = None, *, defer_dats: bool = False):
         """Initialize the service state, download/library clients, and persistent store."""
         e = env if env is not None else os.environ
         # Kept so reload_libraries can seed from the environment on first run
@@ -843,6 +864,19 @@ class ROMarr:
         # over after the handoff.
         self._automatic_grab_reservations: set[tuple[str, str]] = set()
         self._dat_reload_lock = threading.Lock()
+        # DAT readiness. A server loads its DATs after it starts listening
+        # (see serve()); until then readers wait, so no import is verified
+        # against a half-loaded index. Set from the start in the synchronous
+        # case, which is what every direct construction gets.
+        self._dats = DatIndex()
+        self._dats_ready = threading.Event()
+        self._dats_ready.set()
+        self._dats_loader_ident = None
+        self._dats_constructor_ident = None
+        self._deferred_dat_dir = ""
+        # Bumped by every DAT selection that reaches the reload lock, so a
+        # deferred startup load can tell it has been overtaken.
+        self._dat_generation = 0
         self._titled_lock = threading.RLock()
         self._switch_lock = threading.Lock()
         self._switch_cache = None
@@ -1040,8 +1074,18 @@ class ROMarr:
         self.limiter = RateLimiter()
         # The environment seeds a new install. An explicit saved selection
         # (including the Setup Guide) must survive the next restart.
-        self.reload_dats(self.store.settings.get("dat_path", "")
-                         or e.get("DAT_PATH", ""))
+        dat_dir = self.store.settings.get("dat_path", "") or e.get("DAT_PATH", "")
+        if defer_dats and dat_dir:
+            # Parsing a large DAT collection takes minutes; the web UI and
+            # /api/health must not wait for it. load_dats_in_background()
+            # does the work once the server is listening.
+            self._deferred_dat_dir = dat_dir
+            # Any selection published after this point wins over the load.
+            self._deferred_dat_generation = self._dat_generation
+            self._dats_constructor_ident = threading.get_ident()
+            self._dats_ready.clear()
+        else:
+            self.reload_dats(dat_dir)
         self.reload_metadata()
         self.reload_policy()
         self.sso = None
@@ -2108,8 +2152,10 @@ class ROMarr:
             "download_clients": clients,
             "indexers": indexers,
             "dat_path": str(self.store.settings.get("dat_path") or ""),
-            "dat_loaded": len(self.dats.dats),
-            "dat_games": sum(len(dat.games) for dat in self.dats.dats),
+            # Status pages never wait for a DAT load still in progress.
+            "dat_loaded": len(self._dats_now().dats),
+            "dat_games": sum(len(dat.games) for dat in self._dats_now().dats),
+            "dat_loading": self.dats_status()["loading"],
             "hub_available": hub.available(),
         }
 
@@ -2427,6 +2473,7 @@ class ROMarr:
             "libraries_total": len(libraries),
             "platforms": len(PLATFORMS),
             "queued": len(self.queue),
+            "dats": self.dats_status(),
         }
 
     def search(self, game: str, platform_name: str = "") -> dict:
@@ -2461,10 +2508,13 @@ class ROMarr:
             # The hub lane joins here too, or this endpoint answers a
             # different question than the request path it claims to mirror.
             releases = releases + self._hub_releases(game, None)
+        asked = self._request_parts(game, platform)
         pick = best_release(releases, game, platform,
-                           profile=self.profile_for(platform), blocklist=self.blocklist)
+                           profile=self.profile_for(platform), blocklist=self.blocklist,
+                           parts=asked)
         scored = sorted(
-            ((score(r, game, platform, profile=self.profile_for(platform)), r) for r in releases),
+            ((score(r, game, platform, profile=self.profile_for(platform), parts=asked), r)
+             for r in releases),
             key=lambda pair: -pair[0])
         # Which indexers actually contributed, and how many of their results
         # survived scoring. This is the question you have when a tracker you
@@ -2677,7 +2727,28 @@ class ROMarr:
                     merged.append(release)
         return merged
 
-    def request(self, game: str, platform_name: str, external_request_id: str = "") -> dict:
+    def _request_parts(self, game: str, platform, parts=None):
+        """What a request wants (base, update, DLC) on a package platform; None elsewhere.
+
+        Explicit `parts` win (and raise ValueError when invalid). Otherwise
+        the Wanted entry's parts count, and failing that the game alone.
+        """
+        if platform is None or platform.slug not in PACKAGE_PLATFORMS:
+            return None
+        if parts is not None:
+            return normalise_parts(parts)
+        key = game.casefold()
+        item = next((w for w in list(self.store.wanted)
+                     if w.platform == platform.slug and w.game.casefold() == key and w.parts), None)
+        if item is None:
+            return DEFAULT_PARTS
+        try:
+            return normalise_parts(item.parts)
+        except ValueError:   # a hand-edited state file
+            return DEFAULT_PARTS
+
+    def request(self, game: str, platform_name: str, external_request_id: str = "",
+                parts=None) -> dict:
         """Request a game. If external_request_id is set, the row is tracked.
 
         The same search, scoring, and handoff pipeline answers an internal
@@ -2689,16 +2760,23 @@ class ROMarr:
         platform = resolve(platform_name)
         if platform is None:
             return {"ok": False, "error": f"unknown platform: {platform_name!r}"}
+        try:
+            asked = self._request_parts(game, platform, parts)
+        except ValueError as err:
+            return {"ok": False, "error": str(err)}
+        # Only a request that named its parts rewrites the Wanted entry's.
+        keep = asked if parts is not None else None
 
         releases = self._search_releases(game, platform)
         pick = best_release(releases, game, platform,
-                           profile=self.profile_for(platform), blocklist=self.blocklist)
+                           profile=self.profile_for(platform), blocklist=self.blocklist,
+                           parts=asked)
         if pick is None:
             item = QueueItem(game, platform.slug, "", 0, "failed",
                              f"no usable release among {len(releases)} result(s)",
                              external_request_id=external_request_id)
             self.store.enqueue(item)
-            self.store.want(game, platform.slug)
+            self.store.want(game, platform.slug, parts=keep)
             self.store.note_failure(game, platform.slug, item.detail)
             self.store.record(Event(kind="failed", game=game, platform=platform.slug,
                                     detail=item.detail))
@@ -2719,7 +2797,7 @@ class ROMarr:
                              release_fault=True,
                              external_request_id=external_request_id)
             self.store.enqueue(item)
-            self.store.want(game, platform.slug)
+            self.store.want(game, platform.slug, parts=keep)
             self.store.note_failure(game, platform.slug, item.detail)
             self.store.record(Event(kind="failed", game=game, platform=platform.slug,
                                     release=pick.title, detail=item.detail))
@@ -2729,7 +2807,7 @@ class ROMarr:
             return {"ok": False, "error": item.detail}
 
         return self.grab(pick, game, platform.slug,
-                          external_request_id=external_request_id)
+                          external_request_id=external_request_id, parts=asked)
 
     def _reserve_automatic_grab(self, game: str, platform_slug: str):
         """Reserve one game's automatic handoff without holding the lock over
@@ -2747,7 +2825,7 @@ class ROMarr:
         return key
 
     def _automatic_request(self, game: str, platform_name: str,
-                           external_request_id: str = "") -> dict:
+                           external_request_id: str = "", parts=None) -> dict:
         """Request a replacement from a background sweep at most once."""
         platform = resolve(platform_name)
         if platform is None:
@@ -2758,21 +2836,25 @@ class ROMarr:
                     "error": "a download is already in flight"}
         try:
             if external_request_id:
-                return self.request(game, platform.slug,
-                                    external_request_id=external_request_id)
-            return self.request(game, platform.slug)
+                return (self.request(game, platform.slug,
+                                     external_request_id=external_request_id,
+                                     parts=parts) if parts is not None else
+                        self.request(game, platform.slug,
+                                     external_request_id=external_request_id))
+            return (self.request(game, platform.slug, parts=parts)
+                    if parts is not None else self.request(game, platform.slug))
         finally:
             with self._lock:
                 self._automatic_grab_reservations.discard(key)
 
-    def _automatic_grab(self, pick, game: str, platform_slug: str) -> dict:
+    def _automatic_grab(self, pick, game: str, platform_slug: str, *, parts=None) -> dict:
         """Hand an RSS-selected release off only if no download is in flight."""
         key = self._reserve_automatic_grab(game, platform_slug)
         if key is None:
             return {"ok": False, "skipped": True,
                     "error": "a download is already in flight"}
         try:
-            return self.grab(pick, game, platform_slug)
+            return self.grab(pick, game, platform_slug, parts=parts)
         finally:
             with self._lock:
                 self._automatic_grab_reservations.discard(key)
@@ -2806,17 +2888,17 @@ class ROMarr:
         return list(self.store.settings.get("retained_collection_owners", []))
 
     def grab(self, pick, game: str, platform_slug: str, *, manual: bool = False,
-             external_request_id: str = "") -> dict:
+             external_request_id: str = "", parts=None) -> dict:
         # Serialize collection mutations through durable queue persistence.
         if getattr(pick, "file_selection_required", False):
             with self._collection_lock:
                 return self._grab_impl(pick, game, platform_slug, manual=manual,
-                                       external_request_id=external_request_id)
+                                       external_request_id=external_request_id, parts=parts)
         return self._grab_impl(pick, game, platform_slug, manual=manual,
-                               external_request_id=external_request_id)
+                               external_request_id=external_request_id, parts=parts)
 
     def _grab_impl(self, pick, game: str, platform_slug: str, *, manual: bool = False,
-                   external_request_id: str = "") -> dict:
+                   external_request_id: str = "", parts=None) -> dict:
         """Hand one release to a download client and record what happened.
 
         Shared by the automatic path and the Search page, deliberately: a
@@ -2833,6 +2915,10 @@ class ROMarr:
         refusal = collection_content_refusal(pick)
         if refusal:
             return {"ok": False, "error": refusal}
+        try:
+            asked = self._request_parts(game, platform, parts)
+        except ValueError as err:
+            return {"ok": False, "error": str(err)}
         client = pick_client(pick.protocol, self.clients)
         if client is None:
             # Not the release's fault -- blocklisting it here would punish a
@@ -2843,9 +2929,10 @@ class ROMarr:
                              release_id=release_id(pick),
                              indexer=getattr(pick, "indexer", ""),
                              size=getattr(pick, "size", 0),
+                             parts=list(asked) if asked and asked != DEFAULT_PARTS else [],
                              external_request_id=external_request_id)
             self.store.enqueue(item)
-            self.store.want(game, platform_slug)
+            self.store.ensure_wanted(game, platform_slug, parts=asked)
             self.store.note_failure(game, platform_slug, item.detail)
             self.store.record(Event(kind="failed", game=game, platform=platform_slug,
                                     release=pick.title, detail=item.detail))
@@ -2856,10 +2943,10 @@ class ROMarr:
 
         if isinstance(client, (QBittorrent, Transmission)):
             with self._collection_source_lock:
-                return self._submit_grab(client, pick, game, platform_slug, manual, external_request_id)
-        return self._submit_grab(client, pick, game, platform_slug, manual, external_request_id)
+                return self._submit_grab(client, pick, game, platform_slug, manual, external_request_id, asked)
+        return self._submit_grab(client, pick, game, platform_slug, manual, external_request_id, asked)
 
-    def _submit_grab(self, client, pick, game, platform_slug, manual, external_request_id):
+    def _submit_grab(self, client, pick, game, platform_slug, manual, external_request_id, asked=None):
         """Submit to the selected client and persist the queue ownership."""
         # The title travels with the release for the clients that can carry
         # it: the import sweep matches a finished download to its queue row by
@@ -2948,6 +3035,7 @@ class ROMarr:
                          download_id=download_id,
                          download_client=getattr(client, "romarr_id", ""),
                          manual=manual,
+                         parts=list(asked) if asked and asked != DEFAULT_PARTS else [],
                          file_selection_required=required_file,
                          selected_file=(getattr(client, "last_selected_file", {})
                                         if required_file and ok else {}),
@@ -2969,13 +3057,13 @@ class ROMarr:
             # A failure to explain must never fail the grab it explains.
             try:
                 reasons = judge(pick, game, resolve(platform_slug),
-                                profile=self.profile_for(platform_slug)).why()
+                                profile=self.profile_for(platform_slug), parts=asked).why()
             except Exception:
                 reasons = ()
             self.notify(grabbed(pick.title, platform_slug,
                                 getattr(pick, "indexer", ""), reasons))
         else:
-            self.store.want(game, platform_slug)
+            self.store.ensure_wanted(game, platform_slug, parts=asked)
             self.store.note_failure(game, platform_slug, item.detail)
             self.store.record(Event(kind="failed", game=game, platform=platform_slug,
                                     release=pick.title, detail=item.detail))
@@ -3023,11 +3111,16 @@ class ROMarr:
                     "items": []}
 
         judged = []
+        parts_for = {}   # one Wanted lookup per platform, not per release
         for r in releases:
             inferred = platform or infer_platform(r)
             plat_prof = self.profile_for(inferred)
+            slug = inferred.slug if inferred is not None else ""
+            if slug not in parts_for:
+                parts_for[slug] = self._request_parts(game, inferred)
             judged.append((judge(r, game, inferred,
-                                 profile=plat_prof, blocklist=self.blocklist), r))
+                                 profile=plat_prof, blocklist=self.blocklist,
+                                 parts=parts_for[slug]), r))
         judged.sort(key=lambda pair: (-pair[0].points, pair[1].size))
 
         key = f"{game}|{platform.slug if platform else ''}"
@@ -3052,6 +3145,8 @@ class ROMarr:
                 # browser may have.
                 "info_url": getattr(r, "info_url", ""),
                 "torrent_file_path": getattr(r, "torrent_file_path", ""),
+                # Base game, update, DLC or a combined pack, where games have them.
+                "package": package_class(r, game, inferred),
                 "score": verdict.points,
                 "accepted": verdict.accepted,
                 "reasons": verdict.why(),
@@ -3305,12 +3400,19 @@ class ROMarr:
                                             self.store.settings.get("remote_path_mappings"))
             else:
                 members = mapped_download_members(path, torrent, self.store.settings.get("remote_path_mappings"))
-            preview = preview_import(path, platform, self.library_root(target[0]),
-                                     layout=self.library_layout(target[0]),
-                                     platform_folders=self.platform_folders(target[0]),
-                                     queue_identity=queue_identity(item),
-                                     member_paths=members,
-                                     switch_extras=bool(self.store.settings.get("switch_attach_extras", True)))
+            def build_preview(roles=None, selected=None):
+                """The import preview, with package destinations from reviewed roles."""
+                return preview_import(path, platform, self.library_root(target[0]),
+                                      layout=self.library_layout(target[0]),
+                                      platform_folders=self.platform_folders(target[0]),
+                                      queue_identity=queue_identity(item),
+                                      member_paths=members,
+                                      switch_extras=bool(self.store.settings.get("switch_attach_extras", True)),
+                                      package_folders=self._package_folders(target[0]),
+                                      game_title=item.game, package_roles=roles,
+                                      selected_primaries=selected)
+
+            preview = build_preview()
             preview = decorate_preview(preview, platform, self.library_root(target[0]),
                                        kind=target[0].get("type", ""), layout=self.library_layout(target[0]),
                                        platform_folders=self.platform_folders(target[0]),
@@ -3322,13 +3424,26 @@ class ROMarr:
                 if routes:
                     intent["routes"] = routes
                     preview["planned_destinations"] = {primary: str(Path(preview["platform_root"]) / route) for primary, route in routes.items()}
+                elif preview.get("package_routing"):
+                    from .import_intent import package_destinations, reviewed_roles, reviewed_selection
+                    roles = reviewed_roles(intent)
+                    chosen = reviewed_selection(intent) or []
+                    # Rebuild unless the review kept every package and every role shown.
+                    shown = {i["primary"]: i["role"] for i in preview["items"]}
+                    unchanged = (len(chosen) == len(shown)
+                                 and all(shown.get(k) == v for k, v in roles.items()))
+                    planned = package_destinations(
+                        preview if unchanged else build_preview(roles, chosen), intent)
+                    intent["package_destinations"] = planned
+                    preview["planned_destinations"] = planned
 
             if body.get("confirm"):
                 if body.get("token") != preview["token"]:
                     return {"error": "download changed; refresh the preview before importing"}
                 if intent is None:
                     raise ValueError("Select payloads before confirmation")
-                if intent.get("routes") and body.get("reviewed_destinations") != preview.get("planned_destinations"):
+                if ((intent.get("routes") or intent.get("package_destinations"))
+                        and body.get("reviewed_destinations") != preview.get("planned_destinations")):
                     raise ValueError("Review the final destination tree before confirming")
                 with self._lock:
                     item.import_intent = intent
@@ -3380,7 +3495,12 @@ class ROMarr:
             with self._lock:
                 self.queue = [q for n, q in enumerate(self.queue)
                               if n != index]
-            return self.request(item.game, item.platform)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == item.platform
+                            and w.game.casefold() == item.game.casefold()), None)
+            parts = (current.parts if current is not None else item.parts) or None
+            return (self.request(item.game, item.platform, parts=parts)
+                    if parts is not None else self.request(item.game, item.platform))
         return {"ok": False, "error": f"unknown action {action!r}"}
 
     def clear_queue(self, state: str = "") -> dict:
@@ -3578,9 +3698,10 @@ class ROMarr:
             # format it cannot open -- which is how the disc platforms ship.
             # The live install this was found on had been missing it silently.
             "archive_tool": _archive_tool_path(),
-            "dats": len(self.dats.dats),
-            "dat_names": [d.name for d in self.dats.dats if d.name],
-            "dat_games": sum(len(d.games) for d in self.dats.dats),
+            "dats": len(self._dats_now().dats),
+            "dat_names": [d.name for d in self._dats_now().dats if d.name],
+            "dat_games": sum(len(d.games) for d in self._dats_now().dats),
+            "dats_loading": self.dats_status()["loading"],
             "titled": getattr(self, 'titled', None) and len(getattr(self, 'titled', TitleDBIndex()).titles) or 0,
             "play_routes": self.play_route_counts(),
             "stream_url": self.store.settings.get("_stream_url", ""),
@@ -3595,6 +3716,110 @@ class ROMarr:
     def _dat_scan_limits() -> tuple[int, int]:
         """How far the DAT scan is allowed to go. Overridable for testing."""
         return DAT_SCAN_DEPTH, DAT_SCAN_MAX_ENTRIES
+
+    @property
+    def dats(self) -> DatIndex:
+        """The loaded DAT index; waits while a background load is running.
+
+        The loader itself and the constructing thread never wait (the loader
+        has not started yet while the constructor runs), so neither can
+        deadlock on it.
+        """
+        ready = self.__dict__.get("_dats_ready")
+        if ready is not None and not ready.is_set():
+            me = threading.get_ident()
+            if me not in (self._dats_loader_ident, self._dats_constructor_ident):
+                ready.wait()
+        return self._dats
+
+    @dats.setter
+    def dats(self, value: DatIndex) -> None:
+        self._dats = value
+        # Every published selection counts; a rejected setup candidate is
+        # never assigned, so it cannot cancel the startup load.
+        self._dat_generation = self.__dict__.get("_dat_generation", 0) + 1
+
+    def _dats_now(self) -> DatIndex:
+        """The DAT index as it is right now, never waiting for a load."""
+        return self.__dict__.get("_dats") or DatIndex()
+
+    def dats_status(self) -> dict:
+        """DAT state without waiting for it: for health and status pages."""
+        ready = self.__dict__.get("_dats_ready")
+        loading = ready is not None and not ready.is_set()
+        index = self.__dict__.get("_dats")
+        return {"loading": loading,
+                "loaded": 0 if loading or index is None else len(index.dats)}
+
+    def load_dats_in_background(self):
+        """Load the DATs deferred by `ROMarr(defer_dats=True)` off-thread.
+
+        Returns the thread, or None when there was nothing deferred.
+        """
+        if self._dats_ready.is_set():
+            return None
+        directory = self._deferred_dat_dir
+        generation = self._deferred_dat_generation
+
+        def run():
+            self._dats_loader_ident = threading.get_ident()
+            started = time.monotonic()
+            try:
+                with self._dat_reload_lock:
+                    if self._dat_generation != generation:
+                        # Setup chose DATs while this load waited its turn;
+                        # that newer selection stands.
+                        log.info("startup DAT load skipped: a newer DAT selection is active")
+                        return
+                    result = self._reload_dats(directory)
+                log.info("DATs ready: %d loaded in %.1fs", result.get("loaded", 0),
+                         time.monotonic() - started)
+            except Exception:
+                log.exception("DAT loading failed; verification answers unknown "
+                              "until the DATs are reloaded")
+            finally:
+                self._dats_loader_ident = None
+                self._dats_ready.set()
+
+        self._dats_constructor_ident = None
+        thread = threading.Thread(target=run, name="romarr-dat-load", daemon=True)
+        thread.start()
+        return thread
+
+    def _dat_cache_dir(self) -> Path:
+        return self.store.path.parent / "cache" / "dats"
+
+    def _dat_record(self, cache_dir: Path, used: set, key: str, read) -> tuple:
+        """One DAT's parsed record, from the cache when its source is unchanged.
+
+        `key` includes a content digest as well as source metadata, so a
+        same-size replacement with a preserved timestamp cannot reuse a stale
+        parsed record. The cache is ROMarr's own data under its config
+        directory; an unreadable or stale entry is simply re-parsed.
+        """
+        import hashlib
+        import marshal
+
+        from .dat import DAT_RECORD_FORMAT, parse_dat_record
+
+        name = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:40] + ".bin"
+        used.add(name)
+        target = cache_dir / name
+        try:
+            fmt, cached_key, record = marshal.loads(target.read_bytes())
+            if fmt == DAT_RECORD_FORMAT and cached_key == key:
+                return record
+        except (OSError, EOFError, ValueError, TypeError):
+            pass
+        record = parse_dat_record(read())
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            tmp.write_bytes(marshal.dumps((DAT_RECORD_FORMAT, key, record)))
+            os.replace(tmp, target)
+        except (OSError, ValueError):
+            pass  # a read-only config only costs the next start its speed
+        return record
 
     def reload_dats(self, directory: str = "") -> dict:
         with self._dat_reload_lock:
@@ -3611,6 +3836,7 @@ class ROMarr:
         Handles both standalone .dat/.xml files and .zip archives containing
         DAT files (NoIntro distributes their DATs as ZIP files).
         """
+        import hashlib
         import zipfile
 
         if not directory:
@@ -3634,40 +3860,59 @@ class ROMarr:
                     "error": f"{root} is not a directory"}
         found, stopped = _find_dats(root)
         loaded_by_name = {}
+        cache_dir = self._dat_cache_dir()
+        used: set = set()
+
+        def keep(parsed, label: str) -> None:
+            if parsed.games:
+                key = parsed.name.casefold() or label.casefold()
+                previous = loaded_by_name.get(key)
+                if previous is None or _dat_version_key(parsed.version) > _dat_version_key(previous.version):
+                    loaded_by_name[key] = parsed
+
         for path in found:
             try:
+                st = path.stat()
+                digest = hashlib.sha256()
+                with path.open("rb") as source_file:
+                    for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                stamp = (f"{path.resolve()}\0{st.st_size}\0{st.st_mtime_ns}"
+                         f"\0{digest.hexdigest()}")
                 # Handle ZIP archives containing DAT files
                 if path.suffix.lower() == ".zip":
                     try:
                         with zipfile.ZipFile(path, 'r') as zf:
                             # Look for .dat or .xml files inside the zip
-                            dat_names = [n for n in zf.namelist() 
-                                        if n.lower().endswith(('.dat', '.xml'))
-                                        and not n.startswith('__MACOSX/')
-                                        and not n.startswith('.')]
+                            dat_names = [n for n in zf.namelist()
+                                         if n.lower().endswith(('.dat', '.xml'))
+                                         and not n.startswith('__MACOSX/')
+                                         and not n.startswith('.')]
                             for dat_name in dat_names:
-                                with zf.open(dat_name) as dat_file:
-                                    content = dat_file.read().decode('utf-8', errors='replace')
-                                    parsed = parse_dat(content)
-                                    if parsed.games:
-                                        key = parsed.name.casefold() or dat_name.casefold()
-                                        previous = loaded_by_name.get(key)
-                                        if previous is None or _dat_version_key(parsed.version) > _dat_version_key(previous.version):
-                                            loaded_by_name[key] = parsed
+                                def read(zf=zf, dat_name=dat_name):
+                                    with zf.open(dat_name) as dat_file:
+                                        return dat_file.read().decode('utf-8', errors='replace')
+                                record = self._dat_record(cache_dir, used,
+                                                          f"{stamp}\0{dat_name}", read)
+                                keep(dat_from_record(record), dat_name)
                     except (zipfile.BadZipFile, OSError) as zip_err:
                         log.warning("could not read zip %s: %s", path, zip_err)
                         continue
                 else:
                     # Regular .dat or .xml file
-                    parsed = parse_dat(path.read_text(encoding="utf-8",
-                                                      errors="replace"))
-                    if parsed.games:
-                        key = parsed.name.casefold() or path.name.casefold()
-                        previous = loaded_by_name.get(key)
-                        if previous is None or _dat_version_key(parsed.version) > _dat_version_key(previous.version):
-                            loaded_by_name[key] = parsed
+                    record = self._dat_record(
+                        cache_dir, used, stamp,
+                        lambda path=path: path.read_text(encoding="utf-8", errors="replace"))
+                    keep(dat_from_record(record), path.name)
             except (OSError, ValueError) as exc:
                 log.warning("could not read %s: %s", path, exc)
+        # Entries for DATs that are gone or changed would only grow the cache.
+        try:
+            for stale in cache_dir.glob("*.bin"):
+                if stale.name not in used:
+                    stale.unlink(missing_ok=True)
+        except OSError:
+            pass
         index = DatIndex()
         for parsed in loaded_by_name.values():
             index.add(parsed)
@@ -3837,14 +4082,20 @@ class ROMarr:
         return {(self._title_key(g.name), self._slug_of(g).casefold())
                 for g in (library or []) if self._is_local(g)}
 
-    def _igdb_platform_ids(self, cfg: dict, slug: str) -> list[int]:
-        """IGDB platform ids whose names resolve to this ROMarr platform."""
+    def _igdb_platform_ids(self, cfg: dict, slug: str, *, strict: bool = False) -> list[int]:
+        """IGDB platform ids whose names resolve to this ROMarr platform.
+
+        With `strict`, a failure to read IGDB's platform list raises instead
+        of reading as "IGDB does not list this platform".
+        """
         cache = getattr(self, "_igdb_platform_cache", None)
         config_key = (str(cfg.get("id") or ""), str(cfg.get("client_id") or ""), str(cfg.get("token") or ""))
         if cache is None or time.time() - cache[0] > 6 * 3600 or cache[2] != config_key:
             try:
                 cache = (time.time(), igdb_catalog_platforms(cfg), config_key)
             except Exception:  # noqa: BLE001 - search still works unfiltered
+                if strict:
+                    raise
                 return []
             self._igdb_platform_cache = cache
         ids = []
@@ -3853,6 +4104,60 @@ class ROMarr:
             if plat is not None and plat.slug == slug:
                 ids.append(int(row["id"]))
         return ids
+
+    def _rawg_platform_ids(self, cfg: dict, slug: str, *, strict: bool = False) -> list[int]:
+        """RAWG platform ids whose names resolve to this ROMarr platform.
+
+        With `strict`, a failure to read RAWG's platform list raises.
+        """
+        cache = getattr(self, "_rawg_platform_cache", None)
+        config_key = (str(cfg.get("id") or ""), str(cfg.get("api_key") or ""))
+        if cache is None or time.time() - cache[0] > 6 * 3600 or cache[2] != config_key:
+            try:
+                cache = (time.time(), rawg_platforms(cfg), config_key)
+            except Exception:  # noqa: BLE001 - another provider may answer
+                if strict:
+                    raise
+                return []
+            self._rawg_platform_cache = cache
+        return [int(row["id"]) for row in cache[1]
+                if (plat := resolve(row.get("name", ""))) is not None
+                and plat.slug == slug]
+
+    def discover_platform(self, platform_name: str, *, sort: str = "popular",
+                          query: str = "", page: int = 1, limit: int = 40,
+                          provider: str = "") -> dict:
+        """One page of one platform's catalogue, marked with where each game stands.
+
+        Unlike the storefront shelves, every row here is about one platform
+        ROMarr files, so each can say whether it is already in the library,
+        downloading or wanted, and be added without picking a platform.
+        """
+        platform = resolve(platform_name)
+        if platform is None:
+            return {"platform": None, "items": [], "has_more": False,
+                    "provider": None, "provider_label": "",
+                    "error": f"unknown platform: {platform_name!r}"}
+
+        def ids_for(cfg: dict) -> list[int]:
+            kind = str(cfg.get("type") or "").lower()
+            if kind == "igdb":
+                return self._igdb_platform_ids(cfg, platform.slug, strict=True)
+            if kind == "rawg":
+                return self._rawg_platform_ids(cfg, platform.slug, strict=True)
+            return []
+
+        result = metadata_browse_platform(
+            self.store.list_items("metadata_providers"), ids_for,
+            sort=sort, query=query, page=page, limit=limit, provider=provider)
+        known = self._owned_keys()
+        for row in result["items"]:
+            row["state"] = self._game_state(row.get("title", ""), platform.slug, known)
+            row["owned"] = row["state"] == "library"
+        result.update({"platform": {"slug": platform.slug, "name": platform.name},
+                       "sort": sort, "query": str(query or "").strip()[:200],
+                       "page": max(1, int(page or 1))})
+        return result
 
     def _game_state(self, title: str, slug: str, known: set | None = None) -> str:
         """library | downloading | monitored | unmonitored | '' for one game."""
@@ -3909,15 +4214,24 @@ class ROMarr:
         return {"configured": True, "items": items}
 
     def add_wanted(self, game: str, platform_name: str, *, monitored: bool = True,
-                   search: bool = False) -> dict:
-        """Add a game the way Radarr's Add dialog does: monitor it, maybe search now."""
+                   search: bool = False, parts=None) -> dict:
+        """Add a game the way Radarr's Add dialog does: monitor it, maybe search now.
+
+        `parts` asks a request for the update and DLC as well as (or
+        instead of) the game; a request for extras alone may own the game.
+        """
         platform = resolve(platform_name)
         if platform is None:
             return {"ok": False, "error": f"unknown platform: {platform_name!r}"}
+        try:
+            asked = self._request_parts(game, platform, parts)
+        except ValueError as err:
+            return {"ok": False, "error": str(err)}
         state = self._game_state(game, platform.slug)
-        if state == "library":
+        if state == "library" and (asked is None or BASE in asked):
             return {"ok": False, "error": "already in the library", "state": state}
-        self.store.want(game, platform.slug, monitored=monitored)
+        self.store.want(game, platform.slug, monitored=monitored,
+                        parts=asked if parts is not None else None)
         self.store.set_monitored(game, platform.slug, monitored)
         self.store.record(Event(kind="wanted", game=game, platform=platform.slug,
                                 detail="added to Wanted" + ("" if monitored else " (unmonitored)")))
@@ -4167,11 +4481,17 @@ class ROMarr:
             # Back on the Wanted list first: the replacement search can fail
             # too, and a request that has lost its dead download and never
             # reached Wanted is one nothing will ever look for again.
-            self.store.want(row.game, row.platform)
+            self.store.ensure_wanted(row.game, row.platform,
+                                     parts=row.parts or None)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == row.platform
+                            and w.game.casefold() == row.game.casefold()), None)
+            parts = (current.parts if current is not None else row.parts) or None
             try:
                 if self._automatic_request(
                         row.game, row.platform,
-                        external_request_id=row.external_request_id).get("ok"):
+                        external_request_id=row.external_request_id,
+                        parts=parts).get("ok"):
                     regrabbed += 1
             except Exception as err:      # one bad row must not stop the rest
                 log.warning("replacement grab for %r failed: %s", row.game, err)
@@ -4502,6 +4822,7 @@ class ROMarr:
                                       rename=bool(self.store.settings.get("rename_on_import", True)),
                         prefer_hardlinks=staged_source == source and bool(self.store.settings.get("prefer_hardlinks", False)),
                                       switch_extras=bool(self.store.settings.get("switch_attach_extras", True)),
+                                      package_folders=self._package_folders(target_cfg),
                                       layout=self.library_layout(target_cfg),
                                       translation=is_translation(source.name),
                                       platform_folders=target_folders,
@@ -4655,19 +4976,18 @@ class ROMarr:
     _RECONCILE_CACHE_MAX = 50_000
 
     def _reconcile_file_hashes(self, path: Path, platform) -> tuple[dict, ...]:
-        """Return streamed DAT hashes for every member of ``path``.
+        """Return DAT hashes parsed from the exact library-file snapshot read.
 
-        Caches computed hash dicts by ``(path, archive_is_the_rom, size,
-        mtime_ns, ctime_ns)`` so repeated reconciles skip rehashing unchanged
-        library files while still re-evaluating ``self.dats`` on DAT reloads.
+        The file identity and timestamps keep unchanged files cacheable. On a
+        miss, copy the already-open file descriptor to a temporary sibling and
+        hash/parse that snapshot so a path replacement cannot split the cache
+        key from the bytes that were indexed.
         """
         from .library import _source_for
+        import shutil
+        import tempfile
 
-        st = path.stat()
         archive_as_rom = bool(getattr(platform, "archive_is_the_rom", False))
-        sig = (st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-        cache_key = (str(path), archive_as_rom, *sig)
-
         cache = getattr(self, "_reconcile_hash_cache", None)
         lock = getattr(self, "_reconcile_cache_lock", None)
         if cache is None or lock is None:
@@ -4676,32 +4996,45 @@ class ROMarr:
             self._reconcile_hash_cache = cache
             self._reconcile_cache_lock = lock
 
-        with lock:
-            cached = cache.get(cache_key)
-            if cached is not None:
-                cache.move_to_end(cache_key)
-                return cached
-
-        source = _source_for(path, platform)
-        computed: list[dict] = []
-        complete = True
-        for member in source.names():
-            suffix = Path(member.replace("\\", "/")).suffix
-            hashes = source.hash(member, suffix=suffix)
-            if hashes is None:
-                complete = False
-                continue
-            computed.append(hashes)
-        result = tuple(computed)
-
-        st_after = path.stat()
-        if complete and (st_after.st_size, st_after.st_mtime_ns, st_after.st_ctime_ns) == sig:
+        with path.open("rb") as original:
+            before = os.fstat(original.fileno())
+            sig = (before.st_dev, before.st_ino, before.st_size,
+                   before.st_mtime_ns, before.st_ctime_ns)
+            cache_key = (str(path), archive_as_rom, *sig)
             with lock:
-                cache[cache_key] = result
-                cache.move_to_end(cache_key)
-                while len(cache) > self._RECONCILE_CACHE_MAX:
-                    cache.popitem(last=False)
-        return result
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    cache.move_to_end(cache_key)
+                    return cached
+
+            computed: list[dict] = []
+            complete = True
+            unchanged = False
+            with tempfile.TemporaryDirectory(prefix="romarr-reconcile-") as scratch:
+                snapshot = Path(scratch) / ("snapshot" + path.suffix)
+                with snapshot.open("wb") as copied:
+                    shutil.copyfileobj(original, copied, length=1024 * 1024)
+                after = os.fstat(original.fileno())
+                unchanged = (before.st_dev, before.st_ino, before.st_size,
+                             before.st_mtime_ns, before.st_ctime_ns) == (
+                                 after.st_dev, after.st_ino, after.st_size,
+                                 after.st_mtime_ns, after.st_ctime_ns)
+                source = _source_for(snapshot, platform)
+                for member in source.names():
+                    suffix = Path(member.replace("\\", "/")).suffix
+                    hashes = source.hash(member, suffix=suffix)
+                    if hashes is None:
+                        complete = False
+                        continue
+                    computed.append(hashes)
+            result = tuple(computed)
+            if complete and unchanged:
+                with lock:
+                    cache[cache_key] = result
+                    cache.move_to_end(cache_key)
+                    while len(cache) > self._RECONCILE_CACHE_MAX:
+                        cache.popitem(last=False)
+            return result
 
     def reconcile_platform(self, platform_slug: str = "") -> dict:
         """Drop Wanted entries whose verified dump is already in the library.
@@ -4716,6 +5049,7 @@ class ROMarr:
         ``POST /api/v1/collection/reconcile``.
         """
         from .dat import VERIFIED as _VERIFIED
+        from .game_packages import BASE as _BASE, imported_role
 
         platform = resolve(platform_slug)
         if platform is None:
@@ -4740,7 +5074,9 @@ class ROMarr:
                 try:
                     for hashes in self._reconcile_file_hashes(path, platform):
                         match = self.dats.lookup(**hashes)
-                        if match.status == _VERIFIED and match.game:
+                        if (match.status == _VERIFIED and match.game
+                                and imported_role(path, game=match.game,
+                                                  platform_slug=platform_slug) == _BASE):
                             verified_titles.add(match.game)
                 except Exception:  # noqa: BLE001 - one bad file must not stop it
                     continue
@@ -4753,13 +5089,66 @@ class ROMarr:
             if not wanted_key:
                 continue
             if any(_titles_are_same(w.game, vt) for vt in verified_titles):
-                self.store.fulfil(w.game, w.platform)
-                dropped.append([w.game, w.platform])
+                settled = self.store.fulfil_base(w.game, w.platform)
+                still_wanted = any(row.game.lower() == w.game.lower()
+                                   and row.platform == w.platform
+                                   for row in self.store.wanted)
+                if settled and not still_wanted:
+                    dropped.append([w.game, w.platform])
         if dropped:
             self.store.save()
         return {"ok": True, "platform": platform_slug,
                 "verified": len(verified_titles), "dropped": dropped,
                 "count": len(dropped)}
+
+    def _package_folders(self, cfg) -> bool:
+        """Whether imports into this library file packages as RomM game folders.
+
+        `<Title>/update/` and `<Title>/dlc/` are RomM's convention. Frontend
+        libraries such as RetroBat expect flat system folders, so they keep it.
+        """
+        return (bool(self.store.settings.get("game_package_folders", True))
+                and str((cfg or {}).get("type", "")) in GAME_FOLDER_LIBRARIES)
+
+    def _pending_parts(self, queue_item, platform) -> "PendingParts":
+        """The package parts still asked for, and whether Wanted watches them.
+
+        The queued request's parts plus the Wanted entry's, read before an
+        import fulfils anything, so a part requested while the download was
+        running is not lost. An empty selection means the game itself; a
+        release grabbed by hand with no parts named asks for nothing more.
+        """
+        if queue_item is None or platform.slug not in PACKAGE_PLATFORMS:
+            return PendingParts(set(), True)
+        pending = _asked(queue_item.parts) if queue_item.parts or not queue_item.manual else set()
+        monitored = True
+        key = queue_item.game.casefold()
+        for item in list(self.store.wanted):
+            if item.platform == platform.slug and item.game.casefold() == key:
+                pending |= _asked(item.parts)
+                monitored = item.monitored
+        return PendingParts(pending, monitored)
+
+    def _settle_parts(self, queue_item, platform, outcomes, pending: "PendingParts",
+                      *, wanted_game: str | None = None) -> None:
+        """Leave on Wanted exactly the asked-for package parts the import did not bring.
+
+        What arrived is read from the imported files (header, RomM folder,
+        name), never from the release title. A request answered in full is
+        dropped from Wanted even when its title did not match the download.
+        """
+        if not pending.asked:
+            return
+        arrived = {imported_role(o.destination, queue_item.game, platform.slug)
+                   for o in outcomes if o.ok and o.destination}
+        missing = tuple(p for p in PARTS if p in pending.asked and p not in arrived)
+        game = wanted_game or queue_item.game
+        self.store.settle_parts(
+            game, platform.slug, missing, monitored=pending.monitored,
+            settled=pending.asked - set(missing))
+        if missing:
+            self.store.record(Event(kind="wanted", game=game, platform=platform.slug,
+                                    detail=f"still wanted: {describe_parts(missing)}"))
 
     def collection_plan(self, dat_name: str = "", platform: str = "",
                         **policy_kw) -> dict:
@@ -4960,15 +5349,35 @@ class ROMarr:
                 return None
         return client
 
-    def collection_source_torrents(self) -> dict:
-        """List existing torrent sources and persisted acquisition jobs."""
-        rows, errors = [], []
+    def collection_source_torrents(self, include_all: bool = False) -> dict:
+        """List existing torrent sources and persisted acquisition jobs.
+
+        Torrent clients are usually shared with Radarr and Sonarr, so only
+        torrents that look like game sets are offered unless `include_all`
+        asks for everything. A torrent with an acquisition job is always kept.
+        """
+        from .source_filter import looks_like_game_torrent, torrent_labels
+
+        rows, errors, hidden = [], [], 0
+        jobs = self.store.list_items("collection_sources")
+        job_hashes = {str(job.get("torrent_hash") or "").lower()
+                      for job in jobs if isinstance(job, dict)}
         for client in self.clients:
             if not isinstance(client, QBittorrent) and type(client) is not Transmission:
                 continue
+            config = getattr(client, "_config", None)
+            own = {DEFAULT_CATEGORY, str(getattr(config, "category", "") or "")}
             try:
                 for torrent in client.torrents():
+                    torrent_hash = str(torrent.get("hash") or "").lower()
+                    is_game = (torrent_hash in job_hashes or looks_like_game_torrent(
+                        str(torrent.get("name") or ""),
+                        torrent_labels(torrent), own_categories=own))
+                    if not (include_all or is_game):
+                        hidden += 1
+                        continue
                     rows.append({
+                        "game": is_game,
                         "client_id": getattr(client, "romarr_id", ""),
                         "client_name": getattr(client, "romarr_name", client.name),
                         "hash": str(torrent.get("hash") or ""),
@@ -4983,8 +5392,8 @@ class ROMarr:
                 name = getattr(client, "romarr_name", client.name)
                 log.warning("could not list collection torrents from %s: %s", name, detail)
                 errors.append(f"{name}: {detail}")
-        return {"torrents": rows, "errors": errors,
-                "jobs": self.store.list_items("collection_sources")}
+        return {"torrents": rows, "errors": errors, "hidden": hidden,
+                "jobs": jobs}
 
     def _collection_source_plan(self, client_id: str, torrent_hash: str,
                                 dat_name: str, platform: str,
@@ -5693,6 +6102,8 @@ class ROMarr:
                 "slug": platform.slug,
                 "name": platform.name,
                 "media": platform.media,
+                # Games here ship as base game, update and DLC packages.
+                "parts": platform.slug in PACKAGE_PLATFORMS,
                 "extensions": list(platform.extensions),
                 "max_size_mb": platform.max_size // (1024 * 1024),
                 "play_routes": list(routes.kinds),
@@ -6339,7 +6750,8 @@ class ROMarr:
         return {"hash_index": index, "duplicate_roots": tuple(dict.fromkeys(roots))}
 
     def _index_hash(self, verdict, platform: str, fallback: str,
-                    destination=None, *, sha1: str = "") -> None:
+                    destination=None, *, sha1: str = "",
+                    physical_sha1: str = "") -> None:
         """Record an imported file's hash, if verification produced one.
 
         Import is where new ROMs arrive, so without this the index only ever
@@ -6347,8 +6759,9 @@ class ROMarr:
         acquisition pipeline did its job.
         """
         rom = getattr(verdict, "rom", None)
-        physical_sha1 = str(sha1 or "")
-        sha1 = str(getattr(rom, "sha1", "") or physical_sha1)
+        provided_sha1 = str(sha1 or "")
+        physical_sha1 = str(physical_sha1 or provided_sha1)
+        sha1 = str(getattr(rom, "sha1", "") or provided_sha1 or physical_sha1)
         if not sha1:
             return
         from .dat import VERIFIED
@@ -7369,11 +7782,24 @@ class ROMarr:
             platform = resolve(item.platform)
             if platform is None:
                 continue
+            selected_parts = self._request_parts(
+                item.game, platform, item.parts if item.parts else None)
             pick = best_release(releases, item.game, platform,
-                               profile=self.profile_for(platform), blocklist=self.blocklist)
+                               profile=self.profile_for(platform), blocklist=self.blocklist,
+                               parts=selected_parts)
             if pick is None or not pick.download_url:
                 continue
-            result = self._automatic_grab(pick, item.game, platform.slug)
+            current = next((w for w in list(self.store.wanted)
+                            if w.platform == platform.slug
+                            and w.game.casefold() == item.game.casefold()), None)
+            if current is None:
+                continue
+            current_parts = self._request_parts(
+                current.game, platform, current.parts if current.parts else None)
+            if current_parts != selected_parts:
+                continue
+            result = self._automatic_grab(pick, item.game, platform.slug,
+                                          parts=selected_parts)
             if result.get("skipped"):
                 skipped_in_flight += 1
             elif result.get("ok"):
@@ -8364,10 +8790,13 @@ class ROMarr:
         """Batch decompression: extract, validate against DATs, then delete.
 
         The workflow issue #22 asked for. Compressatorium does the extraction
-        (CHD, RVZ, Z3DS, NSZ, CSO, 7z, zip -- every format it speaks); ROMarr
+        it has a tool for (CHD, RVZ, Z3DS, NSZ, CSO, single-cartridge 7z/zip);
+        ROMarr extracts RAR sets and multi-file archives itself (#224), and
         does the verification, because ROMarr holds the DAT index and the
         question "is this the published dump" is answered here, not by the
-        extractor.
+        extractor. The service is found through COMPRESSATORIUM_URL or the
+        preinstalled Compressatorium plugin's `url`; without either, the local
+        work still runs and the report says which files were skipped.
 
         Deletion is off by default and gated on verification: a file is
         deleted only when every output it produced matched a DAT entry.
@@ -8378,16 +8807,12 @@ class ROMarr:
         if not root:
             return {"error": "no directory given -- pass 'directory' in the "
                              "request body or set decompress_path in settings"}
-        url = self._env.get("COMPRESSATORIUM_URL", "")
-        if not url and not dry_run:
-            return {"error": "COMPRESSATORIUM_URL is not configured. Start a "
-                             "compressatorium container (pacnpal/compressatorium) "
-                             "and set the variable, or run with dry_run=true "
-                             "to see what would be processed."}
+        from . import compressatorium_plugin
+        url, api_key, _source = compressatorium_plugin.connection(self._env)
         report = run_decompress_batch(
             root,
             compressatorium_url=url,
-            compressatorium_api_key=self._env.get("COMPRESSATORIUM_API_KEY", ""),
+            compressatorium_api_key=api_key,
             dats=self.dats,
             delete_originals=bool(delete_originals),
             dry_run=bool(dry_run),
@@ -8721,8 +9146,10 @@ class ROMarr:
             target_folders = self.platform_folders(target_cfg)
             selected_primaries = None
             bundle_routes = None
+            reviewed_destinations = None
             if queue_item is not None and path.exists():
-                from .import_intent import preview_import, queue_identity
+                from .import_intent import (package_destinations, preview_import, queue_identity,
+                                            reviewed_roles, reviewed_selection)
                 from .romm_bundle import decorate_preview, route_selection
                 from .library import MissingArchiveTool
                 import zipfile
@@ -8733,7 +9160,11 @@ class ROMarr:
                                              platform_folders=target_folders,
                                              queue_identity=queue_identity(queue_item),
                                              member_paths=members,
-                                             switch_extras=bool(self.store.settings.get("switch_attach_extras", True)))
+                                             switch_extras=bool(self.store.settings.get("switch_attach_extras", True)),
+                                             package_folders=self._package_folders(target_cfg),
+                                             game_title=getattr(queue_item, "game", "") or "",
+                                             package_roles=reviewed_roles(queue_item.import_intent) or None,
+                                             selected_primaries=reviewed_selection(queue_item.import_intent))
                     preview = decorate_preview(preview, platform, self.library_root(target_cfg),
                                                kind=target_cfg.get("type", ""), layout=self.library_layout(target_cfg),
                                                platform_folders=target_folders, translation=is_translation(name))
@@ -8754,7 +9185,16 @@ class ROMarr:
                     queue_item.detail = "Review bundle contents in Queue before importing"
                     results.append({"name": name, "ok": False, "reason": queue_item.detail})
                     continue
+                if intent and intent.get("package_destinations") and (
+                        package_destinations(preview, intent) != intent["package_destinations"]):
+                    queue_item.import_preview = preview
+                    queue_item.state = "import-review"
+                    queue_item.detail = "Reviewed destinations changed; review the bundle again"
+                    results.append({"name": name, "ok": False, "reason": queue_item.detail})
+                    continue
                 if intent:
+                    if intent.get("package_destinations"):
+                        reviewed_destinations = package_destinations(preview, intent)
                     selected_primaries = [c["primary"] for c in intent["choices"]]
                     if intent.get("routes"):
                         try:
@@ -8767,6 +9207,9 @@ class ROMarr:
                             results.append({"name": name, "ok": False, "reason": str(exc)})
                             continue
 
+            package_roles = None
+            if selected_primaries is not None and queue_item is not None:
+                package_roles = reviewed_roles(queue_item.import_intent)
             if selected_primaries is not None:
                 platform, held = self._nup_gate(
                     path, name, platform, queue_item, inferred=False,
@@ -8781,13 +9224,20 @@ class ROMarr:
                 rename=bool(self.store.settings.get("rename_on_import", True)),
                 prefer_hardlinks=bool(self.store.settings.get("prefer_hardlinks", False)),
                 switch_extras=bool(self.store.settings.get("switch_attach_extras", True)),
+                package_folders=self._package_folders(target_cfg),
+                game_title=getattr(queue_item, "game", "") or "",
+                package_roles=package_roles,
                 layout=self.library_layout(target_cfg),
                 translation=is_translation(name),
                 platform_folders=target_folders,
                 member_paths=members,
                 **self._import_hash_options(),
                 **({"selected_primaries": selected_primaries} if selected_primaries is not None else {}),
-                **({"bundle_routes": bundle_routes} if bundle_routes is not None else {}))
+                **({"bundle_routes": bundle_routes} if bundle_routes is not None else {}),
+                **({"expected_destinations": reviewed_destinations}
+                   if reviewed_destinations is not None else {}),
+                **({"previously_imported_paths": tuple(queue_item.imported_paths)}
+                   if queue_item is not None and queue_item.imported_paths else {}))
             game_title = (queue_item.game if queue_item and getattr(queue_item, "game", "") else name)
             if not outcomes:
                 self.store.record(Event(kind="failed", game=game_title,
@@ -8806,12 +9256,18 @@ class ROMarr:
 
             outcomes = confirm_in_library(outcomes, self.library_root(target_cfg))
             all_ok = all(o.ok for o in outcomes)
+            if queue_item is not None:
+                queue_item.imported_paths = list(dict.fromkeys(
+                    [*queue_item.imported_paths,
+                     *(str(o.destination) for o in outcomes if o.ok and o.destination)]))
             fulfils_base = not (queue_item and queue_item.import_intent.get("existing_game"))
             for outcome in outcomes:
                 if outcome.ok:
-                    if outcome.sha1:
-                        self._index_hash(outcome.verification, platform.slug, game_title,
-                                         outcome.destination, sha1=outcome.sha1)
+                    if outcome.sha1 or outcome.physical_sha1:
+                        self._index_hash(
+                            outcome.verification, platform.slug, game_title,
+                            outcome.destination, sha1=outcome.sha1,
+                            physical_sha1=outcome.physical_sha1)
                     self.store.record(Event(kind="imported", game=game_title,
                                             platform=platform.slug, release=name,
                                             library=label,
@@ -8869,21 +9325,27 @@ class ROMarr:
                                 queue_item.external_request_id,
                                 assets=imported_paths,
                                 status="available")
-                for w in (list(self.store.wanted) if fulfils_base else []):
-                    if w.platform != platform.slug:
+                pending = self._pending_parts(queue_item, platform)
+                matched_wanted = []
+                for wanted in (list(self.store.wanted) if fulfils_base else []):
+                    if wanted.platform != platform.slug or not _title_key(wanted.game):
                         continue
-                    wanted_key = _title_key(w.game)
-                    if not wanted_key:
-                        continue
-                    # A wanted title may not substring-match the release it
-                    # arrived under (punctuation, region tags, or a short
-                    # IGDB/GG title versus the full no-intro name). What the
-                    # bytes *are* is known by hash verification, so match the
-                    # wanted title against the verified identities as well as
-                    # the client-reported download name.
-                    if any(_titles_are_same(w.game, identity)
+                    # Match against verified import identities without deleting
+                    # the Wanted row first: it may contain update/DLC parts under
+                    # a title alias different from the queue's display title.
+                    if any(_titles_are_same(wanted.game, identity)
                            for identity in _fulfil_identities(name, outcomes)):
-                        self.store.fulfil(w.game, w.platform)
+                        matched_wanted.append(wanted)
+                for wanted in matched_wanted:
+                    asked = (set(_asked(queue_item.parts))
+                             if queue_item is not None and
+                             (queue_item.parts or not queue_item.manual) else set())
+                    asked |= _asked(wanted.parts)
+                    self._settle_parts(
+                        queue_item, platform, outcomes,
+                        PendingParts(asked, wanted.monitored), wanted_game=wanted.game)
+                if not matched_wanted:
+                    self._settle_parts(queue_item, platform, outcomes, pending)
                 # Close the aliasing gap on this platform: drop wanted titles
                 # that are already present and verified in the library but were
                 # never fulfilled (word-order/alias titles, pre-existing stale
@@ -9002,6 +9464,19 @@ def is_portal_subpath(path: str) -> bool:
     return False
 
 
+def _session_cookie(token: str, seconds: int) -> str:
+    """The session Set-Cookie value, its flags stated once.
+
+    `token` is what `Auth.issue_session` signed: base64url claims and a hex
+    signature, so it never holds a separator or a line break. HttpOnly so a
+    script cannot read it; SameSite=Strict so another site cannot ride it;
+    Path=/ so it covers the API. Not Secure: ROMarr is normally plain http
+    on a LAN, and a Secure cookie would simply never be stored there.
+    """
+    return (f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; "
+            f"Path=/; Max-Age={seconds}")
+
+
 def make_handler(service: ROMarr):
     """Build the HTTP request handler class bound to `service`."""
     class Handler(BaseHTTPRequestHandler):
@@ -9033,9 +9508,14 @@ def make_handler(service: ROMarr):
                 return self._json(502, {"error": f"could not reach the source or RomM ({exc.__class__.__name__})"})
 
 
-        def _send(self, code: int, body: bytes, content_type: str):
+        def _send(self, code: int, body: bytes, content_type: str, headers=()):
+            """Answer with `body`; `headers` are extra (name, value) pairs."""
             self.send_response(code)
             self.send_header("Content-Type", content_type)
+            for name, value in headers:
+                if "\r" in value or "\n" in value:
+                    raise ValueError(f"line break in the {name} header")
+                self.send_header(name, value)
             self.send_header("Content-Length", str(len(body)))
             try:
                 self.end_headers()
@@ -9128,20 +9608,10 @@ def make_handler(service: ROMarr):
                       "/api/v1/peer/netplay")
 
         def _send_session(self, token: str, payload: dict):
-            """Answer with a session cookie set.
-
-            Shared by login and first-run setup so the cookie's flags are
-            stated once. HttpOnly so a script cannot read it; SameSite=Strict
-            so another site cannot ride it; Path=/ so it covers the API. Not
-            Secure: ROMarr is normally plain http on a LAN, and a Secure
-            cookie would simply never be stored there.
-            """
+            """Answer with a session cookie set (login and first-run setup)."""
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Set-Cookie",
-                f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; "
-                f"Path=/; Max-Age={service.auth.session_seconds}")
+            self.send_header("Set-Cookie", _session_cookie(token, service.auth.session_seconds))
             raw = json.dumps(payload).encode()
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
@@ -9217,21 +9687,25 @@ def make_handler(service: ROMarr):
             # In. The session is the same signed cookie a password login gets;
             # who the person is rides inside it, so every later request knows
             # the account without asking the IdP again.
+            #
+            # Not a 303 to "/": the IdP started this navigation, so browsers
+            # treat a redirect from here as cross-site and withhold the
+            # SameSite=Strict cookie just set, and "/" serves the login page
+            # again (#235). A page of our own that refreshes to "/" makes the
+            # next request same-site, so the session cookie goes with it. The
+            # Steam return (/api/v1/connect/steam/return) answers a page for
+            # the same reason. A meta refresh needs no inline script.
             token = service.auth.issue_session(subject=identity.user)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.send_header(
-                "Set-Cookie",
-                f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; "
-                f"Path=/; Max-Age={service.auth.session_seconds}")
+            body = (b"<!doctype html><meta charset='utf-8'>"
+                    b"<meta http-equiv='refresh' content='0;url=/'>"
+                    b"<title>Signed in</title><a href='/'>Continue to ROMarr</a>")
             # Clear the flow cookies: they are single-use and a stale verifier
             # left in the jar would only ever confuse the next login.
-            for name in (COOKIE_VERIFIER, COOKIE_STATE, COOKIE_NONCE):
-                self.send_header("Set-Cookie",
-                                 f"{name}=; HttpOnly; SameSite=Lax; Path=/; "
-                                 "Max-Age=0")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            cleared = [("Set-Cookie", f"{name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+                       for name in (COOKIE_VERIFIER, COOKIE_STATE, COOKIE_NONCE)]
+            self._send(200, body, "text/html; charset=utf-8",
+                       [("Cache-Control", "no-store"),
+                        ("Set-Cookie", _session_cookie(token, service.auth.session_seconds)), *cleared])
             log.info("oidc sign-in: %s", identity.user)
             return None
 
@@ -9511,6 +9985,18 @@ def make_handler(service: ROMarr):
                     month=(query.get("month") or [""])[0],
                     day=(query.get("day") or [""])[0],
                     limit=int((query.get("limit") or ["200"])[0] or 200)))
+            if route.path == "/api/v1/discover/platform":
+                def _int(name: str, default: int) -> int:
+                    try:
+                        return int((query.get(name) or [str(default)])[0] or default)
+                    except ValueError:
+                        return default
+                return self._json(200, service.discover_platform(
+                    (query.get("platform") or [""])[0],
+                    sort=(query.get("sort") or ["popular"])[0] or "popular",
+                    query=(query.get("q") or [""])[0],
+                    page=_int("page", 1), limit=_int("limit", 40),
+                    provider=(query.get("provider") or [""])[0]))
             if route.path == "/api/v1/discover":
                 return self._json(200, metadata_discover(
                     service.store.list_items("metadata_providers"),
@@ -9742,7 +10228,9 @@ def make_handler(service: ROMarr):
             if route.path == "/api/v1/collection":
                 return self._json(200, service.collection_status())
             if route.path == "/api/v1/collection/source":
-                return self._json(200, service.collection_source_torrents())
+                query = parse_qs(route.query or "")
+                include_all = (query.get("all") or [""])[0].lower() in ("1", "true", "yes")
+                return self._json(200, service.collection_source_torrents(include_all))
             if route.path == "/api/v1/openapi.json":
                 return self._json(200, openapi_spec(VERSION))
             if route.path == "/api/v1/metadataprovider":
@@ -10045,6 +10533,9 @@ def make_handler(service: ROMarr):
                 out = service.connect_steam(steam_id)
                 body = (f"<h2>Steam connected</h2><p>{out['message']}</p>"
                         "<p><a href='/#lists'>Back to Lists</a></p>"
+                        # A page, not a redirect: Steam started this
+                        # navigation, so only a hop our page starts carries
+                        # the Strict session cookie (as /oidc/callback, #235).
                         "<script>location.replace('/#lists')</script>")
                 return self._send(200, body.encode(),
                                   "text/html; charset=utf-8")
@@ -10087,6 +10578,8 @@ def make_handler(service: ROMarr):
                 return self._json(200, hub.igir_status())
             if route.path == "/api/v1/hub/exo2romm":
                 return self._json(200, hub.exo2romm_status())
+            if route.path == "/api/v1/hub/compressatorium":
+                return self._json(200, _compressatorium_status(service))
             if route.path == "/api/v1/hub/fleet":
                 return self._json(200, hub.fleet_profiles())
             if route.path == "/api/v1/mcp":
@@ -10107,6 +10600,7 @@ def make_handler(service: ROMarr):
                                         "sandboxed": confined,
                                         "sandbox_detail": why,
                                         "archive_org_auth": hub.archive_org_auth_status(),
+                                        "compressatorium": _compressatorium_status(service),
                                         "flaresolverr_configured": bool(hub.flaresolverr_url()),
                                         "searchable_plugins": searchable,
                                         # The Plugins page says out loud what
@@ -10932,6 +11426,19 @@ def make_handler(service: ROMarr):
                     "ok": got.ok, "url": got.url, "host": got.host,
                     "reason": got.reason,
                 })
+            if route.path == "/api/v1/hub/compressatorium":
+                from . import compressatorium_plugin
+                payload = body if isinstance(body, dict) else {}
+                url = payload.get("url")
+                api_key = payload.get("api_key")
+                if (url is not None and not isinstance(url, str)) or \
+                        (api_key is not None and not isinstance(api_key, str)):
+                    return self._json(400, {"ok": False,
+                                            "error": "url and api_key must be strings"})
+                result = compressatorium_plugin.configure(
+                    url=url, api_key=api_key,
+                    clear_api_key=payload.get("clear_api_key") is True)
+                return self._json(200 if result.get("ok") else 400, result)
             if route.path == "/api/v1/hub/archive-org/auth":
                 payload = body if isinstance(body, dict) else {}
                 result = hub.archive_org_auth_configure(
@@ -10964,7 +11471,9 @@ def make_handler(service: ROMarr):
                 platform = (body.get("platform") or "").strip()
                 if not game or not platform:
                     return self._json(400, {"error": "game and platform are required"})
-                return self._json(200, service.request(game, platform))
+                if "parts" in body and not isinstance(body["parts"], list):
+                    return self._json(400, {"error": "parts must be a list"})
+                return self._json(200, service.request(game, platform, parts=body.get("parts")))
             # Integration API: the request asset API external platforms poll.
             # POST: accept a request from an external game platform and start
             # the same search + grab pipeline the native button uses.
@@ -11009,9 +11518,11 @@ def make_handler(service: ROMarr):
                     return self._json(400, {"error": "monitored and search must be booleans"})
                 if len(game) > 200:
                     return self._json(400, {"error": "game must be at most 200 characters"})
+                if "parts" in body and not isinstance(body["parts"], list):
+                    return self._json(400, {"error": "parts must be a list"})
                 return self._json(200, service.add_wanted(
                     game, platform, monitored=bool(body.get("monitored", True)),
-                    search=bool(body.get("search"))))
+                    search=bool(body.get("search")), parts=body.get("parts")))
             if route.path == "/api/v1/wanted/monitor":
                 game = str(body.get("game") or "").strip()
                 platform = resolve(str(body.get("platform") or ""))
@@ -11330,8 +11841,14 @@ def make_handler(service: ROMarr):
     return Handler
 
 
+def _compressatorium_status(service) -> dict:
+    """The Compressatorium card's state; never the API key itself."""
+    from . import compressatorium_plugin
+    return compressatorium_plugin.status(service._env)
+
+
 def serve(port: int = 6868, env: dict[str, str] | None = None):
-    service = ROMarr(env)
+    service = ROMarr(env, defer_dats=True)
     # Reconcile integration rows that were mid-dispatch when the server
     # died: if the external platform still wants them, reset to searching
     # and re-dispatch; if it doesn't, mark them cancelled.
@@ -11339,6 +11856,14 @@ def serve(port: int = 6868, env: dict[str, str] | None = None):
         service.store.recover_seerr_dispatches()
     except Exception:
         log.exception("integration recovery skipped (non-fatal)")
+
+    # Plugins ROMarr ships with are installed once, the first time ROM Hub is
+    # available; never again, so one the operator disabled stays disabled.
+    try:
+        from . import compressatorium_plugin
+        compressatorium_plugin.preinstall_in_background()
+    except Exception:
+        log.exception("plugin preinstall skipped (non-fatal)")
 
     bind_env = env if env is not None else os.environ
     host = str(bind_env.get("ROMARR_HOST") or "0.0.0.0")
@@ -11366,4 +11891,6 @@ def serve(port: int = 6868, env: dict[str, str] | None = None):
 
     log.info("ROMarr listening on %s://%s:%d, library=%s",
              scheme, host, port, service.library)
+    if service.load_dats_in_background():
+        log.info("loading DATs in the background; verification waits for them")
     httpd.serve_forever()

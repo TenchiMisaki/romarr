@@ -38,6 +38,38 @@ def test_retry_reruns_the_request_and_drops_the_stale_row(tmp_path, monkeypatch)
     assert all(q.detail != "no usable release" for q in s.queue)
 
 
+def test_retry_preserves_saved_package_parts_without_a_wanted_row(tmp_path, monkeypatch):
+    s = svc(tmp_path)
+    s.queue = [QueueItem("Bloodborne", "ps4", "", 0, "failed",
+                         parts=["update", "dlc"])]
+    called = {}
+
+    def fake_request(game, platform, *, parts=None):
+        called.update(game=game, platform=platform, parts=parts)
+        return {"ok": True}
+
+    monkeypatch.setattr(s, "request", fake_request)
+    assert s.queue_action(0, "retry")["ok"]
+    assert called == {"game": "Bloodborne", "platform": "ps4",
+                      "parts": ["update", "dlc"]}
+
+
+def test_retry_prefers_current_wanted_parts_over_stale_queue_parts(tmp_path, monkeypatch):
+    s = svc(tmp_path)
+    s.store.want("Bloodborne", "ps4", parts=("base", "dlc"))
+    s.queue = [QueueItem("Bloodborne", "ps4", "", 0, "failed",
+                         parts=["update"])]
+    called = {}
+
+    def fake_request(game, platform, *, parts=None):
+        called["parts"] = parts
+        return {"ok": True}
+
+    monkeypatch.setattr(s, "request", fake_request)
+    assert s.queue_action(0, "retry")["ok"]
+    assert called["parts"] == ["base", "dlc"]
+
+
 def test_an_out_of_range_index_is_a_clean_error(tmp_path):
     s = svc(tmp_path)
     assert not s.queue_action(9, "remove")["ok"]

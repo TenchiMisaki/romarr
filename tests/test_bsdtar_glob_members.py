@@ -26,6 +26,15 @@ SCENE = "Metroid Prime REMASTERED [010012101468C000][v0][US].nsp"
 BODY = b"PFS0" + b"\x11" * 4096
 
 
+def test_bsdtar_reports_members_refused_as_unsafe(tmp_path, monkeypatch):
+    source = _BsdtarSource(tmp_path / "archive.7z", "bsdtar")
+    result = subprocess.CompletedProcess([], 0, stdout="../outside.smc\ninside.smc\n")
+    monkeypatch.setattr(source, "_run", lambda *_args, **_kwargs: result)
+
+    assert source.names() == ["inside.smc"]
+    assert source.all_member_names() == ["../outside.smc", "inside.smc"]
+
+
 @pytest.mark.parametrize("name,expected", [
     (SCENE, r"Metroid Prime REMASTERED \[010012101468C000\]\[v0\]\[US\].nsp"),
     ("game [Scene].iso", r"game \[Scene\].iso"),

@@ -31,6 +31,38 @@ def test_a_setting_added_later_gets_its_default(tmp_path):
             assert s.settings[key] == value
 
 
+def test_settle_parts_keeps_newer_requests_added_during_an_import(tmp_path):
+    store = Store(tmp_path / "r.json")
+    store.want("Bloodborne", "ps4", parts=("base", "update"))
+    store.want("Bloodborne", "ps4", parts=("base", "update", "dlc"))
+    store.settle_parts("Bloodborne", "ps4", missing=(), settled=("base",))
+    assert store.wanted[0].parts == ["update", "dlc"]
+
+
+def test_settling_an_old_base_request_does_not_remove_newer_update_only_request(tmp_path):
+    store = Store(tmp_path / "r.json")
+    store.want("Bloodborne", "ps4", parts=("base",))
+    store.want("Bloodborne", "ps4", parts=("update",))
+    store.settle_parts("Bloodborne", "ps4", missing=(), settled=("base",))
+    assert store.wanted[0].parts == ["update"]
+
+
+def test_fulfil_base_removes_only_a_base_only_request(tmp_path):
+    store = Store(tmp_path / "r.json")
+    store.want("Bloodborne", "ps4", parts=("update",))
+    assert not store.fulfil_base("Bloodborne", "ps4")
+    store.want("Bloodborne", "ps4", parts=("base",))
+    assert store.fulfil_base("Bloodborne", "ps4")
+    assert store.wanted == []
+
+
+def test_fulfil_base_settles_base_but_preserves_requested_extras(tmp_path):
+    store = Store(tmp_path / "r.json")
+    store.want("Bloodborne", "ps4", parts=("base", "update", "dlc"))
+    assert store.fulfil_base("Bloodborne", "ps4")
+    assert store.wanted[0].parts == ["update", "dlc"]
+
+
 def test_unknown_settings_are_dropped_rather_than_stored(tmp_path):
     """A typo in a PUT should not become permanent state nothing reads."""
     s = Store(tmp_path / "r.json")
@@ -53,6 +85,14 @@ def test_requesting_the_same_game_twice_is_a_retry_not_a_duplicate(tmp_path):
     s.want("contra", "nes")          # different case, same game
     s.want("Contra", "snes")         # different platform, genuinely different
     assert len(s.wanted) == 2
+
+
+def test_failed_grab_ensure_does_not_replace_an_existing_wanted_selection(tmp_path):
+    store = Store(tmp_path / "r.json")
+    original = store.want("Bloodborne", "ps4", parts=("dlc",))
+    ensured = store.ensure_wanted("Bloodborne", "ps4", parts=("update",))
+    assert ensured is original
+    assert ensured.parts == ["dlc"]
 
 
 def test_an_arrival_clears_the_wanted_entry(tmp_path):

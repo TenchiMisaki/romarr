@@ -13,6 +13,7 @@ that ROMarr's decisions do not change when the service misbehaves.
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -55,7 +56,7 @@ def test_scan_finds_only_decompressable_files(tmp_path):
                  "notes.txt", "F.rvz", "G.cci"):
         (tmp_path / name).write_bytes(b"x")
 
-    found = {p.name for p in decompress.scan_compressed(tmp_path)}
+    found = {p.name for p in [w.source for w in decompress.scan_work(tmp_path)]}
 
     assert found == {"A.chd", "B.7z", "D.nkit.iso", "F.rvz"}
 
@@ -65,7 +66,7 @@ def test_scan_walks_subdirectories(tmp_path):
     (tmp_path / "gba").mkdir()
     (tmp_path / "gba" / "game.gba.zip").write_bytes(b"x")
 
-    assert [p.name for p in decompress.scan_compressed(tmp_path)] == \
+    assert [p.name for p in [w.source for w in decompress.scan_work(tmp_path)]] == \
         ["game.gba.zip"]
 
 
@@ -82,8 +83,9 @@ class FakeClient:
 
     name = "FakeCompressatorium"
 
-    def __init__(self, outputs=None, remote_matches=()):
+    def __init__(self, outputs=None, remote_matches=(), tools=None):
         self.outputs = outputs or {}
+        self.tools = tools
         self.remote_matches = set(remote_matches)
         self.submitted: list[dict] = []
         self._jobs: dict[str, JobResult] = {}
@@ -91,9 +93,13 @@ class FakeClient:
     def reachable(self):
         return True
 
+    def available_tools(self):
+        return self.tools
+
     def submit_job(self, *, file_path, mode, output_dir=None,
                    duplicate_action="skip", delete_on_verify=False):
         self.submitted.append({"file_path": file_path, "mode": mode,
+                               "output_dir": output_dir,
                                "delete_on_verify": delete_on_verify})
         # ROMarr never delegates deletion to the service -- the gate is
         # ROMarr's, and a submit that says otherwise is a bug.
@@ -105,9 +111,22 @@ class FakeClient:
                 job_id=job_id, status="failed", file_path=file_path,
                 error="service could not handle this file")
         else:
+            published = Path(out)
+            if output_dir:
+                target_dir = Path(output_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if published.is_dir():
+                    shutil.copytree(published, target_dir, dirs_exist_ok=True)
+                    published = target_dir
+                elif published.is_file():
+                    target = target_dir / published.name
+                    shutil.copy2(published, target)
+                    published = target
+                else:
+                    published = target_dir / published.name
             self._jobs[job_id] = JobResult(
                 job_id=job_id, status="completed", file_path=file_path,
-                mode=mode, output_path=str(out))
+                mode=mode, output_path=str(published))
         return JobResult(job_id=job_id, status="queued", file_path=file_path)
 
     def job_status(self, job_id):
@@ -153,8 +172,12 @@ def library(tmp_path):
     source = games / "TestGame.gba.zip"
     source.write_bytes(b"fake zip bytes")
     output = games / "TestGame.gba"
+    service_dir = tmp_path / "service-output"
+    service_dir.mkdir()
+    service_output = service_dir / output.name
     return {
         "root": games, "source": source, "output": output,
+        "service_output": service_output,
         "content": content, "hashes": hashes,
         "dats": _dat_index_for("TestGame.gba", hashes),
     }
@@ -177,8 +200,8 @@ def _patch_client(monkeypatch, client):
 # ------------------------------------------------------- the happy path --
 
 def test_verified_output_allows_deletion(library, monkeypatch):
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -190,8 +213,8 @@ def test_verified_output_allows_deletion(library, monkeypatch):
 
 
 def test_without_the_flag_nothing_is_deleted(library, monkeypatch):
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=False)
@@ -210,8 +233,8 @@ def test_unknown_output_keeps_the_original(library, monkeypatch):
     index could not protect. A different size too, not just different bytes:
     same-size-wrong-hash is the BAD_DUMP case, covered next.
     """
-    library["output"].write_bytes(b"a" * 5000)  # no DAT entry at this size
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(b"a" * 5000)  # no DAT entry at this size
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -225,8 +248,8 @@ def test_unknown_output_keeps_the_original(library, monkeypatch):
 def test_bad_dump_keeps_the_original_and_fails_loudly(library, monkeypatch):
     """Right size, wrong bytes: corrupt or tampered. Kept, and reported."""
     # Same length as the DAT entry, different content -> BAD_DUMP verdict.
-    library["output"].write_bytes(bytes(reversed(library["content"])))
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(bytes(reversed(library["content"])))
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
@@ -245,8 +268,8 @@ def test_empty_dat_index_never_deletes(library, monkeypatch):
     must degrade to "extracted, kept everything" rather than "extracted,
     deleted everything it could not check".
     """
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = decompress.run_batch(
@@ -262,8 +285,8 @@ def test_empty_dat_index_never_deletes(library, monkeypatch):
 
 def test_no_dats_at_all_never_deletes(library, monkeypatch):
     """dats=None -- verification skipped entirely -- deletion stays shut."""
-    library["output"].write_bytes(library["content"])
-    client = FakeClient({str(library["source"]): library["output"]})
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = decompress.run_batch(
@@ -275,21 +298,37 @@ def test_no_dats_at_all_never_deletes(library, monkeypatch):
     assert library["source"].exists()
 
 
-def test_remote_match_verifies_what_local_hashes_cannot(library, monkeypatch):
-    """CHD/Dolphin outputs: the container's file hash matches no DAT of its
-    contents, and the service's embedded-hash matching is the second opinion
-    that answers instead."""
-    library["output"].write_bytes(b"container bytes, not the DAT payload")
+def test_remote_match_cannot_authorize_source_deletion(library, monkeypatch):
+    """A service identification response is insufficient destructive proof."""
+    library["service_output"].write_bytes(b"container bytes, not the DAT payload")
     client = FakeClient(
-        {str(library["source"]): library["output"]},
+        {str(library["source"]): library["service_output"]},
         remote_matches={str(library["output"])})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, delete_originals=True)
     d = report.to_dict()
 
-    assert d["verified"] == 1 and d["deleted"] == 1, d
-    assert not library["source"].exists()
+    assert d["deleted"] == 0 and d["kept"] == 1, d
+    assert library["source"].exists()
+
+
+def test_outputs_are_reverified_before_source_deletion(library, monkeypatch):
+    library["service_output"].write_bytes(library["content"])
+    client = FakeClient({str(library["source"]): library["service_output"]})
+    _patch_client(monkeypatch, client)
+    original_verify = decompress._verify_outputs
+
+    def verify_then_mutate(files, dats, service):
+        result = original_verify(files, dats, service)
+        library["output"].write_bytes(b"changed after verification")
+        return result
+
+    monkeypatch.setattr(decompress, "_verify_outputs", verify_then_mutate)
+    report = _run(library, client, delete_originals=True)
+
+    assert report.deleted == 0 and report.kept == 1
+    assert library["source"].exists(), "changed outputs must retain the source"
 
 
 # ------------------------------------------------------------ failure modes --
@@ -335,7 +374,7 @@ def test_no_url_is_an_error_not_a_crash(tmp_path):
 
 
 def test_dry_run_submits_nothing(library, monkeypatch):
-    client = FakeClient({str(library["source"]): library["output"]})
+    client = FakeClient({str(library["source"]): library["service_output"]})
     _patch_client(monkeypatch, client)
 
     report = _run(library, client, dry_run=True, delete_originals=True)
@@ -353,4 +392,4 @@ def test_a_nup_is_never_decompression_work(tmp_path):
     assert mode_for("Game.nup") == ""
     (tmp_path / "Game.nup").write_bytes(b"NUP\x01")
 
-    assert decompress.scan_compressed(tmp_path) == []
+    assert [w.source for w in decompress.scan_work(tmp_path)] == []

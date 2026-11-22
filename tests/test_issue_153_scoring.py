@@ -406,6 +406,8 @@ def test_every_supported_platform_accepts_its_own_names_and_markers(platform):
     sample_size = max(16 * MB, min(platform.max_size // 2, 100 * MB)) if platform.is_disc else min(platform.max_size // 2, 1 * MB)
     labels = {platform.name, platform.slug, *platform.aliases, *platform.native_markers}
     for label in sorted(labels):
+        if platform.slug == "switch-2" and label.casefold() in {"eshop", "nsp", "xci", "nup"}:
+            continue  # These markers are shared with Switch 1 and cannot prove Switch 2.
         rel = _torrent(f"Crystal Quest ({label}) (USA)", sample_size, seeders=10)
         verdict = judge(rel, "Crystal Quest", platform)
         assert verdict.accepted, (

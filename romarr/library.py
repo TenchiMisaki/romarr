@@ -16,7 +16,9 @@ from __future__ import annotations
 from .import_duplicates import duplicate_reason, stream_sha1
 from .tar_archive import TAR_SUFFIXES, TarSource, is_tar_name
 from .switch_attach import ATTACH_PLATFORMS, attach_dir as switch_attach_dir, is_real_directory_chain
+from . import game_packages
 
+import contextlib
 import json
 import logging
 import errno
@@ -32,7 +34,7 @@ import zipfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .dat import BAD_DUMP, UNKNOWN, VERIFIED, Match, hash_bytes, hash_stream
 from .platforms import Platform, resolve, romm_fs_slug
@@ -274,6 +276,7 @@ class ImportResult:
     import_method: str = ""
     fallback_reason: str = ""
     sha1: str = ""
+    physical_sha1: str = ""
 
 
 def is_safe_name(name: str, root: Path) -> bool:
@@ -288,6 +291,23 @@ def is_safe_name(name: str, root: Path) -> bool:
         return False
     root_resolved = root.resolve()
     return (root_resolved / name).resolve().is_relative_to(root_resolved)
+
+
+#: File and folder names archivers and NAS boxes leave beside the payload.
+#: They are not part of a game and do not make an archive multi-file.
+_CLUTTER_NAMES = frozenset({
+    "__macosx", ".ds_store", "thumbs.db", "desktop.ini", "@eadir",
+    ".@__thumb", "#recycle", ".appledouble",
+})
+
+
+def is_clutter(member: str) -> bool:
+    """Whether an archive member is OS/NAS clutter rather than game data."""
+    for part in PurePosixPath(str(member).replace("\\", "/")).parts:
+        lowered = part.lower()
+        if lowered in _CLUTTER_NAMES or lowered.startswith("._"):
+            return True
+    return False
 
 
 def safe_members(archive: zipfile.ZipFile, root: Path) -> list[str]:
@@ -322,6 +342,14 @@ class _Source:
         """Release temporary archive state when this source owns any."""
         return None
 
+    @contextlib.contextmanager
+    def session(self):
+        """Keep this source's reader open for a run of operations.
+
+        A no-op by default; a ZIP reuses one reader inside a session.
+        """
+        yield self
+
     def names(self) -> list[str]:
         raise NotImplementedError
 
@@ -331,6 +359,14 @@ class _Source:
 
     def read(self, name: str) -> bytes | None:
         raise NotImplementedError
+
+    def head(self, name: str, size: int) -> bytes | None:
+        """The first `size` bytes of a member, or None when that is not cheap.
+
+        Only a file already on disk answers; an archive member would have to
+        be extracted, so archives fall back to what the names say.
+        """
+        return None
 
     def copy(self, name: str, destination: Path) -> None:
         raise NotImplementedError
@@ -353,23 +389,61 @@ class _ZipSource(_Source):
         self.prefer_hardlinks = False
         self.last_transfer = ("copy", "")
         self.transfers = {}
+        self._archive = None
+        self._sessions = 0
+
+    @contextlib.contextmanager
+    def session(self):
+        # Inside a session one reader serves every operation: opening a
+        # ZipFile re-parses the central directory, so an open per member made
+        # extracting a large archive cost (members x entries). Outside one,
+        # each call opens and closes its own reader, so a directory import
+        # holding many sources never holds a file open per archive.
+        self._sessions += 1
+        try:
+            yield self
+        finally:
+            self._sessions -= 1
+            if self._sessions == 0:
+                self.close()
+
+    @contextlib.contextmanager
+    def _reader(self):
+        if self._archive is not None:
+            yield self._archive
+        elif self._sessions:
+            self._archive = zipfile.ZipFile(self.path)
+            yield self._archive
+        else:
+            with zipfile.ZipFile(self.path) as archive:
+                yield archive
+
+    def close(self) -> None:
+        archive, self._archive = self._archive, None
+        if archive is not None:
+            archive.close()
 
     def names(self):
-        with zipfile.ZipFile(self.path) as archive:
+        with self._reader() as archive:
             return safe_members(archive, self.path.parent)
 
+    def all_member_names(self) -> list[str]:
+        """Every file entry, including any `names()` refuses as unsafe."""
+        with self._reader() as archive:
+            return [n for n in archive.namelist() if not n.endswith("/")]
+
     def read(self, name):
-        with zipfile.ZipFile(self.path) as archive:
+        with self._reader() as archive:
             return archive.read(name)
 
     def copy(self, name, destination):
-        with zipfile.ZipFile(self.path) as archive, \
-                archive.open(name) as src, open(destination, "wb") as dst:
+        with self._reader() as archive, archive.open(name) as src, \
+                open(destination, "wb") as dst:
             shutil.copyfileobj(src, dst)
 
     def hash(self, name, suffix=""):
         """Hash one member as it decompresses, a chunk at a time."""
-        with zipfile.ZipFile(self.path) as archive, archive.open(name) as src:
+        with self._reader() as archive, archive.open(name) as src:
             return hash_stream(src, suffix=suffix)
 
 
@@ -431,6 +505,11 @@ class _BsdtarSource(_Source):
         out = self._run(self._list_command(), text=True, encoding=self._list_encoding)
         return [n for n in self._list(out.stdout)
                 if n and not n.endswith("/") and is_safe_name(n, self.path.parent)]
+
+    def all_member_names(self) -> list[str]:
+        """List every file member, including names refused as unsafe."""
+        out = self._run(self._list_command(), text=True, encoding=self._list_encoding)
+        return [n for n in self._list(out.stdout) if n and not n.endswith("/")]
 
     def read(self, name):
         data = self._run(self._extract_command(name)).stdout
@@ -688,6 +767,10 @@ class _PathSource(_Source):
             return target.read_bytes()
         except OSError:
             return None
+
+    def head(self, name, size):
+        """Read the start of a regular file without following a link."""
+        return game_packages.read_head(self.path if self.path.is_file() else self.path / name, size)
 
     def hash(self, name, suffix=""):
         """Hash the file a chunk at a time; None if it can't be opened."""
@@ -1102,6 +1185,23 @@ def _source_for(download: Path, platform: Platform | None = None, *,
     return _PathSource(download, member_paths)
 
 
+def open_archive(first: Path, volumes: list[Path] | None = None) -> _Source:
+    """A reader for one archive file, or for a split RAR set given its volumes.
+
+    One layer only: a zip is read as the zip it is, never unwrapped into the
+    zips inside it, because the batch decompressor writes out what an archive
+    holds rather than choosing ROMs from it. A split RAR set goes to 7-Zip or
+    unar (`_rar_source`); a single archive is opened exactly as the importer
+    opens it (`_source_for`).
+    """
+    if volumes and len(volumes) > 1:
+        return _rar_source(first, list(volumes))
+    if first.suffix.lower() in _STDLIB_ARCHIVES:
+        check_zip_central_directory(first, max_members=MAX_OUTER_ZIP_MEMBERS)
+        return _ZipSource(first)
+    return _source_for(first)
+
+
 def list_candidates(download: Path) -> list[str]:
     """Every file a completed download offers, looking inside an archive if needed."""
     source = _source_for(download)
@@ -1213,6 +1313,53 @@ def _digital_set_name(download: Path) -> str:
     return download.name
 
 
+def package_routes(source, sets, platform, target_dir: Path, title: str,
+                   roles: dict[str, str] | None = None,
+                   requested_title: str = "") -> dict[str, str] | None:
+    """Game-folder destinations for one download's game packages, or None.
+
+    Each package's role (base, update, DLC) comes from the best evidence the
+    platform has (a PS4 header, a Switch/3DS/Wii U title ID) and from its
+    name otherwise; `game_packages` then picks
+    `<Title>/`, `<Title>/update/` or `<Title>/dlc/`. None keeps the flat
+    destination: not a package platform, a multi-file set, more than one base,
+    or a link anywhere between the platform folder and the game folder.
+    `roles` holds the roles a person chose in review, which win.
+    """
+    if platform.slug not in game_packages.PACKAGE_PLATFORMS or not sets:
+        return None
+    if any(group.is_multi_file for group in sets):
+        return None
+    packages = []
+    for group in sets:
+        header = game_packages.header_of(source, platform.slug, group.primary)
+        role, family = game_packages.describe_package(
+            group.primary, platform.slug, header, wanted=requested_title)
+        role = (roles or {}).get(group.primary) or role
+        if role == "additional-game":
+            role = game_packages.BASE   # a second game: never grouped with the first
+        if role not in game_packages.PARTS:
+            return None
+        packages.append((group.primary, role, family))
+    routes = game_packages.plan_game_folder(packages, target_dir, title, platform.slug,
+                                            platform.extensions)
+    if routes is None:
+        return None
+    if not all(is_real_directory_chain(target_dir, target_dir / relative)
+               for relative in set(routes.values())):
+        return None
+    return routes
+
+
+def package_title(download: Path, game_title: str = "") -> str:
+    """The game-folder title: the request's own name, else the download's."""
+    if game_title.strip():
+        return game_title
+    name = _digital_set_name(download)
+    # A lone package file names its game without the extension.
+    return download.stem if download.is_file() and name == download.name else name
+
+
 def platform_dir(library_root: Path, platform: "Platform | str", *,
                  layout: str = "flat", translation: bool = False,
                  platform_folders=None) -> Path:
@@ -1227,7 +1374,7 @@ def platform_dir(library_root: Path, platform: "Platform | str", *,
     return base
 
 
-def _publish_staged(staged: Path, destination: Path, overwrite: bool) -> None:
+def publish_staged(staged: Path, destination: Path, overwrite: bool) -> None:
     """Publish complete bytes; link gives atomic no-clobber on a shared filesystem."""
     if overwrite:
         os.replace(staged, destination)
@@ -1235,7 +1382,14 @@ def _publish_staged(staged: Path, destination: Path, overwrite: bool) -> None:
         try:
             os.link(staged, destination)
         except OSError as exc:
-            if exc.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS):
+            # Windows reports a denied hard-link operation as
+            # ERROR_ACCESS_DENIED (winerror 5 / errno EACCES) on filesystems
+            # or accounts that do not permit hardlinks. A same-volume rename
+            # still provides atomic, no-clobber publication there.
+            windows_link_unavailable = (
+                os.name == "nt" and getattr(exc, "winerror", None) == 5)
+            if (exc.errno not in (errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS)
+                    and not windows_link_unavailable):
                 raise
             if os.name == "nt":
                 # Windows rename refuses an existing destination atomically.
@@ -1268,7 +1422,11 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
                requested_game: str | None = None, catalog_platforms=None,
                hash_index=None, duplicate_roots=(),
                switch_extras: bool = False,
-               member_paths: list[Path] | None = None) -> list[ImportResult]:
+               member_paths: list[Path] | None = None,
+               package_folders: bool = False, game_title: str = "",
+               package_roles: dict[str, str] | None = None,
+               expected_destinations: dict[str, str] | None = None,
+               previously_imported_paths=()) -> list[ImportResult]:
     """Place every ROM from a finished download into the library.
 
     A cartridge zip may hold several games (a 3-in-1 collection, a bundle)
@@ -1283,6 +1441,10 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
     the physical extension. Multi-file members keep their reference names.
     `switch_extras` files a Switch update or DLC inside its game's folder
     when that game already has one (see switch_attach).
+    `package_folders` files a game's base, update and DLC packages as one
+    game folder named `game_title`,
+    with `update/` and `dlc/` inside it, the layout RomM reads (see
+    `package_routes`). `package_roles` carries roles chosen in review.
     """
     if not download.exists():
         msg = (
@@ -1319,7 +1481,10 @@ def import_rom(download: Path, platform: Platform, library_root: Path, *,
             selected_primaries=selected_primaries, bundle_routes=bundle_routes,
             requested_game=requested_game, catalog_platforms=catalog_platforms,
             hash_index=hash_index, duplicate_roots=duplicate_roots,
-            switch_extras=switch_extras)
+            switch_extras=switch_extras, package_folders=package_folders,
+            game_title=game_title, package_roles=package_roles,
+            expected_destinations=expected_destinations,
+            previously_imported_paths=previously_imported_paths)
     finally:
         source.close()
 
@@ -1332,7 +1497,9 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                             selected_primaries=None, bundle_routes=None,
                             requested_game=None, catalog_platforms=None,
                             hash_index=None, duplicate_roots=(),
-                            switch_extras=False):
+                            switch_extras=False, package_folders=False, game_title="",
+                            package_roles=None, expected_destinations=None,
+                            previously_imported_paths=()):
     """Finish import while the validated source and its scratch ZIPs remain open."""
     if selected_primaries is not None:
         selected = set(selected_primaries)
@@ -1370,6 +1537,14 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
     published_hashes = {}
     planned = []
     attached: dict[Path, Path] = {}
+    folder_routes = None
+    if package_folders and bundle_routes is None:
+        folder_routes = package_routes(
+            source, chosen_sets, platform,
+            platform_dir(library_root, platform, layout=layout, translation=translation,
+                         platform_folders=platform_folders),
+            package_title(download, game_title), roles=package_roles,
+            requested_title=game_title)
     destinations = {}
     file_destinations = {}
     destination_parents = {}
@@ -1389,19 +1564,6 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 verification=verdict))
             continue
 
-        if hash_index is not None and len(hash_index) and not chosen.is_multi_file:
-            try:
-                hashes = source.hash(chosen.primary, suffix="")
-                reason = duplicate_reason(hash_index, (hashes or {}).get("sha1", ""),
-                                          duplicate_roots or (library_root,),
-                                          suffix=Path(chosen.primary).suffix, published=published_hashes)
-            except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
-                results.append(ImportResult(False, None, f"duplicate check failed: {exc}", verification=verdict))
-                continue
-            if reason:
-                results.append(ImportResult(False, None, reason, verification=verdict))
-                continue
-
         target_dir = platform_dir(library_root, platform,
                                   layout=layout, translation=translation,
                                   platform_folders=platform_folders)
@@ -1420,11 +1582,28 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                     results.append(ImportResult(False, None, "invalid reviewed destination; review the bundle again"))
                     continue
                 destination = target_dir / relative
+            elif folder_routes is not None:
+                # A reviewed import keeps the name the person confirmed; a DAT
+                # rename would write somewhere the review never showed.
+                name = (Path(chosen.primary.replace("\\", "/")).name
+                        if package_roles else destination.name)
+                destination = target_dir / folder_routes[chosen.primary] / name
+                attached[destination] = target_dir
+            # Libraries without RomM game folders still attach Switch extras
+            # to a game folder that already exists.
             elif switch_extras and platform.slug in ATTACH_PLATFORMS:
-                attach = switch_attach_dir(Path(chosen.primary).name, target_dir)
+                attach = switch_attach_dir(
+                    Path(chosen.primary.replace("\\", "/")).name, target_dir)
                 if attach is not None:
                     destination = attach / destination.name
                     attached[destination] = target_dir
+        if expected_destinations is not None:
+            expected = expected_destinations.get(chosen.primary)
+            if expected is None or Path(expected) != destination:
+                results.append(ImportResult(
+                    False, destination,
+                    "actual import destination differs from the reviewed destination; review the bundle again"))
+                continue
         destination_keys = {Path(str(destination).casefold())}
         if not chosen.is_multi_file and bundle_routes is not None:
             destination_keys.add(Path(str(destination.parent.resolve() / destination.name).casefold()))
@@ -1446,6 +1625,11 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 destination_parents[parent] = chosen.primary
         planned.append((chosen, verdict, destination))
 
+    if expected_destinations is not None and (
+            results or {group.primary for group, _, _ in planned} != set(expected_destinations)):
+        return [ImportResult(False, None,
+                             "could not reproduce the complete reviewed import plan; review the bundle again")]
+
     for chosen, verdict, destination in planned:
         if isinstance(source, _PathSource):
             source.transfers = {}
@@ -1462,8 +1646,40 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 continue
             name = destination.name
             if destination.exists() and (not overwrite or destination.stat().st_size == 0):
+                if str(destination) in previously_imported_paths and destination.is_file():
+                    physical_sha1 = ""
+                    try:
+                        source_hashes = source.hash(chosen.primary, suffix=destination.suffix)
+                        with destination.open("rb") as published:
+                            existing_sha1 = hash_stream(published, suffix=destination.suffix)["sha1"]
+                            published.seek(0)
+                            physical_sha1 = stream_sha1(published)
+                    except OSError as exc:
+                        results.append(ImportResult(
+                            False, destination,
+                            f"previously imported output could not be verified: {exc}",
+                            verification=verdict))
+                        continue
+                    if source_hashes and source_hashes.get("sha1") == existing_sha1:
+                        results.append(ImportResult(
+                            True, destination, verification=verdict, sha1=existing_sha1,
+                            physical_sha1=physical_sha1,
+                            import_method="already-published-for-this-queue-item"))
+                        continue
                 results.append(ImportResult(False, destination, _existing_destination(destination)))
                 continue
+            if hash_index is not None and len(hash_index) and not chosen.is_multi_file:
+                try:
+                    hashes = source.hash(chosen.primary, suffix="")
+                    reason = duplicate_reason(hash_index, (hashes or {}).get("sha1", ""),
+                                              duplicate_roots or (library_root,),
+                                              suffix=Path(chosen.primary).suffix, published=published_hashes)
+                except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
+                    results.append(ImportResult(False, destination, f"duplicate check failed: {exc}", verification=verdict))
+                    continue
+                if reason:
+                    results.append(ImportResult(False, destination, reason, verification=verdict))
+                    continue
             try:
                 with tempfile.TemporaryDirectory(prefix=".romarr-import-", dir=target_dir) as staging:
                     staged = Path(staging) / name
@@ -1497,7 +1713,7 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                         if reason:
                             results.append(ImportResult(False, destination, reason, verification=verdict))
                             continue
-                    _publish_staged(staged, destination, overwrite)
+                    publish_staged(staged, destination, overwrite)
             except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
                 results.append(ImportResult(False, destination, f"copy/extraction or publication failed: {exc}"))
                 continue
@@ -1591,7 +1807,7 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 for name in written:
                     final = destination / name
                     final.parent.mkdir(parents=True, exist_ok=True)
-                    _publish_staged(staged_dir / name, final, overwrite)
+                    publish_staged(staged_dir / name, final, overwrite)
         except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
             results.append(ImportResult(False, destination, f"set copy/extraction or publication failed: {exc}; reconcile any completed members before retrying"))
             continue

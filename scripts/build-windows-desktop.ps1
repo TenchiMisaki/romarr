@@ -9,7 +9,7 @@ Python, ROM Hub, MinGit, .NET and a fixed WebView2 runtime ship in the package.
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$Version = '1.11.4',
+    [string]$Version = '1.11.6',
     [string]$PythonPath = 'python',
     [string]$StoreIdentityName = 'MoveWeight.ROMarr.Desktop',
     [string]$StorePublisher = 'CN=MoveWeight',
@@ -66,8 +66,19 @@ function Get-VerifiedDownload([string]$Url, [string]$Destination, [string]$Sha25
 
 & $PythonPath -c 'import sys; assert sys.version_info[:2] == (3,13), "Build with Python 3.13 to match the bundled interpreter"'
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.13 build environment is required.' }
-$dotnetVersion = & dotnet --version
-if ($LASTEXITCODE -ne 0 -or $dotnetVersion -notmatch '^10\.') { throw '.NET 10 SDK is required.' }
+# Ask which SDKs are installed rather than parsing `dotnet --version`, whose
+# output intermittently failed the check on CI runners with the .NET 10 SDK
+# present. On failure, print what dotnet said so the next one is diagnosable.
+$env:DOTNET_NOLOGO = '1'
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+$dotnetSdks = @(& dotnet --list-sdks 2>&1 | ForEach-Object { "$_" })
+$dotnetExit = $LASTEXITCODE
+if ($dotnetExit -ne 0 -or -not ($dotnetSdks | Where-Object { $_ -match '^10\.' })) {
+    Write-Host "dotnet --list-sdks exited $dotnetExit with:"
+    $dotnetSdks | ForEach-Object { Write-Host "  $_" }
+    Write-Host ("dotnet --version: " + ((& dotnet --version 2>&1 | ForEach-Object { "$_" }) -join ' | '))
+    throw '.NET 10 SDK is required.'
+}
 
 # Read the official fixed-runtime API, then retain the verified pinned runtime.
 # Older fixed builds may age out of the API while their official URL remains.
@@ -161,8 +172,20 @@ try {
     foreach ($image in $iconImages) { $writer.Write($image) }
 } finally { $writer.Dispose(); $iconStream.Dispose() }
 
-& dotnet publish (Join-Path $repo 'desktop\windows\ROMarr.Desktop.csproj') --configuration Release --runtime win-x64 --self-contained true --output $bundle "-p:Version=$Version" "-p:InformationalVersion=$Version" '-p:DebugType=None' '-p:DebugSymbols=false' "-p:ApplicationIcon=$iconPath"
-if ($LASTEXITCODE -ne 0) { throw 'The native desktop application did not publish.' }
+Push-Location $repo
+try {
+    # Resolve the SDK and publish from the same directory so global.json, when
+    # present, selects the same SDK for both commands.
+    $dotnetVersion = (@(& dotnet --version 2>&1 | ForEach-Object { "$_" }) -join '').Trim()
+    $dotnetVersionExit = $LASTEXITCODE
+    if ($dotnetVersionExit -ne 0 -or $dotnetVersion -notmatch '^10\.') {
+        throw "Could not identify the .NET 10 SDK selected for publish (exit $dotnetVersionExit; output '$dotnetVersion')."
+    }
+    & dotnet publish (Join-Path $repo 'desktop\windows\ROMarr.Desktop.csproj') --configuration Release --runtime win-x64 --self-contained true --output $bundle "-p:Version=$Version" "-p:InformationalVersion=$Version" '-p:DebugType=None' '-p:DebugSymbols=false' "-p:ApplicationIcon=$iconPath"
+    if ($LASTEXITCODE -ne 0) { throw 'The native desktop application did not publish.' }
+} finally {
+    Pop-Location
+}
 if (-not (Test-Path -LiteralPath (Join-Path $bundle 'ROMarr.exe'))) { throw 'ROMarr.exe is missing.' }
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination (Join-Path $bundle 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination (Join-Path $bundle 'README.md')

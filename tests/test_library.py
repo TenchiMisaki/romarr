@@ -1,3 +1,4 @@
+import ctypes
 import logging
 import os
 import stat
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from romarr.indexers import Prowlarr, sanitise_for_display
+from romarr import library as library_module
 from romarr.library import import_rom as _import_rom, list_candidates, map_remote_path, safe_members
 from romarr.platforms import by_slug
 from romarr.selection import Release
@@ -28,6 +30,22 @@ def import_rom(*args, **kwargs):
 
 
 SNES = by_slug("snes")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows hard-link fallback")
+def test_staged_publication_falls_back_when_windows_denies_hardlinks(tmp_path, monkeypatch):
+    staged = tmp_path / "staged"
+    destination = tmp_path / "published"
+    staged.write_bytes(b"complete payload")
+
+    def denied_hardlink(*_args, **_kwargs):
+        raise ctypes.WinError(5)
+
+    monkeypatch.setattr(library_module.os, "link", denied_hardlink)
+    library_module.publish_staged(staged, destination, overwrite=False)
+
+    assert destination.read_bytes() == b"complete payload"
+    assert not staged.exists()
 
 
 def make_zip(path, names):

@@ -126,7 +126,7 @@ def test_partial_import_never_cleans_source_or_fulfils_request(tmp_path, monkeyp
     assert not result[0]["ok"] and result[0]["reason"] == "failed second ROM"
     assert item.state == "import-failed"
     assert not removed and not updated and not rescanned and not reconciled
-    assert not item.imported_paths
+    assert item.imported_paths == [str(root / "first.gb")]
     assert source.read_bytes() == b"payload"
 
 
@@ -143,10 +143,10 @@ def test_destination_without_hardlink_support_still_publishes_safely(tmp_path, m
     monkeypatch.setattr(library.os, "link", unsupported)
     if collision:
         with pytest.raises(FileExistsError):
-            library._publish_staged(staged, dest, False)
+            library.publish_staged(staged, dest, False)
         assert dest.read_bytes() == b"previous"
     else:
-        library._publish_staged(staged, dest, False)
+        library.publish_staged(staged, dest, False)
         assert dest.read_bytes() == b"complete"
 
 
