@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
+import requests
+
 from . import hub, preinstalled_plugins
 from .mdm import MDM_CATEGORIES, _is_loopback_host
 
@@ -206,13 +208,13 @@ def _validated(config: dict) -> tuple[dict, str]:
 def _remote_origin(url: str) -> tuple[str, str, int] | None:
     """Compare the destination of stored credentials across URL edits."""
     try:
-        parts = urlsplit(url)
+        parts = urlsplit(requests.Request("GET", url).prepare().url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             return None
         default_port = 443 if parts.scheme == "https" else 80
         port = parts.port
-        return parts.scheme, parts.hostname.casefold(), default_port if port is None else port
-    except ValueError:
+        return parts.scheme, parts.hostname, default_port if port is None else port
+    except (ValueError, requests.RequestException):
         return None
 
 

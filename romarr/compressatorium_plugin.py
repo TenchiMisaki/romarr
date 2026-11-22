@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
+import requests
+
 from . import hub, preinstalled_plugins
 from .preinstalled_plugins import (  # noqa: F401 - part of this module's API
     DEFAULT_BUNDLED_DIR,
@@ -120,16 +122,16 @@ def _valid_url(url: str) -> str:
 def _origin(url: str) -> tuple[str, str, int | None] | None:
     """Normalize the credential destination for service-origin comparisons."""
     try:
-        parts = urlsplit(url)
+        parts = urlsplit(requests.Request("GET", url).prepare().url)
         if not parts.scheme or not parts.hostname:
             return None
         port = parts.port
-    except ValueError:
+    except (ValueError, requests.RequestException):
         return None
     scheme = parts.scheme.casefold()
     if port is None:
         port = 443 if scheme == "https" else 80 if scheme == "http" else None
-    return scheme, parts.hostname.casefold(), port
+    return scheme, parts.hostname, port
 
 
 def configure(*, url: str | None = None, api_key: str | None = None,

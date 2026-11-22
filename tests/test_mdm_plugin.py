@@ -261,6 +261,14 @@ def test_plain_http_is_allowed_to_this_machine(installed):
     assert mp.settings(home=installed).remote_url == "http://127.0.0.1:8463"
 
 
+def test_remote_origin_matches_transport_hostname_normalization():
+    """Normalize DNS case and ports without conflating distinct IDNA hosts."""
+    assert mp._remote_origin("https://EXAMPLE.test:443/path") == mp._remote_origin(
+        "https://example.test")
+    assert mp._remote_origin("https://straße.example") != mp._remote_origin(
+        "https://strasse.example")
+
+
 def test_configure_needs_the_plugin(home):
     assert mp.configure(mode="cli", home=home) == {
         "ok": False, "error": "Install the Mister Download Manager (direct downloads) plugin first"}
