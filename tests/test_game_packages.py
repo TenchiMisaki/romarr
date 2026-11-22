@@ -980,3 +980,74 @@ def test_a_playstation_serial_is_evidence_for_its_own_console_only(slug, accepte
     release = Release("The Last of Us Remastered [CUSA00552]", 0, 0, (1000,), "https://nzb.example/get/1", "usenet")
     verdict = judge(release, GAME, resolve(slug))
     assert verdict.accepted is accepted, verdict.why()
+
+
+def test_switch_extra_only_ids_do_not_count_as_base_for_ranking():
+    base = rel("Bayonetta 2 [01007960049A0000] Switch", seeders=1)
+    update = rel("Bayonetta 2 [01007960049A0800] [01007960049A0800] Switch",
+                 seeders=100)
+    dlc = rel("Bayonetta 2 [01007960049A1000] [01007960049A1000] Switch",
+              seeders=200)
+
+    assert held_parts(update.title, "Bayonetta 2", "switch") == {"update"}
+    assert held_parts(dlc.title, "Bayonetta 2", "switch") == {"dlc"}
+    assert best_release([update, base], "Bayonetta 2", resolve("switch"),
+                        parts=("base",)) is base
+    assert best_release([dlc, base], "Bayonetta 2", resolve("switch"),
+                        parts=("base",)) is base
+
+
+def test_snes_headered_previously_imported_output_survives_indexed_retry(tmp_path):
+    body = b"z" * 32768
+    payload = b"\x00" * 512 + body
+    download = tmp_path / "downloads"
+    download.mkdir()
+    source = make(download, "Patch Quest.smc", payload)
+    library = tmp_path / "library"
+    first, = import_rom(source, resolve("snes"), library)
+    assert first.ok
+    destination = first.destination
+    duplicate = make(library, "snes/duplicate.smc", body)
+
+    class ExistingIndex:
+        def __len__(self):
+            return 1
+
+        def by_sha1(self, sha1):
+            return SimpleNamespace(path=str(duplicate), platform="snes")
+
+    retried, = import_rom(source, resolve("snes"), library,
+                          hash_index=ExistingIndex(),
+                          previously_imported_paths=[str(destination)])
+    assert retried.ok
+    assert retried.import_method == "already-published-for-this-queue-item"
+
+
+def test_retry_destination_read_error_is_reported_and_other_output_continues(
+        tmp_path, monkeypatch):
+    download = tmp_path / "downloads"
+    download.mkdir()
+    make(download, "A.smc", b"a" * 32768)
+    make(download, "B.smc", b"b" * 32768)
+    library = tmp_path / "library"
+    first = import_rom(download, resolve("snes"), library)
+    first_paths = {Path(result.destination).name: result.destination for result in first}
+    retry_path = first_paths["A.smc"]
+    next_path = first_paths["B.smc"]
+    Path(next_path).unlink()
+
+    original_open = Path.open
+
+    def fail_recorded_destination(path, *args, **kwargs):
+        if path == retry_path and args and args[0] == "rb":
+            raise OSError("simulated destination read failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_recorded_destination)
+    retried = import_rom(download, resolve("snes"), library,
+                         previously_imported_paths=[str(retry_path)])
+
+    failed = next(result for result in retried if result.destination == retry_path)
+    continued = next(result for result in retried if result.destination == next_path)
+    assert not failed.ok and "could not be verified" in failed.reason
+    assert continued.ok

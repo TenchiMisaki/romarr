@@ -475,3 +475,17 @@ def test_reconcile_does_not_cache_when_member_hash_returns_none(tmp_path, monkey
     assert second["count"] == 1
     assert s.store.wanted == []
     assert attempts["n"] == 2
+
+
+def test_reconcile_hashes_marker_title_before_role_inference(tmp_path):
+    dat = dat_for("Patch Quest")
+    service = svc(tmp_path, dat)
+    folder = tmp_path / "roms" / "win"
+    folder.mkdir(parents=True)
+    (folder / "Patch Quest.exe").write_bytes(BODY)
+    service.store.want("Patch Quest", "win")
+
+    result = service.reconcile_platform("win")
+
+    assert result["count"] == 1
+    assert service.store.wanted == []

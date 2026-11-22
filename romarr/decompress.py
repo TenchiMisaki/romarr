@@ -266,25 +266,37 @@ def plan(work: Work) -> DecompressItem:
 
 # ----------------------------------------------------------- verification --
 
-def _output_files(output_path: str) -> list[str]:
-    """Every regular file a job produced.
+def _output_files(output_path: str, published_files=()) -> list[str]:
+    """Every regular file the job explicitly published.
 
-    `output_path` is a file for disc-image conversions (CHD -> cue/bin/iso)
-    and a directory for archive extractions (7z -> its contents), so both
-    shapes are walked the same way.
+    Directory outputs are enumerated inside that job directory. A file-shaped
+    CUE/GDI output may include tracks only when the service explicitly returns
+    them in the same job's output_files list; adjacent files alone are not proof.
     """
     if not output_path:
         return []
     out = Path(output_path)
     if out.is_file():
         files = [out]
+        job_root = out.parent.resolve()
+        if not isinstance(published_files, (list, tuple)):
+            published_files = ()
+        for value in published_files:
+            if not isinstance(value, (str, Path)):
+                continue
+            candidate = Path(value)
+            if not candidate.is_file():
+                continue
+            resolved = candidate.resolve()
+            try:
+                resolved.relative_to(job_root)
+            except ValueError:
+                return []
+            files.append(candidate)
     elif out.is_dir():
         files = [p for p in out.rglob("*") if p.is_file()]
     else:
         return []
-    # A service may identify only the .cue/.gdi output path even though the
-    # disc is a set. Include every referenced track and refuse the whole set
-    # if the descriptor is unreadable, empty, unsafe, or names a missing file.
     expanded = {p.resolve() for p in files}
     sheets = [p for p in files if p.suffix.casefold() in (".cue", ".gdi")]
     for sheet in sheets:
@@ -531,7 +543,8 @@ def _record_job(item: DecompressItem, status: JobResult | None,
         item.error = "job vanished from the service"
         report.failed += 1
     elif status.status == COMPLETED:
-        item.output_files = _output_files(status.output_path)
+        item.output_files = _output_files(status.output_path,
+                                          getattr(status, "output_files", ()))
         if not item.output_files:
             item.status = "failed"
             item.error = "completed job produced no usable output files"

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from romarr import decompress, decompress_local, library
+from romarr.compressatorium import CompressatoriumClient
 from romarr.dat import Dat, DatIndex, Game, Rom, hash_bytes
 from tests.test_decompress import FakeClient
 
@@ -607,3 +608,30 @@ def test_listing_outside_a_session_keeps_no_archive_open(tmp_path):
     for source in sources:
         assert source.names() == ["a.bin"]
         assert source._archive is None
+
+
+def test_service_file_cue_accepts_only_explicit_published_tracks(tmp_path):
+    cue = tmp_path / "Game.cue"
+    track = tmp_path / "Track 01.bin"
+    track.write_bytes(DISC_1)
+    cue.write_text('FILE "Track 01.bin" BINARY\n')
+
+    assert decompress._output_files(
+        str(cue), published_files=[str(cue), str(track)]) == sorted([
+            str(cue.resolve()), str(track.resolve())])
+    assert decompress._output_files(str(cue)) == []
+
+
+def test_compressatorium_job_preserves_explicit_output_files():
+    class Response:
+        ok = True
+
+        def json(self):
+            return {"id": "job-1", "status": "completed",
+                    "output_path": "/library/Game.cue",
+                    "output_files": ["/library/Game.cue", "/library/Track.bin"]}
+
+    job = CompressatoriumClient._parse_job(None, Response())
+
+    assert job.output_path == "/library/Game.cue"
+    assert job.output_files == ("/library/Game.cue", "/library/Track.bin")

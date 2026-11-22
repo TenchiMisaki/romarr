@@ -5072,11 +5072,11 @@ class ROMarr:
                 if not path.is_file():
                     continue
                 try:
-                    if imported_role(path, platform_slug=platform_slug) != _BASE:
-                        continue
                     for hashes in self._reconcile_file_hashes(path, platform):
                         match = self.dats.lookup(**hashes)
-                        if match.status == _VERIFIED and match.game:
+                        if (match.status == _VERIFIED and match.game
+                                and imported_role(path, game=match.game,
+                                                  platform_slug=platform_slug) == _BASE):
                             verified_titles.add(match.game)
                 except Exception:  # noqa: BLE001 - one bad file must not stop it
                     continue
@@ -9340,8 +9340,7 @@ class ROMarr:
                     self._settle_parts(
                         queue_item, platform, outcomes,
                         PendingParts(asked, wanted.monitored), wanted_game=wanted.game)
-                if not any(w.game.casefold() == queue_item.game.casefold()
-                           for w in matched_wanted):
+                if not matched_wanted:
                     self._settle_parts(queue_item, platform, outcomes, pending)
                 # Close the aliasing gap on this platform: drop wanted titles
                 # that are already present and verified in the library but were

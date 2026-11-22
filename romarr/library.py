@@ -1563,19 +1563,6 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 verification=verdict))
             continue
 
-        if hash_index is not None and len(hash_index) and not chosen.is_multi_file:
-            try:
-                hashes = source.hash(chosen.primary, suffix="")
-                reason = duplicate_reason(hash_index, (hashes or {}).get("sha1", ""),
-                                          duplicate_roots or (library_root,),
-                                          suffix=Path(chosen.primary).suffix, published=published_hashes)
-            except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
-                results.append(ImportResult(False, None, f"duplicate check failed: {exc}", verification=verdict))
-                continue
-            if reason:
-                results.append(ImportResult(False, None, reason, verification=verdict))
-                continue
-
         target_dir = platform_dir(library_root, platform,
                                   layout=layout, translation=translation,
                                   platform_folders=platform_folders)
@@ -1658,10 +1645,17 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                 continue
             name = destination.name
             if destination.exists() and (not overwrite or destination.stat().st_size == 0):
-                if str(destination) in previously_imported_paths:
-                    source_hashes = source.hash(chosen.primary, suffix=destination.suffix)
-                    with destination.open("rb") as published:
-                        existing_sha1 = stream_sha1(published)
+                if str(destination) in previously_imported_paths and destination.is_file():
+                    try:
+                        source_hashes = source.hash(chosen.primary, suffix=destination.suffix)
+                        with destination.open("rb") as published:
+                            existing_sha1 = hash_stream(published, suffix=destination.suffix)["sha1"]
+                    except OSError as exc:
+                        results.append(ImportResult(
+                            False, destination,
+                            f"previously imported output could not be verified: {exc}",
+                            verification=verdict))
+                        continue
                     if source_hashes and source_hashes.get("sha1") == existing_sha1:
                         results.append(ImportResult(
                             True, destination, verification=verdict, sha1=existing_sha1,
@@ -1669,6 +1663,18 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                         continue
                 results.append(ImportResult(False, destination, _existing_destination(destination)))
                 continue
+            if hash_index is not None and len(hash_index) and not chosen.is_multi_file:
+                try:
+                    hashes = source.hash(chosen.primary, suffix="")
+                    reason = duplicate_reason(hash_index, (hashes or {}).get("sha1", ""),
+                                              duplicate_roots or (library_root,),
+                                              suffix=Path(chosen.primary).suffix, published=published_hashes)
+                except (OSError, ValueError, zipfile.BadZipFile, RuntimeError, subprocess.SubprocessError) as exc:
+                    results.append(ImportResult(False, destination, f"duplicate check failed: {exc}", verification=verdict))
+                    continue
+                if reason:
+                    results.append(ImportResult(False, destination, reason, verification=verdict))
+                    continue
             try:
                 with tempfile.TemporaryDirectory(prefix=".romarr-import-", dir=target_dir) as staging:
                     staged = Path(staging) / name

@@ -418,7 +418,17 @@ def held_parts(title: str, wanted: str, platform_slug: str) -> frozenset[str]:
         families = {base_tid_of(tid) for tid in ids}
         if len(families) == 1 and len(ids) > 1:
             id_parts = {classify_tid(tid) for tid in ids} & set(PARTS)
-            return frozenset(set(parts) | id_parts)
+            # Multiple IDs in one family can all be update or DLC IDs. The
+            # plain-title fallback in release_parts() includes BASE by default,
+            # so keep it only when an ID or explicit combined-pack evidence says
+            # the release also contains the base game.
+            markers = _markers(str(title or "").lower(), wanted)
+            explicit_combined = bool(_BASE_RE.search(str(title or "").lower())
+                                     or any(joined for _, _, joined in markers))
+            covered = set(parts)
+            if BASE not in id_parts and not explicit_combined:
+                covered.discard(BASE)
+            return frozenset(covered | id_parts)
     by_id = identify(title, platform_slug)[1]
     return frozenset({by_id}) if by_id and len(parts) == 1 else parts
 
