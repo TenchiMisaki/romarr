@@ -96,6 +96,13 @@ def clean(root, expected):
         for args in (("rev-parse", "HEAD"), ("status", "--porcelain", "--untracked-files=all")):
             values.append(subprocess.check_output(["git", "-C", str(root), *args],
                 env=env, stderr=subprocess.DEVNULL, text=True, timeout=15).strip())
+        if values[0] != expected:
+            print("Checkout verification: HEAD differs from pinned revision.")
+        if values[1]:
+            entries = values[1].splitlines()
+            tracked = sum(not entry.startswith("?? ") for entry in entries)
+            print(f"Checkout verification: {tracked} tracked changes, "
+                  f"{len(entries) - tracked} untracked entries.")
         return values == [expected, ""]
     except (OSError, subprocess.SubprocessError):
         return False
