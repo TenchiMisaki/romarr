@@ -32,6 +32,7 @@ Routes:
 from __future__ import annotations
 
 import inspect
+import dataclasses
 import json
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -2624,6 +2625,9 @@ class ROMarr:
             if not row.get("title"):
                 continue
             plugin_slug = str(row.get("plugin") or "")
+            if plugin_slug in hub.NON_GAME_PLUGINS:
+                # Guides, videos, mods and tools are not the game.
+                continue
             extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
             is_minerva = plugin_slug == "minerva-archive"
             magnet = str(row.get("magnet") or "")
@@ -2667,8 +2671,8 @@ class ROMarr:
                 title=row["title"],
                 size=int(row.get("size_bytes") or 0),
                 seeders=0,
-                # A plugin result is a game by definition -- it came from a
-                # ROM source. 1000 is the console range the scorer accepts;
+                # A result from a game source (NON_GAME_PLUGINS are skipped
+                # above) is a game. 1000 is the console range the scorer accepts;
                 # inventing a category would make `is_game_release` reject
                 # every row the Hub returned.
                 categories=(1000,),
@@ -2950,6 +2954,15 @@ class ROMarr:
         except ValueError as err:
             return {"ok": False, "error": str(err)}
         client = pick_client(pick.protocol, self.clients)
+        if client is None and getattr(pick, "mirrors", ()):
+            # A Hydra row offers its other links too: with no client for the
+            # magnet, a mirror the file-host route can fetch still gets it.
+            route = pick_client("hoster", self.clients)
+            if route is not None:
+                pick = dataclasses.replace(pick, protocol="hoster",
+                                           download_url=pick.mirrors[0],
+                                           mirrors=tuple(pick.mirrors[1:]))
+                client = route
         if client is None:
             # Not the release's fault -- blocklisting it here would punish a
             # perfectly good torrent because the operator has not set up a
@@ -3045,6 +3058,15 @@ class ROMarr:
                         else (getattr(client, "last_error", "")
                               or f"{client_label} did not confirm the torrent")
                     )
+        elif getattr(client, "protocol", "") == "hoster":
+            # Every link the source listed, best first: a file host no route
+            # can take falls through to the next instead of failing the grab.
+            ok = client.add(pick.download_url, name=pick.title,
+                            mirrors=getattr(pick, "mirrors", ()))
+            download_id = client.last_job_id if ok else ""
+            release_fault = False
+            if not ok:
+                failure_detail = client.last_error or failure_detail
         else:
             ok, download_id = hand_off_with_id(client, pick.download_url,
                                                name=pick.title)
@@ -4566,6 +4588,10 @@ class ROMarr:
                 log.warning("%s failed_jobs() failed: %s", name, err)
         return jobs
 
+    #: qBittorrent states for a torrent that is waiting its turn or was paused
+    #: by the operator -- not stalled, whatever its age (see below).
+    _WAITING_TORRENT_STATES = frozenset({"queuedDL", "pausedDL", "stoppedDL"})
+
     def _is_download_active_or_complete(self, row: QueueItem) -> bool:
         """Return True if a download client reports `row` is completed or actively transferring (#108).
 
@@ -4606,6 +4632,17 @@ class ROMarr:
                             return True
                         dlspeed = int(item.get("dlspeed", 0) or 0)
                         state = str(item.get("state") or "")
+                        # Waiting, not dead. With queueing on, qBittorrent
+                        # holds every torrent past `max_active_downloads` (4
+                        # by default) in queuedDL, and one the operator
+                        # paused sits in pausedDL/stoppedDL. Neither has had
+                        # a chance to download, so the grab's age says
+                        # nothing about the release: retiring them after the
+                        # stall timeout blocklisted and deleted 2,240 queued
+                        # torrents on one install.
+                        if state in self._WAITING_TORRENT_STATES:
+                            row.waited_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            return True
                         if dlspeed > 0 or state in (
                             "downloading", "forcedDL", "checkingDL",
                             "checkingUP", "allocating", "moving",
@@ -4652,13 +4689,29 @@ class ROMarr:
 
     @staticmethod
     def _row_age_minutes(row, now) -> float | None:
-        """How long this row has been waiting, or None if it will not say."""
+        """How long this row has been eligible to download, or None if it will not say.
+
+        Measured from the grab, or from the last time a client reported the
+        download waiting in its queue or paused, whichever is later: a
+        torrent that waited out the whole stall timeout behind qBittorrent's
+        active-download limit must not be retired the moment it starts.
+        """
         try:
             stamped = datetime.fromisoformat(row.at)
         except (TypeError, ValueError):
             return None
         if stamped.tzinfo is None:
             stamped = stamped.replace(tzinfo=timezone.utc)
+        waited = getattr(row, "waited_at", "") or ""
+        if waited:
+            try:
+                left = datetime.fromisoformat(waited)
+            except (TypeError, ValueError):
+                left = None
+            if left is not None:
+                if left.tzinfo is None:
+                    left = left.replace(tzinfo=timezone.utc)
+                stamped = max(stamped, left)
         return (now - stamped).total_seconds() / 60.0
 
     def unblock(self, entry_id: str) -> bool:
@@ -10123,12 +10176,27 @@ def make_handler(service: ROMarr):
                 items = [redact_indexer(i)
                          for i in service.store.list_items("indexers")]
                 proxied, err = [], None
-                try:
-                    proxied = service.prowlarr.indexers()
-                except Exception as exc:
-                    err = str(exc)
+                prowlarr_cfg = getattr(service.prowlarr, "_config", None)
+                if str(getattr(prowlarr_cfg, "base_url", "") or "").strip():
+                    try:
+                        proxied = service.prowlarr.indexers()
+                    except Exception as exc:
+                        # A sentence, not a Python exception: the card shows it.
+                        log.warning("prowlarr indexer list failed: %s", exc)
+                        err = ("Prowlarr did not answer. Check its address and API key "
+                               "under Indexers.")
                 return self._json(200, {"items": items, "proxied": proxied,
                                         "error": err})
+            if route.path == "/api/v1/hydra/library":
+                from .hydra import library_sources
+
+                try:
+                    rows = library_sources(query=(query.get("q") or [""])[0][:100])
+                except Exception as err:
+                    return self._json(502, {"items": [], "error":
+                                            f"library.hydra.wiki did not answer "
+                                            f"({type(err).__name__})"})
+                return self._json(200, {"items": rows})
             if route.path == "/api/v1/downloadclient":
                 return self._json(200, {"items": service.download_clients()})
             if route.path == "/api/v1/downloadclient/schema":
