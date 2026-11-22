@@ -326,7 +326,9 @@ def test_a_match_the_service_could_not_work_out_is_reported_and_kept(tmp_path, m
 
     source = tmp_path / "Game.rvz"
     source.write_bytes(b"x")
-    output = tmp_path / "Game.iso"
+    service_dir = tmp_path / "service-fixture"
+    service_dir.mkdir()
+    output = service_dir / "Game.iso"
     output.write_bytes(UNLISTED)
     client = FakeClient({str(source): output})
     client.match_file = lambda path: MatchResult(
