@@ -110,3 +110,9 @@ def test_the_webhook_secret_is_a_declared_masked_field():
     from romarr.app import MASKED_ITEM_FIELDS
     assert "secret" in notify.NOTIFIERS["webhook"]["fields"]
     assert "secret" in MASKED_ITEM_FIELDS["connections"]
+
+def test_signed_webhook_requires_https_before_sending(wire):
+    calls, _ = wire
+    assert not notify._webhook(hook(url="http://hook.test/in", secret="s" * 20),
+                               Message(ON_GRAB, "test"))
+    assert calls == []
