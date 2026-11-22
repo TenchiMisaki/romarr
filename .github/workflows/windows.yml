@@ -75,33 +75,34 @@ jobs:
           }
           function Stop-Native($Process) {
             if (-not $Process) { return }
-            $owned = [Collections.Generic.List[Diagnostics.Process]]::new()
-            $owned.Add($Process)
             if (-not $Process.HasExited) {
-              # Retain handles before taskkill so restart waits for Python too.
-              $snapshot = @(Get-CimInstance Win32_Process)
-              $parents = @($Process.Id)
-              while ($parents.Count) {
-                $children = @($snapshot | Where-Object { $_.ParentProcessId -in $parents })
-                $parents = @($children | ForEach-Object { $_.ProcessId })
-                foreach ($child in $children) {
-                  $handle = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
-                  if ($handle) { $owned.Add($handle) }
-                }
-              }
               & taskkill.exe /PID $Process.Id /T /F | Out-Null
               $killCode = $LASTEXITCODE
               if ($killCode -ne 0 -and -not $Process.HasExited) {
                 throw "Could not stop the owned launcher tree (taskkill $killCode)."
               }
-            }
-            foreach ($handle in $owned) {
-              if (-not $handle.WaitForExit(10000)) {
-                throw "Owned process $($handle.Id) did not exit before restart."
+              if (-not $Process.WaitForExit(10000)) {
+                throw "Launcher process $($Process.Id) did not exit after taskkill."
               }
-              $handle.Refresh()
-              if (-not $handle.HasExited) { throw "Owned process $($handle.Id) is still running." }
             }
+            # Confirm the actual service listener is released before restarting.
+            # Child process handles can outlive the server briefly on Windows 3.11.
+            $stablePasses = 0
+            for ($attempt = 1; $attempt -le 60; $attempt++) {
+              $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+              if ($listeners.Count -eq 0) {
+                $stablePasses++
+                if ($stablePasses -ge 2) {
+                  Write-Host "PASS: ROMarr listener stopped after $attempt checks."
+                  return
+                }
+              } else {
+                $stablePasses = 0
+                Write-Host "WAIT: listener still active; attempt $attempt/60."
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "ROMarr listener on port $port did not stop within 30 seconds."
           }
           $process = $null
           try {
