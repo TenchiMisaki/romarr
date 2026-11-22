@@ -276,6 +276,7 @@ class ImportResult:
     import_method: str = ""
     fallback_reason: str = ""
     sha1: str = ""
+    physical_sha1: str = ""
 
 
 def is_safe_name(name: str, root: Path) -> bool:
@@ -1646,10 +1647,13 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
             name = destination.name
             if destination.exists() and (not overwrite or destination.stat().st_size == 0):
                 if str(destination) in previously_imported_paths and destination.is_file():
+                    physical_sha1 = ""
                     try:
                         source_hashes = source.hash(chosen.primary, suffix=destination.suffix)
                         with destination.open("rb") as published:
                             existing_sha1 = hash_stream(published, suffix=destination.suffix)["sha1"]
+                            published.seek(0)
+                            physical_sha1 = stream_sha1(published)
                     except OSError as exc:
                         results.append(ImportResult(
                             False, destination,
@@ -1659,6 +1663,7 @@ def _import_rom_from_source(source, candidates, chosen_sets, download, platform,
                     if source_hashes and source_hashes.get("sha1") == existing_sha1:
                         results.append(ImportResult(
                             True, destination, verification=verdict, sha1=existing_sha1,
+                            physical_sha1=physical_sha1,
                             import_method="already-published-for-this-queue-item"))
                         continue
                 results.append(ImportResult(False, destination, _existing_destination(destination)))

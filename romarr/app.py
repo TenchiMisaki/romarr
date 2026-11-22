@@ -6750,7 +6750,8 @@ class ROMarr:
         return {"hash_index": index, "duplicate_roots": tuple(dict.fromkeys(roots))}
 
     def _index_hash(self, verdict, platform: str, fallback: str,
-                    destination=None, *, sha1: str = "") -> None:
+                    destination=None, *, sha1: str = "",
+                    physical_sha1: str = "") -> None:
         """Record an imported file's hash, if verification produced one.
 
         Import is where new ROMs arrive, so without this the index only ever
@@ -6758,8 +6759,9 @@ class ROMarr:
         acquisition pipeline did its job.
         """
         rom = getattr(verdict, "rom", None)
-        physical_sha1 = str(sha1 or "")
-        sha1 = str(getattr(rom, "sha1", "") or physical_sha1)
+        provided_sha1 = str(sha1 or "")
+        physical_sha1 = str(physical_sha1 or provided_sha1)
+        sha1 = str(getattr(rom, "sha1", "") or provided_sha1 or physical_sha1)
         if not sha1:
             return
         from .dat import VERIFIED
@@ -9261,9 +9263,11 @@ class ROMarr:
             fulfils_base = not (queue_item and queue_item.import_intent.get("existing_game"))
             for outcome in outcomes:
                 if outcome.ok:
-                    if outcome.sha1:
-                        self._index_hash(outcome.verification, platform.slug, game_title,
-                                         outcome.destination, sha1=outcome.sha1)
+                    if outcome.sha1 or outcome.physical_sha1:
+                        self._index_hash(
+                            outcome.verification, platform.slug, game_title,
+                            outcome.destination, sha1=outcome.sha1,
+                            physical_sha1=outcome.physical_sha1)
                     self.store.record(Event(kind="imported", game=game_title,
                                             platform=platform.slug, release=name,
                                             library=label,

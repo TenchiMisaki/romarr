@@ -1,4 +1,5 @@
 """PS4 base game, update and DLC: release classification, scoring and game folders."""
+import hashlib
 import json
 import sys
 import threading
@@ -986,7 +987,7 @@ def test_switch_extra_only_ids_do_not_count_as_base_for_ranking():
     base = rel("Bayonetta 2 [01007960049A0000] Switch", seeders=1)
     update = rel("Bayonetta 2 [01007960049A0800] [01007960049A0800] Switch",
                  seeders=100)
-    dlc = rel("Bayonetta 2 [01007960049A1000] [01007960049A1000] Switch",
+    dlc = rel("Bayonetta 2 [01007960049A1001] [01007960049A1001] Switch",
               seeders=200)
 
     assert held_parts(update.title, "Bayonetta 2", "switch") == {"update"}
@@ -1021,6 +1022,8 @@ def test_snes_headered_previously_imported_output_survives_indexed_retry(tmp_pat
                           previously_imported_paths=[str(destination)])
     assert retried.ok
     assert retried.import_method == "already-published-for-this-queue-item"
+    assert retried.sha1 != retried.physical_sha1
+    assert retried.physical_sha1 == hashlib.sha1(payload).hexdigest()
 
 
 def test_retry_destination_read_error_is_reported_and_other_output_continues(
