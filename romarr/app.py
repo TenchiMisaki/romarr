@@ -188,6 +188,7 @@ MASKED_ITEM_FIELDS = {
     "connections": ("url", "urls", "token", "password", "key", "secret"),
     "import_lists": LIST_SECRETS,
 }
+SERVER_OWNED_SETTINGS = ("chat_agent", "cloud_storage")
 _SECRET_KEY_WORDS = ("secret", "password", "token", "passkey", "api_key", "apikey")
 
 
@@ -860,6 +861,10 @@ class ROMarr:
             nightly.git_checkout_revision(startup_install)
             if startup_install.kind == "git" else "")
         self._collection_lock = threading.RLock()
+        # One set pass at a time. The scheduler and the page's "Run next"
+        # button both step batches; without this two passes could take the
+        # same slice and request every title in it twice.
+        self._collection_batch_lock = threading.RLock()
         self._probe_lock = threading.Lock()
         self._inflight_probes: dict[int, tuple[object, threading.Event, dict[str, object]]] = {}
         # Background sweeps overlap, and client I/O happens before the queue row
@@ -1208,6 +1213,20 @@ class ROMarr:
                 return float(self.store.settings.get(key) or 0) * 3600
             return read
 
+        # Cloud storage (romarr/cloud_storage.py, cloud_jobs.py). Built here so
+        # file-host accounts are registered for grabs before anyone opens the
+        # page; rclone itself starts only on first use.
+        from .cloud_storage import CloudStorage
+        from .cloud_jobs import CloudJobs
+        self.cloud = CloudStorage(self)
+        self.cloud_jobs = CloudJobs(self.cloud, self)
+        import atexit
+        atexit.register(self._cloud_close)
+        try:
+            self.cloud_jobs.automount()
+        except Exception:                          # noqa: BLE001 - never fatal
+            log.warning("cloud automount did not start", exc_info=True)
+
         self.scheduler = Scheduler()
         self.scheduler.add("SoundtrackTorrents", "Add finished soundtrack torrents to RomM",
                            lambda: 30 if self._soundtracks_watching() else 0,
@@ -1231,6 +1250,20 @@ class ROMarr:
             lambda: (900 if self.store.settings.get(
                 "blocklist_failed_downloads", True) else 0),
             lambda: self.retire_dead_downloads()["message"])
+        # A set queued on the Collections page used to sit at 0% until someone
+        # pressed "Run next" for every slice -- 380 presses for a 1,900-title
+        # set. One slice per interval keeps the original promise (a set is
+        # not more important than the indexers' other traffic) without
+        # needing a person at the keyboard. Off when nothing is queued.
+        self.scheduler.add(
+            "CollectionSets", "Work through queued collection sets",
+            lambda: (60 * self._collection_interval_minutes()
+                     if self._collection_batches_active() else 0),
+            lambda: self.collection_tick()["message"])
+        self.scheduler.add(
+            "CloudJobs", "Run scheduled cloud storage jobs",
+            lambda: 60 if self.cloud_jobs.scheduled() else 0,
+            lambda: self.cloud_jobs.tick())
         self.scheduler.add(
             "ListSync", "Sync import lists into Wanted",
             _hours("list_sync_interval_hours"),
@@ -2141,9 +2174,11 @@ class ROMarr:
             if (isinstance(patch[key], str) and patch[key] == SECRET_MASK
                     and any(t in key.lower() for t in _SECRET_KEY_WORDS)):
                 patch[key] = self.store.settings.get(key, "")
-        if "chat_agent" in patch:
-            # A settings save echoes this masked; /api/v1/chat/config is where it changes.
-            patch["chat_agent"] = self.store.settings.get("chat_agent", {})
+        # Settings owned by their own endpoints (/api/v1/chat/config,
+        # /api/v1/cloud/*): a settings save echoes them, and must not rewrite them.
+        for key in SERVER_OWNED_SETTINGS:
+            if key in patch:
+                patch[key] = self.store.settings.get(key, {})
         return patch
 
 
@@ -2156,6 +2191,14 @@ class ROMarr:
                 self._reports_manager = FileReports(lambda: self.library, self.store.path.parent,
                     lambda: dict(self.store.settings), self._env, version=VERSION)
             return self._reports_manager
+
+    def _cloud_close(self) -> None:
+        """Unmount cloud mounts and stop rclone when ROMarr exits."""
+        try:
+            self.cloud_jobs.unmount_all()
+            self.cloud.close()
+        except Exception:                          # noqa: BLE001 - exiting anyway
+            pass
 
     def setup_status(self) -> dict:
         """A quick setup checklist, without probing services or returning secrets."""
@@ -5357,6 +5400,22 @@ class ROMarr:
 
         from .collections import Batch, BATCH_PENDING
 
+        # Every title in a set is requested for ONE platform. With none, the
+        # request has nowhere to go: each one failed as "unknown platform"
+        # and the batch still read 100% done. Default to the DAT's own
+        # platform, and refuse plainly when that cannot be worked out.
+        dat_name, dat_error = self._loaded_dat_name(str(dat_name or ""))
+        if dat_error:
+            return {"error": dat_error}
+        platform = str(platform or "").strip()
+        if not platform:
+            platform = self._dat_platform(dat_name)
+        chosen = resolve(platform) if platform else None
+        if chosen is None:
+            return {"error": "pick the platform this DAT is for before "
+                             "requesting a set; ROMarr could not work it "
+                             "out from the DAT's name"}
+        platform = chosen.slug
         plan = self.collection_plan(dat_name, platform, **policy_kw)
         if plan.get("error"):
             return plan
@@ -5379,6 +5438,10 @@ class ROMarr:
         other traffic. Draining the queue in one pass would also mean losing
         the lot if the process stopped halfway.
         """
+        with self._collection_batch_lock:
+            return self._collection_step(batch_id)
+
+    def _collection_step(self, batch_id: str) -> dict:
         from .collections import BATCH_DONE, BATCH_PAUSED, BATCH_RUNNING
 
         batches = self._batches()
@@ -5388,21 +5451,90 @@ class ROMarr:
         if batch.status == BATCH_PAUSED:
             return {"paused": True, **batch.progress()}
 
+        if not resolve(batch.platform or ""):
+            guess = self._dat_platform(batch.dat)
+            if guess:
+                batch.platform = guess
         batch.status = BATCH_RUNNING
         for name in batch.take():
+            if not resolve(batch.platform or ""):
+                batch.record(name, ok=False,
+                             reason="this set has no platform; cancel it and "
+                                    "request it again with a platform chosen")
+                continue
             try:
-                self.request(name, batch.platform)
-                batch.record(name, ok=True)
+                # The same once-only handoff RSS and the Wanted sweep use: a
+                # title already queued, downloading or awaiting import review
+                # (from any path, or another set) is not handed off again.
+                result = self._automatic_request(name, batch.platform)
             except Exception as err:  # noqa: BLE001 - one title must not stop the set
                 batch.record(name, ok=False,
                              reason=f"{err.__class__.__name__}: {err}")
+                continue
+            # `request` reports most failures in its result rather than
+            # raising. Counting those as done showed a set as complete when
+            # nothing had been grabbed.
+            if isinstance(result, dict) and result.get("skipped"):
+                # Already on its way. Counted as requested, never as failed.
+                batch.record(name, ok=True)
+                continue
+            if isinstance(result, dict) and result.get("ok") is False:
+                reason = str(result.get("error") or "request failed")
+                if reason.startswith("no usable release"):
+                    # `request` put the title on Wanted; say so, because
+                    # "failed" alone reads as "dropped".
+                    reason += " (kept on Wanted; the Wanted search retries it)"
+                batch.record(name, ok=False, reason=reason)
+            else:
+                batch.record(name, ok=True)
         if not batch.queue:
             batch.status = BATCH_DONE
         self.store.put_item("batches", batch.to_dict())
         self.store.save()
         return batch.progress()
 
+    #: Minutes between scheduled set passes when the setting is absent.
+    COLLECTION_INTERVAL_MINUTES = 10
+
+    def _collection_interval_minutes(self) -> int:
+        """Minutes between scheduled set passes (setting, at least 1)."""
+        try:
+            value = int(self.store.settings.get("collection_batch_interval_minutes")
+                        or self.COLLECTION_INTERVAL_MINUTES)
+        except (TypeError, ValueError):
+            value = self.COLLECTION_INTERVAL_MINUTES
+        return max(1, value)
+
+    def _collection_batches_active(self) -> bool:
+        """Whether any queued set still has titles to request."""
+        from .collections import BATCH_PENDING, BATCH_RUNNING
+        return any(raw.get("queue") and raw.get("status") in (BATCH_PENDING, BATCH_RUNNING)
+                   for raw in self.store.list_items("batches"))
+
+    def collection_tick(self) -> dict:
+        """One scheduled pass: the next slice of every set that is not paused."""
+        from .collections import BATCH_PENDING, BATCH_RUNNING
+        stepped, requested, failed = 0, 0, 0
+        for batch in list(self._batches().values()):
+            if batch.status not in (BATCH_PENDING, BATCH_RUNNING) or not batch.queue:
+                continue
+            before_done, before_failed = len(batch.done), len(batch.failed)
+            after = self.collection_step(batch.id)
+            if after.get("error") or after.get("paused"):
+                continue
+            stepped += 1
+            requested += max(0, int(after.get("done", 0)) - before_done)
+            failed += max(0, int(after.get("failed", 0)) - before_failed)
+        if not stepped:
+            return {"stepped": 0, "message": "no collection set is queued"}
+        return {"stepped": stepped, "requested": requested, "failed": failed,
+                "message": f"{stepped} set(s): {requested} requested, {failed} failed"}
+
     def collection_control(self, batch_id: str, action: str) -> dict:
+        with self._collection_batch_lock:
+            return self._collection_control(batch_id, action)
+
+    def _collection_control(self, batch_id: str, action: str) -> dict:
         from .collections import BATCH_PAUSED, BATCH_PENDING
 
         batches = self._batches()
@@ -5425,9 +5557,47 @@ class ROMarr:
         self.store.save()
         return batch.progress()
 
+    def _loaded_dat_name(self, dat_name: str) -> tuple[str, str]:
+        """The loaded DAT a set will use, as (name, error).
+
+        `collection_plan` falls back to the first loaded DAT when the name is
+        empty. A NAMED DAT that is not loaded must not take that fallback: the
+        platform would be inferred from the requested name while the titles
+        came from a different system's DAT.
+        """
+        names = self.dat_names()
+        if dat_name:
+            if dat_name in names:
+                return dat_name, ""
+            return "", (f"DAT {dat_name!r} is not loaded; pick one of the "
+                        "loaded DATs")
+        if not names:
+            return "", ("no DAT loaded. Point DAT_PATH at a No-Intro or "
+                        "Redump directory, or add one under Settings.")
+        return names[0], ""
+
+    def _dat_platform(self, dat_name: str) -> str:
+        """The platform slug a DAT most likely covers, or "" (a UI default)."""
+        from .collections import platform_for_dat
+        catalog = self.store.settings.get("dat_catalog_platforms")
+        return platform_for_dat(dat_name, catalog if isinstance(catalog, dict) else None)
+
+    #: How many failure reasons each batch row carries to the page. Enough
+    #: to see the pattern ("no usable release" forty times); the full list
+    #: stays in the store for Retry failed.
+    _BATCH_FAILURES_SHOWN = 20
+
     def collection_status(self) -> dict:
-        return {"batches": [b.progress() for b in self._batches().values()],
-                "dats": self.dat_names()}
+        dats = self.dat_names()
+        return {"batches": [
+                    {**b.progress(),
+                     "failures": [{"title": name, "reason": reason}
+                                  for name, reason in
+                                  list(b.failed.items())[:self._BATCH_FAILURES_SHOWN]]}
+                    for b in self._batches().values()],
+                "dats": dats,
+                "dat_platforms": {name: self._dat_platform(name) for name in dats},
+                "interval_minutes": self._collection_interval_minutes()}
 
     def _is_source_torrent(self, client, row) -> bool:
         """Keep active DAT sources out of ordinary completion and import previews."""
@@ -5561,7 +5731,10 @@ class ROMarr:
         import shutil
         import uuid
 
-        platform = str(platform or "").strip()
+        dat_name, dat_error = self._loaded_dat_name(str(dat_name or ""))
+        if dat_error:
+            return {"error": dat_error}
+        platform = str(platform or "").strip() or self._dat_platform(dat_name)
         if not platform:
             return {"error": "select a platform before starting source acquisition"}
         selected_platform = resolve(platform)
@@ -9687,6 +9860,21 @@ def make_handler(service: ROMarr):
                 if close is not None:
                     close()
 
+        def _cloud_post(self, path: str, length: int):
+            """POST /api/v1/cloud/*: a bounded JSON body, then cloud storage."""
+            from .cloud_routes import post as cloud_post
+            if length < 0 or length > 65536:
+                self.close_connection = True
+                return self._json(413, {"error": "Cloud request exceeds 64 KiB"})
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "invalid json"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "Send a JSON object"})
+            code, payload = cloud_post(service, path, body)
+            return self._json(code, payload)
+
         def _chat_post(self, path: str, length: int):
             """POST /api/v1/chat*: a bounded JSON body, then the chat agent."""
             from . import chat_agent
@@ -10018,6 +10206,21 @@ def make_handler(service: ROMarr):
             """Serve UI HTML pages and JSON API GET endpoints."""
             route = urlparse(self.path)
             query = parse_qs(route.query)
+            if route.path == "/api/v1/cloud/oauth/callback":
+                from .cloud_routes import oauth_callback
+                ok, message = oauth_callback(service, {k: v[0] for k, v in query.items()})
+                if ok:
+                    self.send_response(302)
+                    self.send_header("Location", "/#cloud")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return None
+                return self._json(400, {"error": message})
+            if route.path == "/api/v1/cloud" or route.path.startswith("/api/v1/cloud/"):
+                from .cloud_routes import get as cloud_get
+                code, payload = cloud_get(service, route.path,
+                                          {k: v[0] for k, v in query.items()})
+                return self._json(code, payload)
 
 
 
@@ -10879,6 +11082,8 @@ def make_handler(service: ROMarr):
             if route.path in ("/api/v1/chat", "/api/v1/chat/confirm", "/api/v1/chat/config",
                               "/api/v1/chat/models", "/api/v1/chat/test"):
                 return self._chat_post(route.path, length)
+            if route.path.startswith("/api/v1/cloud/"):
+                return self._cloud_post(route.path, length)
 
 
 

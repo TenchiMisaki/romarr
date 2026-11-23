@@ -926,6 +926,7 @@ NAV = [
         ('indexers', 'Indexers', None),
         ('clients', 'Download Clients', None),
         ('libraries', 'Libraries', None),
+        ('cloud', 'Cloud & File Hosts', None),
         ('connections', 'Connections', None),
         ('metadata', 'Metadata', None),
         ('setup', 'Setup Guide', None),
@@ -1337,7 +1338,7 @@ function go(pageSpec){
     calendar:'Release Calendar',manualimport:'Manual Import',
     collections:'Collections \u2014 full sets and 1G1R',
     getstarted:'Get Started',setup:'Setup Guide',reports:'Reports & Help',
-    hub:'ROM Hub — Plugins',emulators:'Emulator Hub',portal:'Library & Devices',assistant:'Chat Agent',agents:'AI Agents (MCP)'};
+    hub:'ROM Hub — Plugins',emulators:'Emulator Hub',portal:'Library & Devices',assistant:'Chat Agent',cloud:'Cloud & File Hosts',agents:'AI Agents (MCP)'};
   $('#top h1').textContent=titles[page]||'ROMarr';
   $('#search').classList.toggle('hide', page !== 'library');
   (RENDER[page]||RENDER.library)();
@@ -4025,6 +4026,220 @@ RENDER.assistant=async()=>{
     box.value=''; chatAppend(esc(text),'chat-user'); chatSend('/api/v1/chat',{message:text},version);};
   $('#chat-send').onclick=submit;
   $('#chat-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();}};
+};
+// Cloud & File Hosts (romarr/cloud_storage.py, cloud_jobs.py, premium_hosts.py).
+const CLOUD_GUIDE='https://github.com/BlizzHacker/romarr/blob/main/docs/CLOUD-STORAGE.md';
+let CLOUD_TIMER=null, CLOUD_SIGNIN_TIMER=null, CLOUD_PROVIDERS=null, CLOUD_BROWSE={remote:'',path:''};
+const cloudCur=v=>activePage==='cloud'&&pageVersion===v;
+const cloudPost=(path,body)=>fetch('/api/v1/cloud/'+path,{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(body||{})}).then(async r=>{const d=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error||('HTTP '+r.status)); return d;});
+const cloudBytes=n=>{if(n==null||n==='') return '—'; n=Number(n); const u=['B','KB','MB','GB','TB','PB'];
+  let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (i?n.toFixed(1):n)+' '+u[i];};
+const cloudSay=(id,t,bad)=>{const m=$('#'+id); if(m){m.textContent=t; m.style.color=bad?'var(--bad)':'';}};
+const cloudField=(id,label,val,ph,type)=>`<div class="field"><label for="${id}">${label}</label><input id="${id}" type="${type||'text'}" value="${esc(val||'')}" placeholder="${esc(ph||'')}" autocomplete="off"></div>`;
+function cloudProviderForm(p,showAdv){
+  if(!p||!p.options) return '';
+  return p.options.filter(o=>(showAdv||!o.advanced)&&!['client_id','client_secret'].includes(o.name)).map(o=>{
+    const id='cp-'+o.name, ex=(o.examples||[]).filter(e=>e.value!=='');
+    const label=esc(o.name.replace(/_/g,' '))+(o.required?' *':'')+(o.provider?` <span class="help">(${esc(o.provider.slice(0,40))})</span>`:'');
+    if(o.type==='bool') return `<label class="check"><input type="checkbox" data-opt="${esc(o.name)}" id="${id}"${String(o.default)==='true'?' checked':''}> ${label} <span class="help">${esc(o.help)}</span></label>`;
+    const list=ex.length?`<datalist id="${id}-dl">${ex.map(e=>`<option value="${esc(e.value)}">${esc(e.help)}</option>`).join('')}</datalist>`:'';
+    return `<div class="field"><label for="${id}">${label}</label><input id="${id}" data-opt="${esc(o.name)}" type="${o.secret?'password':'text'}" autocomplete="off" placeholder="${esc(o.default||'')}"${ex.length?` list="${id}-dl"`:''}>${list}<div class="help">${esc(o.help)}</div></div>`;
+  }).join('');
+}
+function cloudParams(){const out={};
+  document.querySelectorAll('#cloud-opts [data-opt]').forEach(el=>{
+    const v=el.type==='checkbox'?(el.checked?'true':'false'):el.value.trim();
+    if(v!=='') out[el.dataset.opt]=v;}); return out;}
+RENDER.cloud=async()=>{
+  const version=pageVersion;
+  if(CLOUD_TIMER){clearInterval(CLOUD_TIMER);CLOUD_TIMER=null;}
+  if(CLOUD_SIGNIN_TIMER){clearInterval(CLOUD_SIGNIN_TIMER);CLOUD_SIGNIN_TIMER=null;}
+  $('#page').innerHTML='<div class="empty">Loading cloud storage…</div>';
+  let st;
+  try{ st=await j('/api/v1/cloud'); if(st.error) throw new Error(st.error); }
+  catch(e){ if(cloudCur(version)) $('#page').innerHTML=`<div class="empty">Could not load cloud storage: ${esc(e.message)}</div>`; return; }
+  if(!cloudCur(version)) return;
+  if(!CLOUD_PROVIDERS&&st.rclone.available){ const p=await j('/api/v1/cloud/providers').catch(()=>({rclone:[]})); CLOUD_PROVIDERS=p.rclone||[]; }
+  if(!cloudCur(version)) return;
+  const provs=CLOUD_PROVIDERS||[];
+  const remotes=st.remotes||[];
+  const ropt=(sel,filter)=>remotes.filter(filter||(()=>true)).map(r=>`<option value="${esc(r.id)}"${r.id===sel?' selected':''}>${esc(r.label)} (${esc(r.type)})</option>`).join('');
+  const popt=sel=>'<option value="">Detect from the file</option>'+PLATFORMS.map(p=>`<option value="${esc(p.slug)}"${p.slug===sel?' selected':''}>${esc(p.name)}</option>`).join('');
+  const kindOpt=Object.entries(st.kinds||{}).map(([k,l])=>`<option value="${k}">${esc(l)}</option>`).join('');
+  const provOpt=provs.map(p=>`<option value="r:${esc(p.type)}">${esc(p.description||p.type)}${p.oauth?' — browser sign-in':''}</option>`).join('')
+    +Object.entries(st.native_types||{}).map(([k,l])=>`<option value="n:${k}">${esc(l)}</option>`).join('');
+  const runRow=r=>`<tr><td>${esc(r.label)}</td><td><span class="pill">${esc(r.state)}</span></td><td>${r.files||0} file(s), ${cloudBytes(r.bytes)}${r.total_bytes?' of '+cloudBytes(r.total_bytes):''}</td><td>${esc(r.started)}</td><td class="help">${esc(r.message)}</td></tr>`;
+  $('#page').innerHTML=`
+  <div class="card"><div class="row" style="justify-content:space-between"><b>Cloud &amp; File Hosts</b><a href="${CLOUD_GUIDE}" target="_blank" rel="noopener">Guide</a></div>
+    <p class="help">Connect Google Drive, OneDrive, Dropbox, MEGA, Box, pCloud, S3/B2/Wasabi and dozens more. Back up or offload library folders, import games from a cloud folder or a Google Drive share link, back up ROMarr's settings, or mount a cloud folder as a library root. Premium Rapidgator and 1fichier accounts are used for file-host downloads; MultiUp links are split into their mirrors.</p>
+    <div class="row" style="gap:16px;flex-wrap:wrap">
+      <div><b>rclone</b> ${st.rclone.available?`<span class="pill">${esc(st.rclone.version||'found')}</span> <span class="help">${esc(st.rclone.path)}</span>`:'<span class="pill" style="background:var(--bad);color:#2a0b0b">not installed</span> <span class="help">Built-in Google Drive and OneDrive still work. Install rclone for every other provider (see the guide).</span>'}</div>
+      <div><b>Mounts</b> ${st.fuse.available?'<span class="pill">FUSE available</span>':`<span class="pill">unavailable</span> <span class="help">${esc(st.fuse.reason)}</span>`}</div>
+    </div>
+    <details><summary class="help">rclone location</summary><div class="row" style="gap:8px"><input id="cl-rpath" type="text" value="${esc(st.rclone.configured_path)}" placeholder="Found on PATH when blank" style="flex:1"><button class="btn ghost" id="cl-rsave">Save</button></div><div id="cl-rmsg" class="testline"></div></details>
+  </div>
+  <div class="card"><b>Connections</b>
+    ${remotes.length?`<table class="pd-table"><tr><th>Name</th><th>Provider</th><th>Engine</th><th>Space</th><th></th></tr>${remotes.map(r=>`<tr><td>${esc(r.label)}<div class="help">${esc(r.id)}</div></td><td>${esc(r.type)}</td><td>${esc(r.engine)}</td><td id="cl-q-${esc(r.id)}"><button class="btn ghost" data-quota="${esc(r.id)}">Check</button></td><td><button class="btn ghost" data-browse="${esc(r.id)}">Browse</button> <button class="btn danger" data-rdel="${esc(r.id)}">Remove</button></td></tr>`).join('')}</table>`:'<p class="help">No connections yet.</p>'}
+    <details ${remotes.length?'':'open'}><summary><b>Add a connection</b></summary>
+      <div class="field"><label for="cl-prov">Provider</label><select id="cl-prov">${provOpt}</select></div>
+      <div class="row" style="gap:10px;flex-wrap:wrap">${cloudField('cl-name','Name (letters, digits, - and _)','','gdrive')}${cloudField('cl-label','Label','','My Google Drive')}</div>
+      <div id="cl-own" class="hide"><label class="check"><input type="checkbox" id="cl-ownapp"> Use my own OAuth app (saved below) instead of rclone's shared one</label></div>
+      <div id="cl-redir" class="hide"><div class="field"><label for="cl-redirect">After approving, send the browser to</label><select id="cl-redirect"><option value="paste">127.0.0.1 (I paste the address back; works anywhere)</option><option value="callback">This ROMarr's callback URL</option></select></div></div>
+      <div id="cloud-opts"></div>
+      <label class="check" id="cl-advwrap"><input type="checkbox" id="cl-adv"> Show advanced options</label>
+      <div class="row" style="gap:8px"><button class="btn" id="cl-add">Sign in</button></div>
+      <div id="cl-paste" class="hide"><ol class="help" style="margin:6px 0 10px 18px">
+          <li>Approve access in the sign-in tab that just opened.</li>
+          <li>That tab then shows <b>"This site can't be reached — 127.0.0.1 refused to connect"</b>. <b>That means it worked</b>: the address points at this server, not your computer.</li>
+          <li>Copy the whole address from that tab's address bar (it starts <code>http://127.0.0.1:53682/</code> or <code>http://localhost:53682/</code>), come back here and press <b>Paste from clipboard</b>, or paste it into the box, then <b>Finish sign-in</b>.</li></ol>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><input id="cl-addr" type="text" placeholder="${esc(st.paste_redirect)}?state=…&amp;code=…" style="flex:1;min-width:240px"><button class="btn ghost" id="cl-clip">Paste from clipboard</button><button class="btn" id="cl-finish">Finish sign-in</button><button class="btn ghost" id="cl-cancel">Cancel</button></div>
+        <div class="help" id="cl-left"></div></div>
+      <div id="cl-msg" class="testline"></div>
+    </details>
+  </div>
+  <div class="card"><b>Browse and import</b>
+    <div class="row" style="gap:8px;flex-wrap:wrap"><select id="cl-br-remote">${ropt(CLOUD_BROWSE.remote)}</select><input id="cl-br-path" type="text" value="${esc(CLOUD_BROWSE.path)}" placeholder="folder/sub-folder" style="flex:1"><button class="btn ghost" id="cl-br-go">Open</button><button class="btn ghost" id="cl-br-up">Up</button></div>
+    <div class="field"><label for="cl-br-plat">Import into platform</label><select id="cl-br-plat">${popt('')}</select></div>
+    <div id="cl-br-list" class="help">Choose a connection and press Open.</div>
+    <div class="row" style="gap:8px;margin-top:10px"><input id="cl-link" type="text" placeholder="https://drive.google.com/file/d/… or /drive/folders/…" style="flex:1"><button class="btn ghost" id="cl-link-go">Import share link</button></div>
+    <div id="cl-br-msg" class="testline"></div>
+  </div>
+  <div class="card"><b>Jobs</b>
+    ${(st.jobs||[]).length?`<table class="pd-table"><tr><th>Job</th><th>Kind</th><th>Connection</th><th>Every</th><th>Last run</th><th></th></tr>${st.jobs.map(x=>`<tr><td>${esc(x.name)}<div class="help">${esc(x.local_path||'')}${x.local_path?' → ':''}${esc(x.remote)}:${esc(x.remote_path||'/')}</div></td><td>${esc(x.kind)}</td><td>${esc(x.remote)}</td><td>${x.interval_hours?esc(x.interval_hours)+' h':'manual'}</td><td class="help">${esc(x.last_result||'never')}</td><td><button class="btn ghost" data-jrun="${esc(x.id)}">Run now</button> <button class="btn danger" data-jdel="${esc(x.id)}">Delete</button></td></tr>`).join('')}</table>`:'<p class="help">No jobs yet.</p>'}
+    <details><summary><b>Add a job</b></summary>
+      <div class="row" style="gap:10px;flex-wrap:wrap"><div class="field"><label for="cj-kind">Kind</label><select id="cj-kind">${kindOpt}</select></div>${cloudField('cj-name','Name','','Back up SNES')}<div class="field"><label for="cj-remote">Connection</label><select id="cj-remote">${ropt('')}</select></div></div>
+      <div class="row" style="gap:10px;flex-wrap:wrap">${cloudField('cj-rpath','Cloud folder','','ROMarr/snes')}<span id="cj-localw">${cloudField('cj-local','Local folder','','/library/roms/snes')}</span><span id="cj-platw" class="hide"><div class="field"><label for="cj-plat">Platform</label><select id="cj-plat">${popt('')}</select></div></span>${cloudField('cj-hours','Run every (hours, 0 = manual)','0','24','number')}<span id="cj-keepw" class="hide">${cloudField('cj-keep','Keep newest','14','14','number')}</span></div>
+      <label class="check hide" id="cj-confw"><input type="checkbox" id="cj-confirm"> I understand offload deletes each local file after it is uploaded and checked</label>
+      <button class="btn" id="cj-save">Save job</button><div id="cj-msg" class="testline"></div>
+    </details>
+    <div id="cl-runs">${(st.runs||[]).length?`<table class="pd-table"><tr><th>Run</th><th>State</th><th>Progress</th><th>Started</th><th>Result</th></tr>${st.runs.map(runRow).join('')}</table>`:''}</div>
+  </div>
+  <div class="card"><b>Mounts</b> <span class="help">An rclone mount makes a cloud folder a local folder, usable as a library root (Settings → Libraries).</span>
+    ${(st.mounts||[]).length?`<table class="pd-table"><tr><th>Folder</th><th>Cloud</th><th>Cache</th><th>State</th><th></th></tr>${st.mounts.map(m=>`<tr><td>${esc(m.mount_point)}</td><td>${esc(m.remote)}:${esc(m.remote_path||'/')}</td><td>${esc(m.cache_mode)}</td><td>${(st.mount_states||{})[m.id]?'<span class="pill">mounted</span>':'not mounted'}</td><td><button class="btn ghost" data-mon="${esc(m.id)}">${(st.mount_states||{})[m.id]?'Unmount':'Mount'}</button> <button class="btn danger" data-mdel="${esc(m.id)}">Delete</button></td></tr>`).join('')}</table>`:''}
+    <details><summary><b>Add a mount</b></summary>
+      <div class="row" style="gap:10px;flex-wrap:wrap"><div class="field"><label for="cm-remote">Connection</label><select id="cm-remote">${ropt('',r=>r.engine==='rclone')}</select></div>${cloudField('cm-rpath','Cloud folder','','ROMs')}${cloudField('cm-point','Mount folder (empty)','','/mnt/cloud-roms')}<div class="field"><label for="cm-cache">Cache</label><select id="cm-cache"><option>full</option><option>writes</option><option>minimal</option><option>off</option></select></div>${cloudField('cm-max','Cache limit (GB)','10','10','number')}</div>
+      <label class="check"><input type="checkbox" id="cm-auto" checked> Mount when ROMarr starts</label> <label class="check"><input type="checkbox" id="cm-other"> Let other users (RomM, Plex) read it (needs user_allow_other in /etc/fuse.conf)</label>
+      <button class="btn" id="cm-save">Save mount</button><div id="cm-msg" class="testline"></div>
+    </details>
+  </div>
+  <div class="card"><b>Your own OAuth apps</b> <span class="help">Optional for rclone; required for the built-in Google Drive and OneDrive. Register the paste-back address (Google: <code>${esc(st.paste_redirects.gdrive)}</code>, Microsoft: <code>${esc(st.paste_redirects.onedrive)}</code>) and, for the direct return, <code>${esc(location.origin)}/api/v1/cloud/oauth/callback</code></span>
+    ${['gdrive','onedrive'].map(p=>`<div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end"><b style="min-width:110px">${p==='gdrive'?'Google':'Microsoft'}</b>${cloudField('ca-id-'+p,'Client id',st.apps[p].client_id,'')}${cloudField('ca-sec-'+p,'Client secret','',st.apps[p].secret_set?'Saved — leave blank to keep it':(p==='onedrive'?'Not needed for a public client':''),'password')}<button class="btn ghost" data-app="${p}">Save</button></div>`).join('')}
+    <div id="ca-msg" class="testline"></div>
+  </div>
+  <div class="card"><b>File-host accounts</b> <span class="help">Used when a release links to the host. Debrid services are set up under Download Clients.</span>
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end"><b style="min-width:110px">Rapidgator ${st.hosts.rapidgator.set?'<span class="pill">saved</span>':''}</b>${cloudField('ch-rg-login','E-mail',st.hosts.rapidgator.login,'')}${cloudField('ch-rg-pass','Password','',st.hosts.rapidgator.set?'Saved — leave blank to keep it':'','password')}${cloudField('ch-rg-code','2FA code (if enabled)','','')}<button class="btn ghost" id="ch-rg-save">Save &amp; test</button>${st.hosts.rapidgator.set?'<button class="btn danger" data-hdel="rapidgator">Remove</button>':''}</div>
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end"><b style="min-width:110px">1fichier ${st.hosts['1fichier'].set?'<span class="pill">saved</span>':''}</b>${cloudField('ch-1f-key','API key','',st.hosts['1fichier'].set?'Saved — leave blank to keep it':'Premium accounts: My account → Parameters','password')}<button class="btn ghost" id="ch-1f-save">Save &amp; test</button>${st.hosts['1fichier'].set?'<button class="btn danger" data-hdel="1fichier">Remove</button>':''}</div>
+    <p class="help">MultiUp links need no account: ROMarr reads the mirrors behind each link and tries them in turn.</p>
+    <div id="ch-msg" class="testline"></div>
+  </div>`;
+  const reload=()=>{ if(cloudCur(version)) go('cloud'); };
+  const act=async(fn,msgId,okText,thenReload)=>{try{const r=await fn(); if(!cloudCur(version)) return r; cloudSay(msgId,r&&r.warning?r.warning:(okText||'Done.')); if(thenReload) setTimeout(reload,600); return r;}
+    catch(e){ if(cloudCur(version)) cloudSay(msgId,e.message,true); }};
+  // provider form
+  const pick=()=>{const v=$('#cl-prov').value||''; const [eng,type]=v.split(':');
+    const p=eng==='r'?provs.find(x=>x.type===type):null;
+    $('#cloud-opts').innerHTML=eng==='r'?cloudProviderForm(p,$('#cl-adv').checked):'';
+    $('#cl-advwrap').classList.toggle('hide',eng!=='r');
+    $('#cl-own').classList.toggle('hide',!(eng==='r'&&(type==='drive'||type==='onedrive')));
+    $('#cl-redir').classList.toggle('hide',eng!=='n');
+    $('#cl-add').textContent=(eng==='n'||(p&&p.oauth))?'Sign in':'Save connection';
+    if(!$('#cl-name').value) $('#cl-name').placeholder=(type||'cloud').replace(/[^A-Za-z0-9_-]/g,'');};
+  if($('#cl-prov')){ $('#cl-prov').onchange=pick; $('#cl-adv').onchange=pick; pick(); }
+  $('#cl-add')&&($('#cl-add').onclick=async()=>{const [eng,type]=($('#cl-prov').value||'').split(':');
+    const p=eng==='r'?provs.find(x=>x.type===type):null;
+    const name=$('#cl-name').value.trim()||$('#cl-name').placeholder, label=$('#cl-label').value.trim();
+    const params=cloudParams();
+    // A Drive service account or a Box JWT config signs in without a browser.
+    if(eng==='r'&&p&&(!p.oauth||params.service_account_file||params.service_account_credentials||params.box_config_file)){
+      return act(()=>cloudPost('remotes',{name,label,type,params}),'cl-msg','Connected.',true); }
+    const tab=window.open('about:blank','_blank');
+    try{const r=await cloudPost('signin/start',{engine:eng==='n'?'native':'rclone',type,name,label,params,
+        use_own_app:$('#cl-ownapp').checked,redirect:$('#cl-redirect').value,base_url:location.origin});
+      if(tab) tab.location.href=r.url; else window.open(r.url,'_blank');
+      if(!cloudCur(version)) return;
+      if(r.mode==='paste'){ $('#cl-paste').classList.remove('hide'); cloudSay('cl-msg','Waiting for you to approve and paste the address…');
+        // Its own handle: CLOUD_TIMER may be polling a running job.
+        const until=Date.now()+600000; if(CLOUD_SIGNIN_TIMER) clearInterval(CLOUD_SIGNIN_TIMER);
+        const tick=setInterval(()=>{const el=$('#cl-left'); if(!cloudCur(version)||!el){clearInterval(tick);if(CLOUD_SIGNIN_TIMER===tick)CLOUD_SIGNIN_TIMER=null;return;}
+          const s=Math.max(0,Math.round((until-Date.now())/1000));
+          el.textContent=s?`This sign-in waits ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')} more.`:'This sign-in expired: press Sign in again.';
+          if(!s){clearInterval(tick);if(CLOUD_SIGNIN_TIMER===tick)CLOUD_SIGNIN_TIMER=null;return;}
+          // A browser that reaches the server's listener directly finishes the
+          // sign-in with nothing pasted: notice it and show the new connection.
+          if(s%3===0) j('/api/v1/cloud').then(now=>{ if(!cloudCur(version)||CLOUD_SIGNIN_TIMER!==tick) return;
+            const done=now&&now.last_signin||{};
+            if(done.remote){clearInterval(tick);CLOUD_SIGNIN_TIMER=null;cloudSay('cl-msg','Signed in and saved.');setTimeout(reload,800);}
+            else if(done.error){clearInterval(tick);CLOUD_SIGNIN_TIMER=null;cloudSay('cl-msg',done.error,true);}
+          }).catch(()=>{});},1000);
+        CLOUD_SIGNIN_TIMER=tick; }
+      else cloudSay('cl-msg','Approve in the new tab; it comes back here when done.');
+    }catch(e){ if(tab) tab.close(); if(cloudCur(version)) cloudSay('cl-msg',e.message,true); }});
+  $('#cl-clip')&&($('#cl-clip').onclick=async()=>{const form=$('#cl-paste');
+    try{const t=(await navigator.clipboard.readText()).trim();
+      if(!cloudCur(version)||$('#cl-paste')!==form) return;   // the page was re-rendered meanwhile
+      if(!/^http:[/][/](127[.]0[.]0[.]1|localhost):53682[/]/.test(t)){cloudSay('cl-msg','The clipboard does not hold the 127.0.0.1:53682 address yet; copy it from the sign-in tab first.',true);return;}
+      $('#cl-addr').value=t; $('#cl-finish').click();}
+    catch(e){if(cloudCur(version)&&$('#cl-paste')===form) cloudSay('cl-msg','The browser would not share the clipboard; paste into the box instead.',true);}});
+  $('#cl-finish')&&($('#cl-finish').onclick=()=>act(()=>cloudPost('signin/finish',{address:$('#cl-addr').value.trim()}),'cl-msg','Signed in and saved.',true));
+  $('#cl-cancel')&&($('#cl-cancel').onclick=()=>act(()=>cloudPost('signin/cancel'),'cl-msg','Cancelled.',true));
+  $('#cl-rsave').onclick=()=>act(()=>cloudPost('rclone',{path:$('#cl-rpath').value.trim()}),'cl-rmsg','Saved.',true);
+  document.querySelectorAll('[data-rdel]').forEach(b=>b.onclick=()=>{ if(confirm('Remove this connection? Files in the cloud are not touched.')) act(()=>cloudPost('remotes/delete',{id:b.dataset.rdel}),'cl-msg','Removed.',true);});
+  document.querySelectorAll('[data-quota]').forEach(b=>b.onclick=async()=>{const cell=$('#cl-q-'+b.dataset.quota); cell.textContent='…';
+    try{const a=await j('/api/v1/cloud/about?remote='+encodeURIComponent(b.dataset.quota)); if(a.error) throw new Error(a.error);
+      cell.textContent=(a.used==null&&a.total==null&&a.free==null)?'Not reported by this provider'
+        :`${cloudBytes(a.used)} used of ${a.total?cloudBytes(a.total):'unlimited'}${a.free!=null?' ('+cloudBytes(a.free)+' free)':''}`;}
+    catch(e){cell.textContent=e.message;}});
+  // browse
+  const browse=async()=>{const remote=$('#cl-br-remote').value, path=$('#cl-br-path').value.trim().replace(/^\/+|\/+$/g,'');
+    CLOUD_BROWSE={remote,path}; if(!remote) return; $('#cl-br-list').textContent='Loading…';
+    const d=await j('/api/v1/cloud/browse?remote='+encodeURIComponent(remote)+'&path='+encodeURIComponent(path)).catch(e=>({error:String(e)}));
+    if(!cloudCur(version)) return;
+    if(d.error){ $('#cl-br-list').textContent=d.error; return; }
+    const isRclone=(remotes.find(r=>r.id===remote)||{}).engine==='rclone';
+    $('#cl-br-list').innerHTML=d.entries.length?`<table class="pd-table">${d.entries.map(e=>`<tr><td>${e.is_dir?'📁 <a href="#" data-open="'+esc(e.path)+'">'+esc(e.name)+'</a>':esc(e.name)}</td><td>${e.is_dir?'':cloudBytes(e.size)}</td><td><button class="btn ghost" data-imp="${esc(e.path)}">Import${e.is_dir?' folder':''}</button>${isRclone?` <button class="btn ghost" data-share="${esc(e.path)}">Share link</button>`:''}</td></tr>`).join('')}</table>${d.truncated?'<p class="help">Showing the first 5,000.</p>':''}`:'<p class="help">Empty folder.</p>';
+    document.querySelectorAll('[data-open]').forEach(a=>a.onclick=ev=>{ev.preventDefault(); $('#cl-br-path').value=a.dataset.open; browse();});
+    document.querySelectorAll('[data-imp]').forEach(b=>b.onclick=()=>act(()=>cloudPost('import',{remote,path:b.dataset.imp,platform:$('#cl-br-plat').value}),'cl-br-msg','Import started; see Jobs → runs below.',true));
+    document.querySelectorAll('[data-share]').forEach(b=>b.onclick=async()=>{const r=await act(()=>cloudPost('link',{remote,path:b.dataset.share}),'cl-br-msg','');
+      if(r&&r.url) cloudSay('cl-br-msg','Share link: '+r.url);});};
+  $('#cl-br-go').onclick=browse;
+  document.querySelectorAll('[data-browse]').forEach(b=>b.onclick=()=>{$('#cl-br-remote').value=b.dataset.browse;
+    $('#cl-br-path').value=''; browse(); $('#cl-br-remote').scrollIntoView({behavior:'smooth',block:'center'});});
+  $('#cl-br-up').onclick=()=>{const p=$('#cl-br-path').value.replace(/\/+$/,''); $('#cl-br-path').value=p.includes('/')?p.slice(0,p.lastIndexOf('/')):''; browse();};
+  if(CLOUD_BROWSE.remote&&remotes.some(r=>r.id===CLOUD_BROWSE.remote)) browse();
+  $('#cl-link-go').onclick=()=>act(()=>cloudPost('import',{remote:$('#cl-br-remote').value,link:$('#cl-link').value.trim(),platform:$('#cl-br-plat').value}),'cl-br-msg','Import started; see Jobs → runs below.',true);
+  // jobs
+  const kind=()=>{const k=$('#cj-kind').value; $('#cj-localw').classList.toggle('hide',k==='import'||k==='settings');
+    $('#cj-platw').classList.toggle('hide',k!=='import'); $('#cj-keepw').classList.toggle('hide',k!=='settings');
+    $('#cj-confw').classList.toggle('hide',k!=='offload');};
+  $('#cj-kind').onchange=kind; kind();
+  $('#cj-save').onclick=()=>act(()=>cloudPost('jobs',{kind:$('#cj-kind').value,name:$('#cj-name').value.trim(),remote:$('#cj-remote').value,
+    remote_path:$('#cj-rpath').value.trim(),local_path:$('#cj-local').value.trim(),platform:$('#cj-plat').value,
+    interval_hours:Number($('#cj-hours').value||0),keep:Number($('#cj-keep').value||14),confirm:$('#cj-confirm').checked}),'cj-msg','Saved.',true);
+  document.querySelectorAll('[data-jrun]').forEach(b=>b.onclick=()=>act(()=>cloudPost('jobs/run',{id:b.dataset.jrun}),'cj-msg','Started.',true));
+  document.querySelectorAll('[data-jdel]').forEach(b=>b.onclick=()=>{ if(confirm('Delete this job? Nothing in the cloud or the library is touched.')) act(()=>cloudPost('jobs/delete',{id:b.dataset.jdel}),'cj-msg','Deleted.',true);});
+  // mounts
+  $('#cm-save').onclick=()=>act(()=>cloudPost('mounts',{remote:$('#cm-remote').value,remote_path:$('#cm-rpath').value.trim(),mount_point:$('#cm-point').value.trim(),
+    cache_mode:$('#cm-cache').value,cache_max_gb:Number($('#cm-max').value||10),auto:$('#cm-auto').checked,allow_other:$('#cm-other').checked}),'cm-msg','Saved.',true);
+  document.querySelectorAll('[data-mon]').forEach(b=>b.onclick=()=>{const on=(st.mount_states||{})[b.dataset.mon];
+    act(()=>cloudPost(on?'mounts/unmount':'mounts/mount',{id:b.dataset.mon}),'cm-msg',on?'Unmounted.':'Mounted.',true);});
+  document.querySelectorAll('[data-mdel]').forEach(b=>b.onclick=()=>{ if(confirm('Delete this mount? It is unmounted first; cloud files are not touched.')) act(()=>cloudPost('mounts/delete',{id:b.dataset.mdel}),'cm-msg','Deleted.',true);});
+  // apps and hosts
+  document.querySelectorAll('[data-app]').forEach(b=>b.onclick=()=>{const p=b.dataset.app;
+    act(()=>cloudPost('apps',{provider:p,client_id:$('#ca-id-'+p).value.trim(),client_secret:$('#ca-sec-'+p).value}),'ca-msg','Saved.',true);});
+  $('#ch-rg-save').onclick=async()=>{const r=await act(()=>cloudPost('hosts',{kind:'rapidgator',login:$('#ch-rg-login').value.trim(),password:$('#ch-rg-pass').value,code:$('#ch-rg-code').value.trim()}),'ch-msg','');
+    if(r) {cloudSay('ch-msg',`Rapidgator signed in${r.premium?' (premium)':' — the account is not premium, so downloads will be refused'}.`); setTimeout(reload,1500);}};
+  $('#ch-1f-save').onclick=async()=>{const r=await act(()=>cloudPost('hosts',{kind:'1fichier',api_key:$('#ch-1f-key').value.trim()}),'ch-msg','');
+    if(r) {cloudSay('ch-msg',`1fichier key accepted${r.premium?' (premium)':' — downloads need a premium account'}.`); setTimeout(reload,1500);}};
+  document.querySelectorAll('[data-hdel]').forEach(b=>b.onclick=()=>{ if(confirm('Remove this account from ROMarr?')) act(()=>cloudPost('hosts/delete',{kind:b.dataset.hdel}),'ch-msg','Removed.',true);});
+  // live run progress
+  if((st.runs||[]).some(r=>r.state==='running')){
+    CLOUD_TIMER=setInterval(async()=>{ if(!cloudCur(version)){clearInterval(CLOUD_TIMER);CLOUD_TIMER=null;return;}
+      const d=await j('/api/v1/cloud/runs').catch(()=>null); if(!d||!cloudCur(version)) return;
+      $('#cl-runs').innerHTML=`<table class="pd-table"><tr><th>Run</th><th>State</th><th>Progress</th><th>Started</th><th>Result</th></tr>${d.runs.map(runRow).join('')}</table>`;
+      if(!d.runs.some(r=>r.state==='running')){clearInterval(CLOUD_TIMER);CLOUD_TIMER=null;}},3000);
+  }
 };
 RENDER.agents=async()=>{
   const version=pageVersion;
@@ -7333,55 +7548,85 @@ RENDER.collections=async()=>{
     .concat(allSources.filter(t=>t.game===false));
   const hiddenSources=allSources.length-allSources.filter(t=>t.game!==false).length;
   const dats=st.dats||[];
-  $('#page').innerHTML='<div class="card"><h3>Plan a set</h3>'
+  // The platform each DAT most likely covers, worked out on the server from
+  // the DAT name. Only a default: a set with no platform requested every
+  // title for nowhere, which is how a first set "did nothing".
+  const datPlatforms=st.dat_platforms||{};
+  const passMinutes=st.interval_minutes||10;
+  const firstPlatform=dats.length?(datPlatforms[dats[0]]||''):'';
+  const helpHidden=collectionsHelpHidden();
+  const inputStyle='padding:7px 10px;background:var(--bg);color:var(--fg);'
+    +'border:1px solid var(--line);border-radius:6px';
+  const field=(label,control,hint)=>'<div class="field" style="flex:1;min-width:220px;margin:0">'
+    +'<label>'+label+'</label>'+control
+    +(hint?'<div class="help" style="margin:0">'+hint+'</div>':'')+'</div>';
+  const regionsDefault=(SETTINGS.preferred_regions&&SETTINGS.preferred_regions.length
+    ?SETTINGS.preferred_regions:['usa','world','europe','japan'])
+    .map(r=>String(r).toLowerCase()).join(',');
+  const languagesOpen=(SETTINGS.translation_policy||'exclude')!=='exclude'
+    ||(SETTINGS.preferred_languages||[]).length>0;
+  $('#page').innerHTML=collectionsHowItWorks(passMinutes,helpHidden)
+    +'<div class="card" id="cplan-card"'+(helpHidden?'':' style="margin-top:16px"')+'>'
+    +'<div class="row" style="justify-content:space-between;align-items:center">'
+    +'<h3 style="margin:0">Plan a set</h3>'
+    +'<a href="#collections" id="chelp-show" class="help"'+(helpHidden?'':' style="display:none"')
+    +'>How this works</a></div>'
     +(dats.length
-      ?'<p class="help">Compare a DAT against your library. Nothing is '
-       +'requested until you say so.</p>'
-       +'<div class="row" style="flex-wrap:wrap;gap:10px">'
-       +'<select id="cdat">'+dats.map(d=>'<option>'+esc(d)+'</option>').join('')+'</select>'
-       +'<select id="cplat"><option value="">platform (match on disk)</option>'
-       +PLATFORMS.map(p=>'<option value="'+esc(p.slug)+'">'+esc(p.name)+'</option>').join('')
-       +'</select>'
-       +'<label class="help" style="margin:0"><input type="checkbox" id="c1g1r" checked> '
-       +'One game, one ROM</label>'
-       +'<input id="cregions" placeholder="usa,world,europe,japan" '
-       +'style="flex:1;min-width:180px;padding:7px 10px;background:var(--bg);'
-       +'color:var(--fg);border:1px solid var(--line);border-radius:6px">'
-       +'<label class="help" style="margin:0" title="Treat the region list as an allowlist: omit a title when no dump matches one of your regions">'
-       +'<input type="checkbox" id="cstrict"'+((SETTINGS.region_mode||'prefer')==='strict'?' checked':'')+'> '
-       +'Only selected regions</label>'
-       +'<button class="btn" id="cplan">Preview plan</button></div>'
-       +'<div class="row" style="flex-wrap:wrap;gap:14px;margin-top:10px">'
-       +['proto','beta','demo','hack','unlicensed'].map(k=>
-          '<label class="help" style="margin:0"><input type="checkbox" class="cex" '
-          +'value="'+k+'" checked> exclude '+k+'</label>').join('')
+      ?'<p class="help" style="margin-top:8px">Compare a DAT with your library. Nothing is '
+       +'requested until you press <b>Request missing</b>.</p>'
+       +'<div class="row" style="flex-wrap:wrap;gap:12px;align-items:flex-start">'
+       +field('DAT (the checklist)','<select id="cdat">'+dats.map(d=>'<option>'+esc(d)+'</option>').join('')+'</select>',
+          'From your DAT directory. One DAT lists every game of one system.')
+       +field('Platform','<select id="cplat"><option value="">choose the platform this DAT is for</option>'
+          +PLATFORMS.map(p=>'<option value="'+esc(p.slug)+'"'+(p.slug===firstPlatform?' selected':'')+'>'
+            +esc(p.name)+'</option>').join('')+'</select>',
+          'Where these games live in your library. ROMarr picks it from the DAT name when it can; '
+          +'missing games are requested for this platform.')
        +'</div>'
-       +'<div class="row" style="gap:8px;margin-top:10px;align-items:center">'
-       +'<label class="help" style="margin:0">Fan translations</label>'
-       +'<select id="ctrans">'
-       +[['exclude','exclude (published dumps only)'],
-         ['fill','fill gaps (a selected-language translation only where no preferred region exists)'],
-         ['prefer','prefer (a selected-language translation over the region winner)'],
-         ['keep_both','keep both (original + translation under Translations/)']].map(o=>
+       +'<div class="row" style="flex-wrap:wrap;gap:12px;margin-top:12px;align-items:flex-start">'
+       +field('Region order','<input id="cregions" value="'+esc(regionsDefault)+'" '
+          +'placeholder="usa,world,europe,japan" style="'+inputStyle+'">',
+          'Comma-separated, best first. When a game has several dumps, the earliest region in this list wins.')
+       +'<div class="field" style="flex:1;min-width:220px;margin:0"><label>Rules</label>'
+       +'<label class="help" style="margin:0;text-transform:none;letter-spacing:0;font-weight:400;font-size:12.5px;" title="Keep one dump per game (the best one by your region order) instead of every regional version and revision">'
+       +'<input type="checkbox" id="c1g1r" checked> One game, one ROM (1G1R): one dump per game</label>'
+       +'<label class="help" style="margin:0;text-transform:none;letter-spacing:0;font-weight:400;font-size:12.5px;" title="Treat the region list as an allowlist: omit a title when no dump matches one of your regions">'
+       +'<input type="checkbox" id="cstrict"'+((SETTINGS.region_mode||'prefer')==='strict'?' checked':'')+'> '
+       +'Only my regions: skip games with no dump in the list</label></div>'
+       +'</div>'
+       +'<div class="field" style="margin:12px 0 0"><label>Leave out</label>'
+       +'<div class="row" style="flex-wrap:wrap;gap:14px">'
+       +[['proto','prototypes'],['beta','betas'],['demo','demos and kiosk'],
+         ['hack','hacks and trainers'],['unlicensed','unlicensed and pirate']].map(k=>
+          '<label class="help" style="margin:0;text-transform:none;letter-spacing:0;font-weight:400;font-size:12.5px;"><input type="checkbox" class="cex" '
+          +'value="'+k[0]+'" checked> '+k[1]+'</label>').join('')
+       +'</div><div class="help" style="margin:0">Ticked kinds are not part of the set. Untick one to include it.</div></div>'
+       +'<details id="clang"'+(languagesOpen?' open':'')+' style="margin-top:12px">'
+       +'<summary class="help" style="cursor:pointer;margin:0">Translations and languages (optional)</summary>'
+       +'<div class="row" style="flex-wrap:wrap;gap:12px;margin-top:10px;align-items:flex-start">'
+       +field('Fan translations','<select id="ctrans">'
+       +[['exclude','Leave them out (published dumps only)'],
+         ['fill','Fill gaps: use one only where no dump is in your regions'],
+         ['prefer','Prefer: use one over the region winner'],
+         ['keep_both','Keep both: original plus translation under Translations/']].map(o=>
           '<option value="'+o[0]+'"'+((SETTINGS.translation_policy||'exclude')===o[0]?' selected':'')
           +'>'+o[1]+'</option>').join('')
-       +'</select>'
-       +'<label class="help" style="margin:0">languages</label>'
-       +'<input id="ctranslangs" placeholder="'+esc((SETTINGS.translation_langs||['en']).join(', '))+'" '
-       +'value="'+esc((SETTINGS.translation_langs||['en']).join(', '))+'" '
-       +'style="width:110px;padding:6px 8px;background:var(--bg);color:var(--fg);'
-       +'border:1px solid var(--line);border-radius:6px" title="Comma-separated codes, e.g. de, en">'
-       +'<label class="help" style="margin:0;margin-left:8px">Preferred languages</label>'
-       +'<input id="cpreflangs" placeholder="Optional: French, English" '
-       +'value="'+esc((SETTINGS.preferred_languages||[]).join(', '))+'" '
-       +'style="width:170px;padding:6px 8px;background:var(--bg);color:var(--fg);'
-       +'border:1px solid var(--line);border-radius:6px" title="Optional ordered languages, e.g. French, English. Empty disables language filtering.">'
-       +'</div>'
-      :'<div class="empty-cat"><b>No DAT loaded</b>'
-       +'Point DAT_PATH at a directory of No-Intro or Redump DATs. Without one '
-       +'there is no list of what a complete set contains.</div>')
+       +'</select>','What to do with a fan translation of a game.')
+       +field('Translation languages','<input id="ctranslangs" placeholder="'+esc((SETTINGS.translation_langs||['en']).join(', '))+'" '
+          +'value="'+esc((SETTINGS.translation_langs||['en']).join(', '))+'" '
+          +'style="'+inputStyle+'" title="Comma-separated codes, e.g. de, en">',
+          'Which translations count, e.g. <code>en</code> or <code>de, en</code>.')
+       +field('Preferred game languages','<input id="cpreflangs" placeholder="Optional: French, English" '
+          +'value="'+esc((SETTINGS.preferred_languages||[]).join(', '))+'" '
+          +'style="'+inputStyle+'" title="Optional ordered languages, e.g. French, English. Empty disables language filtering.">',
+          'Optional. When set, language is picked before region and games in other languages are left out.')
+       +'</div></details>'
+       +'<div class="row" style="margin-top:14px;gap:10px;align-items:center">'
+       +'<button class="btn" id="cplan">Preview plan</button>'
+       +'<span class="help" style="margin:0">Reads the DAT and your library. Nothing is downloaded.</span></div>'
+      :collectionsNoDat())
     +'<div id="cres" style="margin-top:16px"></div></div>'
-    +'<div class="card" style="margin-top:16px"><h3>Acquire missing files from a set torrent</h3>'
+    +'<div class="card" style="margin-top:16px"><h3>Fill a set from a torrent you already have (optional)</h3>'
     +(sourceState.errors||[]).map(error=>'<div class="panel-note panel-warn">'+esc(error)+'</div>').join('')
     +(hiddenSources>0
       ?'<p class="help" id="csrc-hidden">'+esc(String(hiddenSources))
@@ -7390,22 +7635,32 @@ RENDER.collections=async()=>{
        +'<a href="#collections" id="csrc-show-all">Show them anyway</a></p>'
       :'')
     +(sourceTorrents.length&&dats.length
-      ?'<p class="help">Preview a DAT plan against one existing qBittorrent or Transmission torrent. ROMarr selects only matching missing files, stages one budgeted batch at a time, verifies each staged set against the DAT, then restores the torrent’s original file priorities and paused state. The cap limits ROMarr staging copies; downloaded torrent files remain in the torrent client and need separate source storage.</p>'
+      ?'<p class="help">Use this instead of searching when a whole-set torrent (for example a No-Intro pack) '
+       +'is already in qBittorrent or Transmission. Pick the DAT and platform above, choose the torrent, then '
+       +'<b>Preview source plan</b>. ROMarr downloads only the files your set is missing, one batch at a time '
+       +'within the staging budget, checks each against the DAT, imports it, and finally puts the torrent’s '
+       +'file selection and paused state back the way they were. The budget limits ROMarr’s staging copies; '
+       +'the torrent’s own files stay in the client and need their own space.</p>'
        +'<div class="row" id="csrc-row" style="flex-wrap:wrap'
        +(hiddenSources===allSources.length?';display:none':'')+'">'
        +'<select id="csrc-torrent">'+sourceTorrents.map(t=>
          '<option value="'+esc(t.hash)+'" data-client="'+esc(t.client_id)+'"'
          +(t.game===false?' hidden data-nongame="1"':'')+'>'
          +esc(t.client_name+' · '+t.name+' · '+t.state)+'</option>').join('')+'</select>'
-       +'<label class="help">Staging cap (GiB) <input id="csrc-cap" type="number" min="0.01" step="1" value="100" style="width:90px"></label>'
+       +'<label class="help" title="The most ROMarr copies out of the torrent at once">Staging budget (GiB) '
+       +'<input id="csrc-cap" type="number" min="0.01" step="1" value="100" style="width:90px"></label>'
        +'<button class="btn" id="csrc-plan">Preview source plan</button></div>'
        +'<div id="csrc-out" style="margin-top:10px"></div>'
       :(sourceTorrents.length
         ?'<p class="help">Load a DAT before previewing missing collection files.</p>'
-        :'<p class="help">No existing set torrents were found. Add the set torrent to qBittorrent or Transmission'
-         +' (and enable that client under Download Clients if it is off), then come back here.</p>'))
+        :'<p class="help">No set torrents found. This part is optional: <b>Request missing</b> above '
+         +'searches your indexers instead. To use a set torrent you already have, add it to qBittorrent or '
+         +'Transmission (and enable that client under <a href="#clients">Download Clients</a> if it is off), '
+         +'then come back here.</p>'))
     +'<div id="csrc-jobs" style="margin-top:10px"></div></div>'
-    +'<div class="card" style="margin-top:16px"><h3>Batches</h3>'
+    +'<div class="card" style="margin-top:16px"><h3>Sets in progress</h3>'
+    +'<p class="help">Each set requests a few titles per pass, by itself every '+esc(String(passMinutes))
+    +' minutes. <b>Run next</b> does a pass now. Requested games show up under Queue and Wanted like any other request.</p>'
     +'<div id="cbatch"></div></div>';
   const showAllSources=$('#csrc-show-all');
   if(showAllSources)showAllSources.onclick=e=>{
@@ -7414,7 +7669,18 @@ RENDER.collections=async()=>{
     const row=$('#csrc-row'); if(row)row.style.display='';
     const note=$('#csrc-hidden'); if(note)note.textContent='Showing every torrent in the client.';
   };
+  const helpPanel=$('#chelp'), helpShow=$('#chelp-show'), helpHide=$('#chelp-hide'), planCard=$('#cplan-card');
+  const setHelp=hidden=>{
+    collectionsHelpRemember(hidden);
+    if(helpPanel&&helpPanel.style)helpPanel.style.display=hidden?'none':'';
+    if(helpShow&&helpShow.style)helpShow.style.display=hidden?'':'none';
+    if(planCard&&planCard.style)planCard.style.marginTop=hidden?'0':'16px';
+  };
+  if(helpHide)helpHide.onclick=e=>{if(e&&e.preventDefault)e.preventDefault();setHelp(true);};
+  if(helpShow)helpShow.onclick=e=>{if(e&&e.preventDefault)e.preventDefault();setHelp(false);};
 
+  const BATCH_STATE={pending:'waiting for the next pass',running:'requesting',
+    paused:'paused',done:'finished'};
   const drawBatches=async()=>{
     if(!current())return;
     const s=await j('/api/v1/collection').catch(()=>({batches:[]}));
@@ -7422,22 +7688,31 @@ RENDER.collections=async()=>{
     const cb=$('#cbatch');
     const b=s.batches||[];
     cb.innerHTML=b.length
-      ?'<table><thead><tr><th>Set</th><th>Progress</th><th>Done</th>'
+      ?'<table><thead><tr><th>Set</th><th>Progress</th><th>Requested</th>'
        +'<th>Failed</th><th>Left</th><th></th></tr></thead><tbody>'
-       +b.map(x=>'<tr data-id="'+esc(x.id)+'"><td>'+esc(x.dat||x.platform||x.id)+'</td>'
+       +b.map(x=>'<tr data-id="'+esc(x.id)+'"><td>'+esc(x.dat||x.platform||x.id)
+         +(x.platform?'<div class="help" style="margin:0">'+esc(x.platform)+'</div>':'')+'</td>'
          +'<td style="min-width:150px"><div style="background:var(--bg);'
          +'border:1px solid var(--line);border-radius:4px;height:16px;overflow:hidden">'
          +'<div style="height:100%;width:'+x.percent+'%;background:var(--accent)"></div>'
-         +'</div><span class="help" style="margin:0">'+x.percent+'% — '+esc(x.status)+'</span></td>'
-         +'<td>'+x.done+'</td><td>'+x.failed+'</td><td>'+x.remaining+'</td>'
+         +'</div><span class="help" style="margin:0">'+x.percent+'% — '+esc(BATCH_STATE[x.status]||x.status)+'</span></td>'
+         +'<td>'+x.done+'</td><td>'+x.failed
+         +((x.failures||[]).length
+           ?'<details><summary class="help" style="margin:0;cursor:pointer">why</summary>'
+            +'<ul style="margin:6px 0 0 16px">'+x.failures.map(f=>
+              '<li class="help" style="margin:0">'+esc(f.title)+' — '+esc(f.reason)+'</li>').join('')
+            +'</ul>'+(x.failed>x.failures.length?'<div class="help" style="margin:0">and '
+              +(x.failed-x.failures.length)+' more</div>':'')+'</details>'
+           :'')+'</td><td>'+x.remaining+'</td>'
          +'<td class="row" style="gap:6px">'
-         +'<button class="btn ghost cstep">Run next</button>'
-         +'<button class="btn ghost cact" data-a="'+(x.status==='paused'?'resume':'pause')+'">'
-         +(x.status==='paused'?'Resume':'Pause')+'</button>'
+         +(x.remaining&&x.status!=='paused'?'<button class="btn ghost cstep">Run next</button>':'')
+         +(x.status==='done'?'':'<button class="btn ghost cact" data-a="'+(x.status==='paused'?'resume':'pause')+'">'
+           +(x.status==='paused'?'Resume':'Pause')+'</button>')
          +(x.failed?'<button class="btn ghost cact" data-a="retry">Retry failed</button>':'')
-         +'<button class="btn ghost cact" data-a="cancel">Cancel</button></td></tr>').join('')
+         +'<button class="btn ghost cact" data-a="cancel">'+(x.status==='done'?'Remove':'Cancel')+'</button></td></tr>').join('')
        +'</tbody></table>'
-      :'<div class="empty">No set is being acquired.</div>';
+      :'<div class="empty">No set is being acquired yet. Preview a plan above, then press '
+       +'<b>Request missing</b>.</div>';
 
     cb.querySelectorAll('.cstep').forEach(el=>el.onclick=async e=>{
       const id=e.target.closest('tr').dataset.id;
@@ -7448,7 +7723,7 @@ RENDER.collections=async()=>{
     });
     cb.querySelectorAll('.cact').forEach(el=>el.onclick=async e=>{
       const id=e.target.closest('tr').dataset.id, action=e.target.dataset.a;
-      if(action==='cancel'&&!confirm('Cancel this set? Titles already requested are unaffected.')) return;
+      if(action==='cancel'&&!confirm('Remove this set from the list? Titles already requested stay requested.')) return;
       await j('/api/v1/collection/control',{method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({id:id,action:action})});
@@ -7482,6 +7757,7 @@ RENDER.collections=async()=>{
         headers:{'Content-Type':'application/json'},body:JSON.stringify({id:btn.dataset.id})});
       if(!current())return;
       if(r.error)toast(r.error);
+      else if(r.waiting)toast(r.message||'Still downloading');
       drawSourceJobs();
     });
     node.querySelectorAll('.csrc-restore').forEach(btn=>btn.onclick=async()=>{
@@ -7516,14 +7792,39 @@ RENDER.collections=async()=>{
     const out=$('#csrc-out');
     if(out)out.innerHTML='<p class="help">Selection changed. Preview the source plan again before starting.</p>';
   };
-  [sourcePlatform,sourceDat,sourceSelect].filter(Boolean)
-    .forEach(input=>input.addEventListener('change',invalidateSourcePreview));
+  // Picking another DAT moves the platform to that DAT's own, until the
+  // operator chooses a platform themselves; after that their choice stays.
+  let platformChosen=false, settingPlatform=false;
+  if(sourcePlatform&&sourcePlatform.addEventListener&&sourceDat&&sourceDat.addEventListener){
+    sourcePlatform.addEventListener('change',()=>{
+      if(!settingPlatform)platformChosen=true;
+      invalidateSourcePreview();
+    });
+    sourceDat.addEventListener('change',()=>{
+      const guess=datPlatforms[sourceDat.value]||'';
+      // Until the operator picks a platform, it follows the DAT -- including
+      // back to blank, so a DAT with no known platform never inherits the
+      // previous DAT's.
+      if(!platformChosen&&sourcePlatform.value!==guess){
+        settingPlatform=true;
+        sourcePlatform.value=guess;
+        if(sourcePlatform.dispatchEvent&&typeof Event==='function')
+          sourcePlatform.dispatchEvent(new Event('change',{bubbles:true}));
+        settingPlatform=false;
+      }
+      invalidateSourcePreview();
+    });
+  }
+  if(sourceSelect&&sourceSelect.addEventListener)
+    sourceSelect.addEventListener('change',invalidateSourcePreview);
   if(sourceCap)sourceCap.addEventListener('input',invalidateSourcePreview);
   const sourceRequest=()=>{
     const opt=sourceSelect.selectedOptions[0];
     const cap=Math.floor((parseFloat(sourceCap.value)||0)*1024*1024*1024);
     return {client_id:opt.dataset.client,torrent_hash:opt.value,
-      dat:sourceDat.value,platform:sourcePlatform.value.trim(),cap_bytes:cap};
+      dat:sourceDat.value,
+      platform:sourcePlatform.value.trim()||datPlatforms[sourceDat.value]||'',
+      cap_bytes:cap};
   };
   if(sourceSelect&&sourcePlanButton)sourcePlanButton.onclick=async()=>{
     const seq=++sourcePlanSeq;
@@ -7547,7 +7848,9 @@ RENDER.collections=async()=>{
       +((d.unmatched||[]).length?'<details><summary class="help">Unmatched titles ('+
         d.unmatched.length+')</summary><div class="help">'+d.unmatched.map(x=>
         esc(x.title)+' — '+esc(x.reason)).join('<br>')+'</div></details>':'')
-      +'<button class="btn" id="csrc-start"'+(sourcePlatform.value.trim()?'':' disabled')+'>Start selective acquisition</button>';
+      +'<button class="btn" id="csrc-start"'+(request.platform?'':' disabled')+'>Start selective acquisition</button>'
+      +(request.platform?'':'<span class="help" style="margin-left:8px">Choose the <b>Platform</b> in '
+        +'<b>Plan a set</b> above, then preview again.</span>');
     const start=$('#csrc-start');
     start.onclick=async()=>{
       if(!current()||seq!==sourcePlanSeq)return;
@@ -7578,7 +7881,7 @@ RENDER.collections=async()=>{
       dat:$('#cdat').value,
       platform:$('#cplat').value,
       one_game_one_rom:$('#c1g1r').checked,
-      regions:($('#cregions').value.trim()||'').split(',').filter(Boolean),
+      regions:($('#cregions').value.trim()||'').split(',').map(s=>s.trim()).filter(Boolean),
       region_mode:$('#cstrict').checked?'strict':'prefer',
       translation_policy:$('#ctrans').value,
       translation_langs:($('#ctranslangs').value.trim()||'').split(',').map(s=>s.trim()).filter(Boolean),
@@ -7597,62 +7900,10 @@ RENDER.collections=async()=>{
     const d=await j('/api/v1/collection/plan?'+q).catch(()=>({error:'plan failed'}));
     if(!current()||seq!==cplanSeq)return;
     if(d.error){out.innerHTML='<div class="panel-note panel-warn">'+esc(d.error)+'</div>';return;}
-    const c=d.counts;
-    const tile=(n,label,colour)=>'<div style="flex:1;min-width:110px;padding:10px 12px;'
-      +'background:var(--bg);border:1px solid var(--line);border-radius:6px">'
-      +'<div style="font-size:22px;font-weight:600;color:'+colour+'">'+n+'</div>'
-      +'<div class="help" style="margin:0">'+label+'</div></div>';
-    out.innerHTML='<div class="row" style="gap:10px;flex-wrap:wrap">'
-      +tile(c.expected,'in the set','var(--fg)')
-      +tile(c.have,'you have','var(--ok)')
-      +tile(c.missing,'missing','var(--warn)')
-      +tile(c.bad,'bad dumps','var(--bad)')
-      +tile(c.excluded,'excluded by policy','var(--dim)')
-      +((c.region_omitted||0)?tile(c.region_omitted,'omitted — no dump in your regions','var(--dim)'):'')
-      +((c.language_omitted||0)?tile(c.language_omitted,'omitted — language not in preference','var(--dim)'):'')
-      +((c.unknown_language||0)?tile(c.unknown_language,'unknown language (not counted)','var(--dim)'):'')
-      +'</div>'
-      +'<p class="help">'+esc(d.dat)+(d.dat_version?' ('+esc(d.dat_version)+')':'')
-      +' — region order '+esc((d.policy.regions||[]).join(' → '))
-      +((d.policy.preferred_languages||[]).length?' · preferred languages '+esc(d.policy.preferred_languages.join(' → ')):'')
-      +(d.policy.region_mode==='strict'?' (strict: titles without a matching-region dump are omitted)':'')+'.</p>'
-      +'<div class="row"><button class="btn" id="cstart">Request '+c.missing
-      +' missing</button>'
-      +'<label class="help" style="margin:0">at <input id="cpp" type="number" '
-      +'min="1" max="50" value="5" style="width:60px;padding:5px;background:var(--bg);'
-      +'color:var(--fg);border:1px solid var(--line);border-radius:4px"> per pass</label></div>'
-      +'<table style="margin-top:14px"><thead><tr><th>Title</th><th>Status</th>'
-      +'<th>Why this dump</th></tr></thead><tbody>'
-      +d.titles.slice(0,300).map(t=>{
-        const pill=t.status==='verified'
-          ?'<span class="pill" style="background:var(--ok);color:#08210d">verified</span>'
-          :t.status==='bad'
-            ?'<span class="pill" style="background:var(--bad);color:#2a0b0b">bad dump</span>'
-            :t.status==='missing'
-              ?'<span class="pill" style="background:var(--warn);color:#2a1c05">missing</span>'
-              :'<span class="pill">present</span>';
-        const clones=(t.discarded||[]).length
-          ?'<details><summary class="help" style="margin:0;cursor:pointer">'
-           +t.discarded.length+' other dump'+(t.discarded.length>1?'s':'')+'</summary>'
-           +'<ul style="margin:6px 0 0 16px">'+t.discarded.map(x=>
-             '<li class="help" style="margin:0">'+esc(x.name)+' — '+esc(x.why)+'</li>').join('')
-           +'</ul></details>':'';
-        return '<tr><td>'+esc(t.name)
-          +(t.outside_preference?' <span class="pill" title="No dump in your preferred regions; kept so the game is not lost">outside regions</span>':'')
-          +'</td><td>'+pill+'</td><td class="help" style="margin:0">'+esc(t.why)
-          +clones+'</td></tr>';
-      }).join('')+'</tbody></table>'
-      +(d.titles.length>300?'<p class="help">Showing the first 300 of '
-        +d.titles.length+'.</p>':'')
-      +((d.unknown_language_titles||[]).length
-        ?'<details style="margin-top:14px"><summary class="help" style="margin:0;cursor:pointer">'
-         +'Unknown language metadata ('+d.unknown_language_titles.length+' games — not counted as missing)</summary>'
-         +'<table style="margin-top:8px"><thead><tr><th>Title</th><th>Status</th><th>Note</th></tr></thead><tbody>'
-         +d.unknown_language_titles.slice(0,200).map(u=>
-           '<tr><td>'+esc(u.name)+'</td><td><span class="pill">'+esc(u.status||'missing')+'</span></td><td class="help" style="margin:0">'+esc(u.why||'')+'</td></tr>'
-         ).join('')+'</tbody></table></details>':'');
-
-    $('#cstart').onclick=async e=>{
+    out.innerHTML=collectionsPlanHtml(d,previewPolicy.platform,passMinutes);
+    const startBtn=$('#cstart');
+    if(!startBtn)return;
+    startBtn.onclick=async e=>{
       e.target.disabled=true; e.target.textContent='Queueing…';
       const r=await j('/api/v1/collection/start',{method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -7660,12 +7911,130 @@ RENDER.collections=async()=>{
           ...previewPolicy,
           per_pass:parseInt($('#cpp').value,10)||5})});
       if(!current())return;
-      toast(r.error?r.error:('Queued '+(r.queued||0)+' titles'));
-      e.target.disabled=false; e.target.textContent='Request missing';
+      if(r.error){
+        toast(r.error);
+        e.target.disabled=false; e.target.textContent='Request '+d.counts.missing+' missing';
+        return;
+      }
+      toast(r.queued?('Queued '+r.queued+' titles. See Sets in progress below.'):(r.message||'Nothing to queue'));
+      e.target.textContent='Queued';
       drawBatches();
     };
   };
 };
+
+// The dismissible "How this works" panel. Remembered per browser only: it is
+// a convenience, so a private window or blocked storage simply shows it again.
+const COLLECTIONS_GUIDE='https://github.com/BlizzHacker/romarr/blob/main/docs/COLLECTIONS.md';
+const COLLECTIONS_HELP_KEY='romarr.collections.help.hidden';
+function collectionsHelpHidden(){
+  try{return localStorage.getItem(COLLECTIONS_HELP_KEY)==='1';}catch(_){return false;}
+}
+function collectionsHelpRemember(hidden){
+  try{
+    if(hidden)localStorage.setItem(COLLECTIONS_HELP_KEY,'1');
+    else localStorage.removeItem(COLLECTIONS_HELP_KEY);
+  }catch(_){}
+}
+function collectionsHowItWorks(passMinutes,hidden){
+  return '<div class="card" id="chelp"'+(hidden?' style="display:none"':'')+'>'
+    +'<div class="row" style="justify-content:space-between;align-items:center">'
+    +'<h3 style="margin:0">How Collections works</h3>'
+    +'<button class="btn ghost" id="chelp-hide" title="Hide this panel. Bring it back with How this works.">Hide</button></div>'
+    +'<p class="help" style="margin-top:8px">A collection is a whole set for one system, such as every USA '
+    +'SNES game. A DAT is the checklist for that set. ROMarr compares it with what is on disk and requests '
+    +'only what is missing.</p>'
+    +'<ol class="help" style="margin:0 0 8px 18px;padding:0">'
+    +'<li><b>Load a DAT</b> (No-Intro for cartridges, Redump for discs) under '
+    +'<a href="#media">Settings → Media Management</a>.</li>'
+    +'<li><b>Pick the DAT and its platform</b> below. ROMarr fills in the platform when the DAT name says which system it is.</li>'
+    +'<li><b>Choose your rules</b>: one game, one ROM, your region order, and what to leave out.</li>'
+    +'<li><b>Preview the plan</b>. Nothing is downloaded. You see what you have, what is missing, and why each dump was picked.</li>'
+    +'<li><b>Request the missing games</b>. ROMarr works through them a few at a time, every '
+    +esc(String(passMinutes))+' minutes, through your indexers and download clients. Imports are checked against the DAT.</li>'
+    +'</ol>'
+    +'<p class="help" style="margin:0">Already have a whole-set torrent in qBittorrent or Transmission? '
+    +'Use <b>Fill a set from a torrent you already have</b> instead of searching. '
+    +'<a href="'+COLLECTIONS_GUIDE+'" target="_blank" rel="noopener">Read the Collections guide</a> '
+    +'for worked examples and what every status means.</p></div>';
+}
+function collectionsNoDat(){
+  return '<div class="empty-cat"><b>No DAT loaded yet</b>'
+    +'<p class="help" style="margin:8px 0 0">A DAT is the checklist of every game in a set. '
+    +'Collections needs at least one.</p>'
+    +'<ol class="help" style="text-align:left;display:inline-block;margin:12px auto 0">'
+    +'<li>Download the DAT for your system: <a href="https://datomatic.no-intro.org" target="_blank" rel="noopener">No-Intro</a> '
+    +'for cartridges, <a href="http://redump.org/downloads/" target="_blank" rel="noopener">Redump</a> for discs.</li>'
+    +'<li>Unzip the <code>.dat</code> files into one folder ROMarr can read.</li>'
+    +'<li>Enter that folder as <b>DAT directory</b> under <a href="#media">Settings → Media Management</a> and save.</li>'
+    +'<li>Come back here. Large DATs can take a minute to load.</li></ol>'
+    +'<p class="help" style="margin:10px 0 0"><a href="'+COLLECTIONS_GUIDE+'" target="_blank" rel="noopener">'
+    +'Read the Collections guide</a></p></div>';
+}
+function collectionsPlanHtml(d,platform,passMinutes){
+  const c=d.counts;
+  const tile=(n,label,colour,hint)=>'<div style="flex:1;min-width:110px;padding:10px 12px;'
+    +'background:var(--bg);border:1px solid var(--line);border-radius:6px"'
+    +(hint?' title="'+esc(hint)+'"':'')+'>'
+    +'<div style="font-size:22px;font-weight:600;color:'+colour+'">'+n+'</div>'
+    +'<div class="help" style="margin:0">'+label+'</div></div>';
+  const pill=t=>t.status==='verified'
+    ?'<span class="pill" style="background:var(--ok);color:#08210d" title="On disk and hash-verified against the DAT when it was imported">verified</span>'
+    :t.status==='bad'
+      ?'<span class="pill" style="background:var(--bad);color:#2a0b0b" title="On disk, but a DAT marks this dump as bad. Replace it.">bad dump</span>'
+      :t.status==='missing'
+        ?'<span class="pill" style="background:var(--warn);color:#2a1c05" title="Not found in this platform’s library folder">missing</span>'
+        :'<span class="pill" title="A file with this name is on disk. ROMarr has not hash-checked it.">present</span>';
+  const action=c.missing
+    ?(platform
+      ?'<div class="row" style="align-items:center;gap:10px"><button class="btn" id="cstart">Request '+c.missing
+       +' missing</button>'
+       +'<label class="help" style="margin:0" title="How many titles each pass requests">'
+       +'<input id="cpp" type="number" min="1" max="50" value="5" style="width:60px;padding:5px;'
+       +'background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px"> per pass, every '
+       +esc(String(passMinutes))+' minutes</label></div>'
+      :'<div class="panel-note panel-warn">Choose the platform this DAT is for, then preview again. '
+       +'Without a platform ROMarr cannot read the right library folder or file the games it finds.</div>')
+    :'<div class="panel-note">Nothing is missing. Every title this plan expects is already in your library.</div>';
+  return '<div class="row" style="gap:10px;flex-wrap:wrap">'
+    +tile(c.expected,'in the set','var(--fg)','Titles the DAT lists that fit your rules')
+    +tile(c.have,'you have','var(--ok)','In the set and already on disk')
+    +tile(c.missing,'missing','var(--warn)','In the set and not found on disk')
+    +tile(c.bad,'bad dumps','var(--bad)','On disk, but the DAT marks the dump as bad')
+    +tile(c.excluded,'left out by your rules','var(--dim)','Prototypes, betas, demos and the other kinds you ticked')
+    +((c.region_omitted||0)?tile(c.region_omitted,'omitted — no dump in your regions','var(--dim)'):'')
+    +((c.language_omitted||0)?tile(c.language_omitted,'omitted — language not in preference','var(--dim)'):'')
+    +((c.unknown_language||0)?tile(c.unknown_language,'unknown language (not counted)','var(--dim)'):'')
+    +'</div>'
+    +'<p class="help" style="margin:12px 0">'+esc(d.dat)+(d.dat_version?' ('+esc(d.dat_version)+')':'')
+    +' — region order '+esc((d.policy.regions||[]).join(' → '))
+    +((d.policy.preferred_languages||[]).length?' · preferred languages '+esc(d.policy.preferred_languages.join(' → ')):'')
+    +(d.policy.region_mode==='strict'?' (strict: titles without a matching-region dump are omitted)':'')+'.</p>'
+    +action
+    +'<table style="margin-top:14px"><thead><tr><th>Title</th><th>Status</th>'
+    +'<th>Why this dump</th></tr></thead><tbody>'
+    +d.titles.slice(0,300).map(t=>{
+      const clones=(t.discarded||[]).length
+        ?'<details><summary class="help" style="margin:0;cursor:pointer">'
+         +t.discarded.length+' other dump'+(t.discarded.length>1?'s':'')+'</summary>'
+         +'<ul style="margin:6px 0 0 16px">'+t.discarded.map(x=>
+           '<li class="help" style="margin:0">'+esc(x.name)+' — '+esc(x.why)+'</li>').join('')
+         +'</ul></details>':'';
+      return '<tr><td>'+esc(t.name)
+        +(t.outside_preference?' <span class="pill" title="No dump in your preferred regions; kept so the game is not lost">outside regions</span>':'')
+        +'</td><td>'+pill(t)+'</td><td class="help" style="margin:0">'+esc(t.why)
+        +clones+'</td></tr>';
+    }).join('')+'</tbody></table>'
+    +(d.titles.length>300?'<p class="help">Showing the first 300 of '
+      +d.titles.length+'.</p>':'')
+    +((d.unknown_language_titles||[]).length
+      ?'<details style="margin-top:14px"><summary class="help" style="margin:0;cursor:pointer">'
+       +'Unknown language metadata ('+d.unknown_language_titles.length+' games — not counted as missing)</summary>'
+       +'<table style="margin-top:8px"><thead><tr><th>Title</th><th>Status</th><th>Note</th></tr></thead><tbody>'
+       +d.unknown_language_titles.slice(0,200).map(u=>
+         '<tr><td>'+esc(u.name)+'</td><td><span class="pill">'+esc(u.status||'missing')+'</span></td><td class="help" style="margin:0">'+esc(u.why||'')+'</td></tr>'
+       ).join('')+'</tbody></table></details>':'');
+}
 
 RENDER.manualimport=async()=>{
   $('#page').innerHTML='<div class="card"><h3>Manual Import</h3>'
