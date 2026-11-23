@@ -608,6 +608,31 @@ def test_native_offload_preserves_content_replaced_before_atomic_capture(jobs, s
     assert not list(source.parent.glob(".romarr-offload-*"))
 
 
+def test_move_no_replace_uses_macos_exclusive_rename(tmp_path, monkeypatch):
+    import ctypes
+    import sys
+
+    calls = []
+
+    class FakeRename:
+        def __call__(self, source, destination, flags):
+            calls.append((source, destination, flags))
+            return 0
+
+    class FakeLibC:
+        renamex_np = FakeRename()
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_args, **_kwargs: FakeLibC())
+
+    source = tmp_path / "source.rom"
+    destination = tmp_path / "destination.rom"
+    cloud_jobs.CloudJobs._move_no_replace(source, destination)
+
+    assert calls == [(os.fsencode(source), os.fsencode(destination), 0x00000004)]
+
+
 def test_offload_needs_confirmation_and_a_library_folder(jobs, svc):
     with pytest.raises(CloudError, match="confirm"):
         jobs.save_job({"kind": "offload", "remote": "dav", "local_path": str(svc.lib / "snes")})

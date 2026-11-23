@@ -35,6 +35,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -323,6 +324,16 @@ class CloudJobs:
         if os.name == "nt":
             # Windows os.rename fails when the destination already exists.
             os.rename(source, destination)
+            return
+        if sys.platform == "darwin":
+            import ctypes
+
+            renamex_np = ctypes.CDLL(None, use_errno=True).renamex_np
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            if renamex_np(os.fsencode(source), os.fsencode(destination), 0x00000004) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(source), str(destination))
             return
         from .file_reports import _move_no_replace
         _move_no_replace(str(source), str(destination))
