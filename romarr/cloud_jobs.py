@@ -1,3 +1,4 @@
+Attempting to perform the InitializeDefaultDrives operation on the 'FileSystem' provider failed.
 """What ROMarr does with a cloud connection: jobs, imports and mounts.
 
 Job kinds, each run on demand or every N hours by the scheduler:
@@ -28,6 +29,7 @@ Local folders are confined to the folders the operator already gave ROMarr
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import logging
 import os
@@ -241,21 +243,47 @@ class CloudJobs:
             sizes = {name: (Path(folder) / name).stat().st_size
                      for name in files if not name.endswith(".partial")}
             for name, size in sizes.items():
-                if listings[target_dir].get(name) != size:
-                    client.upload(Path(folder) / name, f"{target_dir}/{name}".lstrip("/"))
+                source = Path(folder) / name
+                remote_path = f"{target_dir}/{name}".lstrip("/")
+                digest = self._sha256(source) if delete else ""
+                same_size = listings[target_dir].get(name) == size
+                if same_size and delete:
+                    if self._remote_sha256(client, remote_path) != digest:
+                        same_size = False
+                if not same_size:
+                    client.upload(source, remote_path)
                     run["files"] += 1
                     run["bytes"] += size
-            if delete and sizes:
-                # One listing per folder checks every upload; only matches are deleted.
-                uploaded = self._sizes(client, target_dir)
-                wrong = [n for n, size in sizes.items() if uploaded.get(n) != size]
-                for name in sizes:
-                    if name not in wrong:
-                        (Path(folder) / name).unlink()
-                if wrong:
-                    raise CloudError(f"{', '.join(wrong[:3])}: the uploaded size does not match; "
-                                     "kept locally")
+                if delete:
+                    try:
+                        verified = self._remote_sha256(client, remote_path)
+                    except (native.NativeError, OSError) as err:
+                        raise CloudError(f"{name}: could not verify remote content; kept locally") from err
+                    if verified != digest:
+                        raise CloudError(f"{name}: remote content does not match; kept locally")
+                    if self._sha256(source) != digest:
+                        raise CloudError(f"{name}: local content changed during offload; kept locally")
+                    source.unlink()
         return f"{run['files']} file(s) uploaded, {run['bytes']} bytes"
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @classmethod
+    def _remote_sha256(cls, client, path: str) -> str:
+        try:
+            with tempfile.TemporaryDirectory(prefix="romarr-cloud-verify-") as temp_dir:
+                downloaded = Path(temp_dir) / "verified-content"
+                client.download(path, downloaded)
+                return cls._sha256(downloaded)
+        except (native.NativeError, OSError) as err:
+            name = Path(path).name
+            raise CloudError(f"{name}: could not verify remote content; kept locally") from err
 
     @staticmethod
     def _sizes(client, folder: str) -> dict:
@@ -590,3 +618,4 @@ def _drop(staging: Path) -> None:
         staging.parent.rmdir()
     except OSError:
         pass
+

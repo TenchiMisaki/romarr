@@ -1,3 +1,4 @@
+Attempting to perform the InitializeDefaultDrives operation on the 'FileSystem' provider failed.
 """Cloud storage: rclone driving, sign-in safety, secrets, jobs and routes."""
 from __future__ import annotations
 
@@ -531,6 +532,60 @@ def _wait_runs(jobs):
     raise AssertionError("run did not finish")
 
 
+class _FakeNativeClient:
+    def __init__(self, files):
+        self.files = dict(files)
+
+    def list(self, folder):
+        prefix = folder.strip("/")
+        return [{"name": path[len(prefix):].lstrip("/"), "size": len(content), "is_dir": False}
+                for path, content in self.files.items()
+                if path.rsplit("/", 1)[0] == prefix]
+
+    def upload(self, local, path):
+        self.files[path] = Path(local).read_bytes()
+
+    def download(self, path, dest):
+        Path(dest).write_bytes(self.files[path])
+        return len(self.files[path])
+
+
+def test_native_offload_replaces_same_size_different_remote_content(jobs, svc, cloud, monkeypatch):
+    source = svc.lib / "snes" / "game.rom"
+    source.write_bytes(b"good")
+    client = _FakeNativeClient({"ROMs/game.rom": b"evil"})
+    monkeypatch.setattr(cloud, "native_client", lambda _remote: client)
+    run = {"files": 0, "bytes": 0}
+
+    jobs._native_upload({"remote_path": "ROMs"}, {"id": "dav"}, str(source.parent), run,
+                        delete=True)
+
+    assert client.files["ROMs/game.rom"] == b"good"
+    assert not source.exists()
+    assert run["files"] == 1
+
+
+def test_native_offload_keeps_local_file_when_remote_cannot_be_verified(jobs, svc, cloud, monkeypatch):
+    from romarr.cloud_native import NativeError
+
+    source = svc.lib / "snes" / "game.rom"
+    source.write_bytes(b"good")
+
+    class UnverifiableClient(_FakeNativeClient):
+        def download(self, path, dest):
+            raise NativeError("download unavailable")
+
+    client = UnverifiableClient({"ROMs/game.rom": b"evil"})
+    monkeypatch.setattr(cloud, "native_client", lambda _remote: client)
+    run = {"files": 0, "bytes": 0}
+
+    with pytest.raises(CloudError, match="could not verify remote content; kept locally"):
+        jobs._native_upload({"remote_path": "ROMs"}, {"id": "dav"}, str(source.parent), run,
+                            delete=True)
+
+    assert source.read_bytes() == b"good"
+
+
 def test_offload_needs_confirmation_and_a_library_folder(jobs, svc):
     with pytest.raises(CloudError, match="confirm"):
         jobs.save_job({"kind": "offload", "remote": "dav", "local_path": str(svc.lib / "snes")})
@@ -669,3 +724,4 @@ def test_a_sign_in_that_finished_by_itself_shows_up_without_a_paste(cloud, monke
     assert cloud.status()["last_signin"]["remote"]["id"] == "od"
     assert "access_token" not in json.dumps(cloud.status())
     assert cloud.signin_finish("http://127.0.0.1:53682/?state=s&code=c")["remote"]["id"] == "od"
+
