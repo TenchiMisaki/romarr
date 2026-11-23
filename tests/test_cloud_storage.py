@@ -585,6 +585,29 @@ def test_native_offload_keeps_local_file_when_remote_cannot_be_verified(jobs, sv
     assert source.read_bytes() == b"good"
 
 
+def test_native_offload_preserves_content_replaced_before_atomic_capture(jobs, svc, cloud, monkeypatch):
+    source = svc.lib / "snes" / "game.rom"
+    source.write_bytes(b"good")
+    client = _FakeNativeClient({})
+    monkeypatch.setattr(cloud, "native_client", lambda _remote: client)
+    run = {"files": 0, "bytes": 0}
+    move_no_replace = cloud_jobs.CloudJobs._move_no_replace
+
+    def replace_then_move(src, dst, **kwargs):
+        if Path(src) == source and Path(dst).parent.name.startswith(".romarr-offload-"):
+            source.write_bytes(b"new!")
+        return move_no_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(cloud_jobs.CloudJobs, "_move_no_replace", staticmethod(replace_then_move))
+
+    with pytest.raises(CloudError, match="local content changed during offload; kept locally"):
+        jobs._native_upload({"remote_path": "ROMs"}, {"id": "dav"}, str(source.parent), run,
+                            delete=True)
+
+    assert source.read_bytes() == b"new!"
+    assert not list(source.parent.glob(".romarr-offload-*"))
+
+
 def test_offload_needs_confirmation_and_a_library_folder(jobs, svc):
     with pytest.raises(CloudError, match="confirm"):
         jobs.save_job({"kind": "offload", "remote": "dav", "local_path": str(svc.lib / "snes")})

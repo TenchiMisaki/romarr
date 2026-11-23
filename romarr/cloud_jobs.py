@@ -254,15 +254,10 @@ class CloudJobs:
                     run["files"] += 1
                     run["bytes"] += size
                 if delete:
-                    try:
-                        verified = self._remote_sha256(client, remote_path)
-                    except (native.NativeError, OSError) as err:
-                        raise CloudError(f"{name}: could not verify remote content; kept locally") from err
+                    verified = self._remote_sha256(client, remote_path)
                     if verified != digest:
                         raise CloudError(f"{name}: remote content does not match; kept locally")
-                    if self._sha256(source) != digest:
-                        raise CloudError(f"{name}: local content changed during offload; kept locally")
-                    source.unlink()
+                    self._remove_verified_source(source, digest)
         return f"{run['files']} file(s) uploaded, {run['bytes']} bytes"
 
     @staticmethod
@@ -283,6 +278,54 @@ class CloudJobs:
         except (native.NativeError, OSError) as err:
             name = Path(path).name
             raise CloudError(f"{name}: could not verify remote content; kept locally") from err
+
+    @classmethod
+    def _remove_verified_source(cls, source: Path, digest: str) -> None:
+        """Delete only the exact local file atomically captured and verified."""
+        try:
+            staging_dir = Path(tempfile.mkdtemp(prefix=".romarr-offload-",
+                                                dir=str(source.parent)))
+        except OSError as err:
+            raise CloudError(f"{source.name}: could not safely stage the local file; kept locally") from err
+        staged = staging_dir / source.name
+        try:
+            cls._move_no_replace(source, staged)
+        except (OSError, ValueError) as err:
+            try:
+                staging_dir.rmdir()
+            except OSError:
+                pass
+            raise CloudError(f"{source.name}: could not safely capture the local file; kept locally") from err
+
+        try:
+            if cls._sha256(staged) != digest:
+                try:
+                    cls._move_no_replace(staged, source)
+                except (OSError, ValueError) as restore_error:
+                    raise CloudError(f"{source.name}: local content changed during offload; "
+                                     f"preserved at {staged}") from restore_error
+                raise CloudError(f"{source.name}: local content changed during offload; kept locally")
+            staged.unlink()
+        except CloudError:
+            raise
+        except OSError as err:
+            raise CloudError(f"{source.name}: could not safely finish offload; preserved at {staged}") from err
+        finally:
+            if not staged.exists():
+                try:
+                    staging_dir.rmdir()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _move_no_replace(source: Path, destination: Path) -> None:
+        """Atomically move one path without replacing an existing destination."""
+        if os.name == "nt":
+            # Windows os.rename fails when the destination already exists.
+            os.rename(source, destination)
+            return
+        from .file_reports import _move_no_replace
+        _move_no_replace(str(source), str(destination))
 
     @staticmethod
     def _sizes(client, folder: str) -> dict:
