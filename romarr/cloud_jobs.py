@@ -1,4 +1,3 @@
-Attempting to perform the InitializeDefaultDrives operation on the 'FileSystem' provider failed.
 """What ROMarr does with a cloud connection: jobs, imports and mounts.
 
 Job kinds, each run on demand or every N hours by the scheduler:

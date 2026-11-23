@@ -1,4 +1,3 @@
-Attempting to perform the InitializeDefaultDrives operation on the 'FileSystem' provider failed.
 """Cloud storage: rclone driving, sign-in safety, secrets, jobs and routes."""
 from __future__ import annotations
 
