@@ -3903,7 +3903,7 @@ function chatAppend(html,cls){
   log.appendChild(div); log.scrollTop=log.scrollHeight; return div;
 }
 function chatConfirmCard(ev,version){
-  const card=chatAppend(`<div class="panel-note${ev.destructive?' panel-warn':''}"><b>${ev.destructive?'Confirm removal':'Confirm action'}:</b> ${esc(ev.summary)}`
+  const card=chatAppend(`<div class="panel-note${ev.destructive?' panel-warn':''}" data-keep><b>${ev.destructive?'Confirm removal':'Confirm action'}:</b> ${esc(ev.summary)}`
     +`<div class="row" style="margin-top:8px;gap:8px"><button class="btn" data-chat-ok>Confirm</button>`
     +`<button class="btn ghost" data-chat-no>Cancel</button></div></div>`,'chat-confirm');
   if(!card) return;
@@ -8621,11 +8621,11 @@ JS += r"""
     const gone=read();
     document.querySelectorAll('#page .panel-note:not([data-keep]):not([data-note])').forEach(el=>{
       const k=noteKey(el);el.dataset.note=k;
-      if(gone.has(k)){el.hidden=true;return;}
       const x=document.createElement('button');x.type='button';x.className='note-x';
       x.setAttribute('aria-label','Dismiss this notice');x.title='Dismiss';x.textContent='×';
       x.onclick=()=>{const s=read();s.add(k);write(s);el.hidden=true;restore();};
       el.appendChild(x);
+      if(gone.has(k)){el.hidden=true;return;}
     });
     // Long explanations fold to two lines with a More toggle: the first
     // lines say what a thing is, the rest is there when somebody wants it.

@@ -6,12 +6,14 @@ import json
 import pytest
 
 from romarr import hydra
-from romarr.downloaders import AllDebrid, DebridConfig, RealDebrid, RealDebridConfig, pick_client
+from romarr.downloaders import (AllDebrid, DebridConfig, RealDebrid, RealDebridConfig,
+                                match_queue_item, pick_client)
 from romarr.hosters import HosterRoute, host_label, is_file_host, looks_like_file, public_file_url
 from romarr.hydra import HydraSource, HydraSourceConfig, parse_size, parse_source, platform_slug
 from romarr.indexers import INDEXER_TYPES, build_indexer
 from romarr.platforms import resolve
 from romarr.selection import best_release, infer_platform, judge
+from romarr.store import QueueItem
 
 MAGNET = "magnet:?xt=urn:btih:" + "a" * 40
 DOC = {
@@ -240,7 +242,10 @@ def test_real_debrid_records_a_file_host_link_and_finishes_it_without_asking_the
     rd = RealDebrid(RealDebridConfig(api_token="t", save_path=str(tmp_path)))
     monkeypatch.setattr(rd, "_get", lambda *a, **k: pytest.fail("no API call for a link job"))
     assert rd.add("https://1fichier.com/?abc", name="Game (USA)")
-    assert rd._finished() == [("Game (USA)", ["https://1fichier.com/?abc"], "")]
+    folder, links, infohash, job_id, display_name = rd._finished()[0]
+    assert links == ["https://1fichier.com/?abc"] and infohash == ""
+    assert job_id == rd.last_job_id and job_id.startswith("link:")
+    assert folder != display_name and display_name == "Game (USA)"
 
 
 def test_real_debrid_reads_its_host_list_once(tmp_path, monkeypatch):
@@ -254,14 +259,56 @@ def test_real_debrid_reads_its_host_list_once(tmp_path, monkeypatch):
 def test_alldebrid_records_a_file_host_link(tmp_path):
     ad = AllDebrid(DebridConfig(api_token="t", save_path=str(tmp_path)))
     assert ad.add("https://gofile.io/d/abc", name="Game")
-    assert ad._hoster_jobs() == [("Game", ["https://gofile.io/d/abc"])]
+    folder, links, infohash, job_id, display_name = ad._hoster_jobs()[0]
+    assert links == ["https://gofile.io/d/abc"] and infohash == ""
+    assert job_id == ad.last_job_id and job_id.startswith("link:")
+    assert folder != display_name and display_name == "Game"
 
 
 def test_a_source_title_cannot_leave_the_download_folder(tmp_path):
     rd = RealDebrid(RealDebridConfig(api_token="t", save_path=str(tmp_path)))
     assert rd.add("https://1fichier.com/?abc", name="../../Ookami (USA)")
-    (name, links, _), = rd._finished()
-    assert ".." not in name and "/" not in name and name.endswith("Ookami (USA)")
+    folder, links, _, job_id, display_name = rd._finished()[0]
+    assert ".." not in folder and "/" not in folder and folder.endswith("]")
+    assert display_name.endswith("Ookami (USA)") and job_id == rd.last_job_id
+
+
+@pytest.mark.parametrize("client_type, config_type, url", [
+    (RealDebrid, RealDebridConfig, "https://indexer.example/api?t=download&id=7&apikey=secret"),
+    (AllDebrid, DebridConfig, "https://indexer.example/api?T=DOWNLOAD&ID=7&APIKEY=secret"),
+])
+def test_keyed_torznab_download_url_is_not_recorded_as_a_hoster(
+        tmp_path, monkeypatch, client_type, config_type, url):
+    config = config_type(api_token="t", save_path=str(tmp_path))
+    client = client_type(config)
+    monkeypatch.setattr(client, "_post", lambda *args, **kwargs: pytest.fail("must not submit API URL"))
+    assert client.add(url, name="Private release") is False
+    assert client._ours() == []
+
+
+def test_hoster_jobs_with_the_same_title_keep_distinct_targets_and_ids(tmp_path, monkeypatch):
+    rd = RealDebrid(RealDebridConfig(api_token="t", save_path=str(tmp_path)))
+    urls = ["https://gofile.io/d/first", "https://gofile.io/d/second"]
+    assert all(rd.add(url, name="Same Game") for url in urls)
+    jobs = rd._hoster_jobs()
+    assert len({job[0] for job in jobs}) == 2
+    assert len({job[3] for job in jobs}) == 2
+    assert {job[4] for job in jobs} == {"Same Game"}
+
+    monkeypatch.setattr(rd, "_resolve", lambda link: ("game.zip", "https://cdn.example/game.zip"))
+    def download(url, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"rom")
+        return True
+    monkeypatch.setattr(rd, "_download", download)
+    done = rd.completed()
+    assert {row["name"] for row in done} == {"Same Game"}
+    assert {row["id"] for row in done} == {job[3] for job in jobs}
+    assert len({row["content_path"] for row in done}) == 2
+    for row in done:
+        queued = QueueItem("Same Game", "ps2", "release", 1, "grabbed",
+                           download_id=row["id"], download_client="rd")
+        assert match_queue_item([queued], row, client_id="rd") is queued
 
 
 def test_an_unwritable_ledger_fails_the_grab(tmp_path, monkeypatch):
@@ -285,9 +332,17 @@ def test_a_two_machine_tag_gives_no_exclusive_platform():
         {"title": "Pokemon - Crystal Version (USA, Europe)", "platform": "GB/GBC",
          "uris": ["https://archive.org/download/x/Pokemon%20Crystal.gbc"]}]})
     assert rows[0].platform_hint == ""
-    gbc = resolve("gbc")
-    assert judge(rows[0], "Pokemon - Crystal Version", gbc).verdict == "" or \
-        "another platform" not in judge(rows[0], "Pokemon - Crystal Version", gbc).verdict
+    assert rows[0].categories == (1000,)
+    decision = judge(rows[0], "Pokemon - Crystal Version", resolve("gbc"))
+    assert decision.points > 0 and "another platform" not in decision.verdict
+
+
+def test_hydra_prefilter_uses_roman_numeral_canonicalization():
+    src, _ = _source(body={"downloads": [
+        {"title": "Final Fantasy 7 (USA)", "platform": "psx", "uris": [MAGNET]}]})
+    rows = src.search("Final Fantasy VII")
+    assert [row.title for row in rows] == ["Final Fantasy 7 (USA)"]
+    assert judge(rows[0], "Final Fantasy VII", resolve("psx")).accepted
 
 
 def test_search_folds_accents_both_ways():

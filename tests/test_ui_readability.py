@@ -14,6 +14,12 @@ def test_every_notice_can_be_dismissed_and_brought_back():
     assert "romarr.dismissedNotes" in ui.JS
     assert ".panel-note:not([data-keep]):not([data-note])" in ui.JS
     assert 'id="notes-restore"' in ui._theme_control_html()
+    start = ui.JS.index("function chatConfirmCard")
+    confirm = ui.JS[start:ui.JS.index("function chatToolFailed", start)]
+    assert 'data-keep' in confirm
+    restored = ui.JS.index("el.appendChild(x)")
+    hidden_return = ui.JS.index("if(gone.has(k)")
+    assert restored < hidden_return
 
 
 def test_long_help_folds_behind_more():

@@ -42,7 +42,7 @@ import requests
 
 from .hosters import is_file_host, looks_like_file
 from .platforms import resolve, same_machine
-from .selection import Release
+from .selection import Release, _canonical_tokens
 
 log = logging.getLogger(__name__)
 
@@ -72,21 +72,17 @@ _PLATFORM_CODES = {
 }
 
 
-def platform_slug(code) -> str:
-    """ROMarr's slug for a Hydra ``platform`` value, or "" when unknown.
-
-    Codes like ``GB/GBC`` and ``NEC PC Engine CD-TurboGrafx-CD`` name two
-    labels for one machine; each half is tried until one resolves.
-    """
+def _platform_slugs(code) -> list[str]:
+    """Resolve every machine named in a Hydra platform label."""
     raw = str(code or "").strip()
     if not raw:
-        return ""
+        return []
     known = _PLATFORM_CODES.get(raw.lower())
     if known:
-        return known
+        return [known]
     found = resolve(raw)
     if found is not None:
-        return found.slug
+        return [found.slug]
     slugs = []
     for part in re.split(r"\s*[/|]\s*|\s+-\s*|-(?=[A-Z])", raw):
         part = part.strip()
@@ -96,6 +92,16 @@ def platform_slug(code) -> str:
         found = known or (resolve(part).slug if resolve(part) is not None else "")
         if found:
             slugs.append(found)
+    return slugs
+
+
+def platform_slug(code) -> str:
+    """ROMarr's exclusive slug for a Hydra platform value, or "" if ambiguous.
+
+    Codes such as ``GB/GBC`` name two machines, so neither is an exclusive
+    hint. Their console category is still retained during source parsing.
+    """
+    slugs = _platform_slugs(code)
     if not slugs:
         return ""
     # "GB/GBC" names two machines: claiming either one would refuse the
@@ -180,8 +186,10 @@ def parse_source(document, *, indexer: str = "Hydra source",
             continue
         links.sort(key=lambda pair: _KIND_ORDER[pair[0]])
         kind, url = links[0]
+        platform_slugs = _platform_slugs(row.get("platform"))
         slug = platform_slug(row.get("platform"))
-        cats = tuple(categories) or ((CONSOLE_CATEGORY,) if slug and slug != "win"
+        is_console = bool(platform_slugs) and all(s != "win" for s in platform_slugs)
+        cats = tuple(categories) or ((CONSOLE_CATEGORY,) if is_console
                                       else (PC_CATEGORY,))
         extra = {}
         published = _published(row.get("uploadDate"))
@@ -296,12 +304,12 @@ class HydraSource:
         return True
 
     def search(self, term: str, *, limit: int = 100) -> list[Release]:
-        wanted = [w for w in _words(term) if len(w) > 2] or _words(term)
+        wanted = _canonical_tokens([w for w in _words(term) if len(w) > 2] or _words(term))
         if not wanted:   # RSS sync asks with an empty query: the newest rows
             return list(self.releases())[:limit]
         out = []
         for release in self.releases():
-            haystack = set(_words(release.title))
+            haystack = set(_canonical_tokens(_words(release.title)))
             if all(w in haystack for w in wanted):
                 out.append(release)
                 if len(out) >= limit:

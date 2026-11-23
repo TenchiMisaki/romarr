@@ -190,9 +190,13 @@ def test_a_torrent_that_just_left_the_queue_gets_the_whole_timeout(tmp_path):
     service.retire_dead_downloads()
     assert row.waited_at, "the sweep records that it saw the torrent waiting"
 
+    # Simulate a long interval between sweeps: the torrent leaves the queue
+    # sometime after the last waiting sample, but is observed only now.
+    row.waited_at = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat(timespec="seconds")
     client.state = "stalledDL"
     service.retire_dead_downloads()
-    assert row.state == "grabbed" and not row.blocklisted
+    assert row.state == "grabbed" and not row.blocklisted and row.active_at
+    assert service._row_age_minutes(row, datetime.now(timezone.utc)) < 180
 
 
 def test_a_torrent_stalled_for_the_whole_timeout_after_the_queue_is_retired(tmp_path):
@@ -200,6 +204,7 @@ def test_a_torrent_stalled_for_the_whole_timeout_after_the_queue_is_retired(tmp_
     service.store.settings["stalled_timeout_minutes"] = 180
     row = _torrent_row()
     row.waited_at = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat(timespec="seconds")
+    row.active_at = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat(timespec="seconds")
     service.queue = [row]
     service.clients = [_QueuedTorrents("stalledDL")]
     service.retire_dead_downloads()

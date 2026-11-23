@@ -318,6 +318,9 @@ def _openai(cfg, messages, tools, max_tokens, json_mode):
         body["tools"] = [{"type": "function", "function": t} for t in tools]
     response = _request(cfg, "POST", "/chat/completions", body=body, stream=True)
     pending: dict[int, dict] = {}
+    pending_unindexed: dict[str, dict] = {}
+    unindexed_calls = []
+    unindexed_number = 0
     for chunk in _sse(response, cfg.get("_reply_deadline", float("inf"))):
         if chunk.get("error"):
             raise ProviderError(f"{LABELS['openai']}: {_scrub(_detail_of(chunk), cfg)}")
@@ -329,8 +332,26 @@ def _openai(cfg, messages, tools, max_tokens, json_mode):
             if delta.get("content"):
                 yield "text", delta["content"]
             for part in delta.get("tool_calls") or []:
-                slot = pending.setdefault(int(part.get("index") or 0), {"id": "", "name": "", "args": ""})
                 fn = part.get("function") or {}
+                index = part.get("index")
+                if index is None:
+                    call_id = str(part.get("id") or "")
+                    name = fn.get("name") or ""
+                    args = fn.get("arguments") or ""
+                    if call_id:
+                        slot = pending_unindexed.setdefault(
+                            call_id, {"id": call_id, "name": "", "args": ""})
+                        slot["name"] += name
+                        slot["args"] += args
+                    elif isinstance(name, str) and name and isinstance(args, str):
+                        unindexed_number += 1
+                        unindexed_calls.append({
+                            "id": f"call_unindexed_{unindexed_number}",
+                            "name": name,
+                            "arguments": _parse_args(args),
+                        })
+                    continue
+                slot = pending.setdefault(int(index), {"id": "", "name": "", "args": ""})
                 slot["id"] = part.get("id") or slot["id"]
                 slot["name"] += fn.get("name") or ""
                 slot["args"] += fn.get("arguments") or ""
@@ -338,6 +359,11 @@ def _openai(cfg, messages, tools, max_tokens, json_mode):
         slot = pending[index]
         yield "tool_call", {"id": slot["id"] or f"call_{index}", "name": slot["name"],
                             "arguments": _parse_args(slot["args"])}
+    for slot in pending_unindexed.values():
+        yield "tool_call", {"id": slot["id"], "name": slot["name"],
+                            "arguments": _parse_args(slot["args"])}
+    for call in unindexed_calls:
+        yield "tool_call", call
 
 
 def _detail_of(chunk: dict) -> str:

@@ -331,6 +331,23 @@ def test_openai_stream_assembles_fragmented_tool_calls(service, provider):
     assert events[-2] == {"type": "text", "delta": "Found it."}
 
 
+def test_openai_keeps_complete_unindexed_tool_calls_independent(service, provider):
+    configure(service, provider, provider="openai", api_key=SECRET, base_url=provider + "/v1")
+    FakeProvider.script["/v1/chat/completions"] = [
+        sse({"choices": [{"delta": {"tool_calls": [
+            {"id": "call-a", "function": {"name": "health_check", "arguments": "{}"}},
+            {"id": "call-b", "function": {"name": "health_check", "arguments": "{}"}},
+        ]}}]}, {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        sse({"choices": [{"delta": {"content": "Both checks finished."}}]},
+            {"choices": [], "usage": {"total_tokens": 20}}),
+    ]
+
+    events = run(chat_agent.chat(service, "owner", "check health twice"))
+    calls = [event for event in events if event["type"] == "tool_call"]
+    assert [call["id"] for call in calls] == ["call-a", "call-b"]
+    assert [call["name"] for call in calls] == ["health_check", "health_check"]
+
+
 def test_anthropic_stream_and_message_shape(service, provider):
     configure(service, provider, provider="anthropic", api_key=SECRET, model="claude-sonnet-5-5")
     FakeProvider.script["/v1/messages"] = [

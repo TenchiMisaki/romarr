@@ -199,6 +199,9 @@ class QueueItem:
     # from the later of this and `at`, so a torrent that sat in the queue
     # past the timeout still gets the whole timeout to start once it leaves.
     waited_at: str = ""
+    # First observation after a queued or paused torrent becomes active.
+    # The stall clock starts here and remains stable across later sweeps.
+    active_at: str = ""
 
 
 @dataclass

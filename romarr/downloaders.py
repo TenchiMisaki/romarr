@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -2195,6 +2195,12 @@ class DebridClient:
         self._fetched_lock = threading.RLock()
         self._fetched_local: dict[str, dict] = {}
         self._copy_failures: dict[tuple[str, str], int] = {}
+        self._added = threading.local()
+
+    @property
+    def last_job_id(self) -> str:
+        """Stable ID of the job most recently added on this thread."""
+        return getattr(self._added, "job_id", "")
 
     @property
     def configured(self) -> bool:
@@ -2342,12 +2348,22 @@ class DebridClient:
     @staticmethod
     def _is_hoster_link(url: str) -> bool:
         """An http(s) link to a file host's page -- not a .torrent file URL,
-        which these services take only as an upload and is refused."""
+        nor a keyed Torznab/indexer download URL."""
         text = str(url or "")
         if not text.lower().startswith(("http://", "https://")):
             return False
         try:
-            return not urlsplit(text).path.lower().endswith(".torrent")
+            parts = urlsplit(text)
+            if parts.path.lower().endswith(".torrent"):
+                return False
+            query = {key.casefold(): value for key, value in
+                     parse_qsl(parts.query, keep_blank_values=True)}
+            keys = set(query)
+            if keys & {"apikey", "api_key", "api-key", "passkey"}:
+                return False
+            if query.get("t", "").casefold() == "download" and query.get("id"):
+                return False
+            return True
         except ValueError:
             return False
 
@@ -2374,16 +2390,30 @@ class DebridClient:
         False when the ledger could not be written: a job nothing recorded
         would be reported as grabbed and never fetched.
         """
+        self._added.job_id = ""
         key = "link:" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:24]
-        folder = self._job_folder_name(name, _basename_of(url) or key[5:])
-        self._remember(key, link=url, name=folder)
-        return any(self._entry_id(e) == key for e in self._ours())
+        display_name = str(name or _basename_of(url) or key[5:])
+        safe = self._job_folder_name(display_name, key[5:])
+        suffix = key[5:]
+        folder = f"{safe[:180 - len(suffix) - 3].rstrip()} [{suffix}]"
+        self._remember(key, link=url, name=display_name, folder=folder)
+        if any(self._entry_id(e) == key for e in self._ours()):
+            self._added.job_id = key
+            return True
+        return False
 
-    def _hoster_jobs(self) -> list[tuple[str, list]]:
-        """`(name, [link])` for every file-host link this ROMarr added."""
-        return [(self._job_folder_name(str(e.get("name") or ""), str(e.get("id"))[5:] or "download"),
-                 [str(e["link"])])
-                for e in self._ours() if isinstance(e, dict) and e.get("link")]
+    def _hoster_jobs(self) -> list[tuple]:
+        """Return folder, link, job ID and display name for recorded hoster jobs."""
+        jobs = []
+        for entry in self._ours():
+            if not isinstance(entry, dict) or not entry.get("link"):
+                continue
+            job_id = self._entry_id(entry)
+            fallback = job_id.removeprefix("link:") or "download"
+            display_name = str(entry.get("name") or fallback)
+            folder = str(entry.get("folder") or self._job_folder_name(display_name, fallback))
+            jobs.append((folder, [str(entry["link"])], "", job_id, display_name))
+        return jobs
 
     @staticmethod
     def _is_hoster_entry(entry) -> bool:
@@ -2414,9 +2444,12 @@ class DebridClient:
             for item in finished:
                 if not item or self._copy_failures.get(self._copy_identity(item), 0) >= 3:
                     continue
-                row = {"name": str(item[0]), "worker_active": True, "progress": 1.0}
+                row = {"name": str(item[4] if len(item) > 4 and item[4] else item[0]),
+                       "worker_active": True, "progress": 1.0}
                 if len(item) > 2 and item[2]:
                     row["hash"] = str(item[2])
+                if len(item) > 3 and item[3]:
+                    row["id"] = str(item[3])
                 rows.append(row)
         return rows
 
@@ -2425,6 +2458,8 @@ class DebridClient:
         """Identify copy retries by infohash when the service reports it."""
         if len(item) > 2 and item[2]:
             return "hash", str(item[2]).strip().lower()
+        if len(item) > 3 and item[3]:
+            return "id", str(item[3])
         return "name", str(item[0])
 
     def _finished(self) -> list[tuple[str, list]]:
@@ -2634,11 +2669,14 @@ class DebridClient:
                             failures = self._copy_failures.get(key, 0)
                             self._copy_failures[key] = min(failures + 1, 3)
                 if copied:
-                    row = {"name": name, "content_path": str(target),
+                    display_name = str(rest[2]) if len(rest) > 2 and rest[2] else name
+                    row = {"name": display_name, "content_path": str(target),
                            "save_path": self._config.save_path,
                            "state": self.DONE_STATE}
                     if rest and rest[0]:
                         row["hash"] = str(rest[0])
+                    if len(rest) > 1 and rest[1]:
+                        row["id"] = str(rest[1])
                     if fetch and links:
                         recorded = self._recorded_links_for(target)
                         files = [recorded.get(self._link_key(link), "") for link in links]
@@ -2775,6 +2813,7 @@ class RealDebrid(DebridClient):
 
     def add(self, magnet_or_url: str, *, save_path: str | None = None,
             name: str = "") -> bool:
+        self._added.job_id = ""
         if not self.configured:
             return False
         if self._is_hoster_link(magnet_or_url):
@@ -2797,7 +2836,7 @@ class RealDebrid(DebridClient):
 
     def _finished(self) -> list[tuple[str, list]]:
         """List completed Real-Debrid torrents from our ledger."""
-        out = [(name, links, "") for name, links in self._hoster_jobs()]
+        out = list(self._hoster_jobs())
         for entry in self._ours():
             if self._probe_timed_out():
                 break
@@ -2872,6 +2911,7 @@ class AllDebrid(DebridClient):
 
     def add(self, magnet_or_url: str, *, save_path: str | None = None,
             name: str = "") -> bool:
+        self._added.job_id = ""
         if not self.configured:
             return False
         if self._is_hoster_link(magnet_or_url):
@@ -2894,7 +2934,7 @@ class AllDebrid(DebridClient):
 
     def _finished(self) -> list[tuple[str, list]]:
         """List completed AllDebrid magnets from our ledger."""
-        out = self._hoster_jobs()
+        out = list(self._hoster_jobs())
         for entry in self._ours():
             if self._probe_timed_out():
                 break

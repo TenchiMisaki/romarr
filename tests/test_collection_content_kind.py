@@ -67,7 +67,7 @@ def test_hub_adapter_carries_refusal_and_search_disables_grab(tmp_path, monkeypa
     monkeypatch.setattr(hub, "resolve_torrents", lambda rows: rows)
     items = service._hub_releases("Fixture Game", resolve("wiiu"))
     assert len(items) == 1 and items[0].content_kind == "manual"
-    monkeypatch.setattr(service, "_search_releases", lambda *args: items)
+    monkeypatch.setattr(service, "_search_releases", lambda *args, **kwargs: items)
     result = service.candidates("Fixture Game", "wiiu")["items"][0]
     assert not result["accepted"] and not result["grabbable"]
     assert result["grab_refusal"] == "non-game collection content (manual)"

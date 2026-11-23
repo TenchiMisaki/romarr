@@ -764,7 +764,7 @@ def test_parts_are_validated(server):
 
 def test_a_request_scores_and_grabs_with_its_parts(server, monkeypatch):
     _, service = server
-    monkeypatch.setattr(service, "_search_releases", lambda game, platform: list(FROZEN))
+    monkeypatch.setattr(service, "_search_releases", lambda game, platform, **kwargs: list(FROZEN))
     grabbed = {}
 
     def fake_grab(pick, game, platform_slug, *, external_request_id="", parts=None, **kw):
@@ -778,7 +778,7 @@ def test_a_request_scores_and_grabs_with_its_parts(server, monkeypatch):
 
 def test_interactive_search_shows_the_package(server, monkeypatch):
     _, service = server
-    monkeypatch.setattr(service, "_search_releases", lambda game, platform: list(FROZEN))
+    monkeypatch.setattr(service, "_search_releases", lambda game, platform, **kwargs: list(FROZEN))
     items = {i["title"]: i for i in service.candidates(GAME, "ps4")["items"]}
     assert items[FROZEN[2].title]["package"] == "base game + update + DLC"
     assert items[FROZEN[1].title]["package"] == "update"
@@ -802,7 +802,7 @@ class FakeClient:
 
 def test_the_queue_row_remembers_the_requested_parts(tmp_path, monkeypatch):
     service = ROMarr({"ROMARR_DATA": str(tmp_path / "s.json")})
-    monkeypatch.setattr(service, "_search_releases", lambda game, platform: list(FROZEN))
+    monkeypatch.setattr(service, "_search_releases", lambda game, platform, **kwargs: list(FROZEN))
     service.clients = [FakeClient()]
     result = service.request(GAME, "ps4", parts=["base", "update", "dlc"])
     assert result["ok"] and result["release"] == FROZEN[2].title

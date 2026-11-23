@@ -167,6 +167,20 @@ def test_failed_direct_indexer_does_not_hide_other_sources(tmp_path):
     assert service._search_releases("Game", resolve("psx")) == [found, direct]
 
 
+def test_any_platform_search_and_candidates_include_direct_indexers(tmp_path):
+    service = ROMarr({"ROMARR_DATA": str(tmp_path / "state.json")})
+    direct = release("Game (USA)", "direct")
+    def fail_prowlarr(term):
+        raise RuntimeError("Prowlarr unavailable")
+    service.prowlarr = SimpleNamespace(search=fail_prowlarr)
+    service.indexers = [SimpleNamespace(name="direct-indexer", search=lambda term: [direct])]
+    service._hub_releases = lambda *args: []
+
+    assert service.search("Game")["indexers"]["test"]["found"] == 1
+    result = service.candidates("Game")
+    assert any(item["indexer"] == "test" for item in result["items"])
+
+
 @pytest.mark.parametrize("owns_session", [False, True])
 @pytest.mark.parametrize("lookup_error", [requests.ConnectionError, RuntimeError])
 def test_search_terms_share_privacy_and_retry_on_the_next_search(tmp_path, monkeypatch,

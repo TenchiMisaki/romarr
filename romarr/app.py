@@ -2572,14 +2572,7 @@ class ROMarr:
         if platform is not None:
             releases = self._search_releases(game, platform)
         else:
-            try:
-                releases = self.prowlarr.search(game)
-            except Exception as err:
-                log.warning("prowlarr search failed for %r: %s", game, err)
-                releases = []
-            # The hub lane joins here too, or this endpoint answers a
-            # different question than the request path it claims to mirror.
-            releases = releases + self._hub_releases(game, None)
+            releases = self._search_releases(game, None)
         asked = self._request_parts(game, platform)
         favoured = self._preferred_group(game, platform)
         pick = best_release(releases, game, platform,
@@ -2732,7 +2725,8 @@ class ROMarr:
             ))
         return out
 
-    def _search_releases(self, game: str, platform) -> list:
+    def _search_releases(self, game: str, platform, *,
+                         raise_if_all_failed: bool = False) -> list:
         """Find releases for a game, favouring recall over a tidy query.
 
         Searching "<game> <platform.name>" alone was far too narrow: indexers
@@ -2759,6 +2753,8 @@ class ROMarr:
         def search_term(term):
             """Query all captured indexer sources for one search string."""
             releases = []
+            succeeded = 0
+            failed = 0
             with ExitStack() as sessions:
                 for label, source in sources:
                     client = source
@@ -2770,14 +2766,20 @@ class ROMarr:
                         if isinstance(client, Prowlarr) and source is prowlarr:
                             client._privacy = privacy
                         releases.extend(client.search(term))
+                        succeeded += 1
                     except Exception as err:
                         log.warning("%s search failed for %r: %s", label, term, err)
-            return releases
+                        failed += 1
+            return releases, succeeded, failed
 
         # Enabled ROM Hub plugins are searched alongside the indexers: the
         # same titles, scored by the same rules, grabbable from the same
         # Interactive Search page. One query, not per-term: the Hub's own
         # fan-out already merges every plugin's answer for it.
+        queries = [game]
+        if platform is not None:
+            queries.append(f"{game} {platform.name}")
+        hub_enabled = self._hub_enabled()
         with ThreadPoolExecutor(max_workers=3) as pool:
             hub_search = pool.submit(self._hub_releases, game, platform)
             privacy = {}
@@ -2786,22 +2788,36 @@ class ROMarr:
                     privacy = prowlarr._private_ids()
                 except Exception as err:
                     log.warning("prowlarr privacy lookup failed: %r", err)
-            searches = [pool.submit(search_term, game),
-                        pool.submit(search_term, f"{game} {platform.name}"),
-                        hub_search]
+            searches = [pool.submit(search_term, term) for term in queries]
+            searches.append(hub_search)
         seen: set[tuple[str, str]] = set()
         merged = []
+        succeeded = 0
+        failed = 0
         for search in searches:
             try:
-                releases = search.result()
+                result = search.result()
             except Exception as err:
                 log.warning("release search task failed: %r", err)
+                if search is hub_search:
+                    failed += int(hub_enabled)
+                else:
+                    failed += 1
                 continue
+            if search is hub_search:
+                releases = result
+                succeeded += int(hub_enabled)
+            else:
+                releases, source_succeeded, source_failed = result
+                succeeded += source_succeeded
+                failed += source_failed
             for release in releases:
                 key = (release.title, release.download_url)
                 if key not in seen:
                     seen.add(key)
                     merged.append(release)
+        if raise_if_all_failed and failed and not succeeded:
+            raise RuntimeError("all release search sources failed")
         return merged
 
     def _preferred_group(self, game: str, platform) -> str:
@@ -3204,9 +3220,8 @@ class ROMarr:
                     "items": []}
 
         try:
-            releases = (self._search_releases(game, platform) if platform
-                        else self.prowlarr.search(game)
-                        + self._hub_releases(game, None))
+            releases = self._search_releases(game, platform,
+                                             raise_if_all_failed=True)
         except Exception as err:
             log.warning("interactive search failed for %r: %s", game, err)
             return {"error": f"search failed: {type(err).__name__}",
@@ -4691,7 +4706,10 @@ class ROMarr:
                         # torrents on one install.
                         if state in self._WAITING_TORRENT_STATES:
                             row.waited_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            row.active_at = ""
                             return True
+                        if row.waited_at and not row.active_at:
+                            row.active_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                         if dlspeed > 0 or state in (
                             "downloading", "forcedDL", "checkingDL",
                             "checkingUP", "allocating", "moving",
@@ -4751,8 +4769,18 @@ class ROMarr:
             return None
         if stamped.tzinfo is None:
             stamped = stamped.replace(tzinfo=timezone.utc)
+        active = getattr(row, "active_at", "") or ""
+        if active:
+            try:
+                resumed = datetime.fromisoformat(active)
+            except (TypeError, ValueError):
+                resumed = None
+            if resumed is not None:
+                if resumed.tzinfo is None:
+                    resumed = resumed.replace(tzinfo=timezone.utc)
+                stamped = max(stamped, resumed)
         waited = getattr(row, "waited_at", "") or ""
-        if waited:
+        if waited and not active:
             try:
                 left = datetime.fromisoformat(waited)
             except (TypeError, ValueError):
