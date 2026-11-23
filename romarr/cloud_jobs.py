@@ -617,4 +617,3 @@ def _drop(staging: Path) -> None:
         staging.parent.rmdir()
     except OSError:
         pass
-

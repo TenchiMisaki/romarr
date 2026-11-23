@@ -723,4 +723,3 @@ def test_a_sign_in_that_finished_by_itself_shows_up_without_a_paste(cloud, monke
     assert cloud.status()["last_signin"]["remote"]["id"] == "od"
     assert "access_token" not in json.dumps(cloud.status())
     assert cloud.signin_finish("http://127.0.0.1:53682/?state=s&code=c")["remote"]["id"] == "od"
-
