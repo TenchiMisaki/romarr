@@ -10,8 +10,8 @@ enable_free_tier: true
 reviews:
   profile: chill
   request_changes_workflow: false
-  high_level_summary: true
-  review_status: true
+  high_level_summary: false
+  review_status: false
   collapse_walkthrough: true
   changed_files_summary: true
   sequence_diagrams: true
@@ -86,7 +86,7 @@ reviews:
         blocks.
 
   auto_review:
-    enabled: true
+    enabled: false
     auto_incremental_review: true
     drafts: false
     ignore_usernames:
