@@ -38,6 +38,7 @@ jobs:
           config.model: "ollama/qwen2.5-coder:7b"
           config.fallback_models: "[]"
           config.custom_model_max_tokens: "16384"
+          config.ai_timeout: "300"
           config.duplicate_prompt_examples: "true"
           ollama.api_base: "http://ollama:11434"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
