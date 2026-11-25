@@ -1,4 +1,4 @@
-name: AI PR review
+name: AI PR feedback
 
 on:
   pull_request_target:
@@ -10,7 +10,12 @@ permissions:
   issues: write
 
 jobs:
-  review:
+  feedback:
+    name: PR-Agent ${{ matrix.tool }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [Review, Describe, Improve]
     if: >-
       github.repository == 'TenchiMisaki/romarr' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -30,18 +35,24 @@ jobs:
     steps:
       - name: Download the code review model
         shell: bash
-        run: docker exec "${{ job.services.ollama.id }}" ollama pull qwen2.5-coder:7b
-      - name: Review the pull request
+        run: |
+          docker exec "${{ job.services.ollama.id }}" ollama pull qwen2.5-coder:3b
+          printf '%s\n' 'FROM qwen2.5-coder:3b' 'PARAMETER num_thread 4' |
+            docker exec -i "${{ job.services.ollama.id }}" sh -ec 'cat > /tmp/Modelfile.review; ollama create romarr-review-3b -f /tmp/Modelfile.review'
+      - name: Run PR-Agent ${{ matrix.tool }}
         uses: The-PR-Agent/pr-agent@v0.47.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          config.model: "ollama/qwen2.5-coder:7b"
+          config.model: "ollama/romarr-review-3b"
           config.fallback_models: "[]"
           config.custom_model_max_tokens: "16384"
-          config.ai_timeout: "300"
-          config.duplicate_prompt_examples: "true"
+          config.ai_timeout: "600"
+          config.retry_same_model_on_timeout: "false"
+          config.duplicate_prompt_examples: "false"
+          pr_code_suggestions.parallel_calls: "false"
           ollama.api_base: "http://ollama:11434"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
-          github_action_config.auto_review: "true"
-          github_action_config.auto_improve: "true"
-          github_action_config.auto_describe: "true"
+          pr_reviewer.enable_large_pr_chunking: "true"
+          github_action_config.auto_review: ${{ matrix.tool == 'Review' && 'true' || 'false' }}
+          github_action_config.auto_improve: ${{ matrix.tool == 'Improve' && 'true' || 'false' }}
+          github_action_config.auto_describe: ${{ matrix.tool == 'Describe' && 'true' || 'false' }}
