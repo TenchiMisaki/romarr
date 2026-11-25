@@ -1,4 +1,5 @@
 name: AI PR feedback
+# Temporary comment for the rollout verification pull request.
 
 on:
   pull_request_target:
