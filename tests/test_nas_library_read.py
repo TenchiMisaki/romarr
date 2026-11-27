@@ -228,3 +228,22 @@ def test_unreadable_platform_does_not_hide_readable_siblings(tmp_path, monkeypat
     assert {g.platform for g in readable} == {"b-readable", "c-readable"}
     assert failure.value.folder_failures == ("PermissionError",)
     assert "private mount" not in str(failure.value)
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_refresh_from_previous_library_configuration_is_ignored(monkeypatch, partial):
+    """A stale refresh cannot replace results for the active configuration."""
+    service = ROMarr.__new__(ROMarr)
+    service._library_generation = 2
+    published = []
+
+    def publish(shelf, error, *, partial):
+        published.append((shelf, error, partial))
+
+    monkeypatch.setattr(service, "_publish_library", publish)
+    current = [Game(id="current", name="Current", platform="snes")]
+    stale = [Game(id="stale", name="Stale", platform="snes")]
+
+    service._publish_if_current(2, current, "", partial=False)
+    service._publish_if_current(1, stale, "Read interrupted", partial=partial)
+
+    assert published == [(current, "", False)]
