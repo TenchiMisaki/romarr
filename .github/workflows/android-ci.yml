@@ -1,0 +1,52 @@
+name: Android build and instrumentation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/android-ci.yml'
+      - 'desktop/android/**'
+      - 'scripts/build-android.sh'
+      - 'requirements*.txt'
+      - 'romarr/**'
+      - 'VERSION'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: python
+        with:
+          python-version: '3.13'
+      - name: Install Android build tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - name: Build APKs and release bundle
+        env:
+          ROMARR_BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: bash scripts/build-android.sh
+      - name: Enable emulator acceleration
+        run: |
+          sudo chgrp "$(id -gn)" /dev/kvm
+          sudo chmod g+rw /dev/kvm
+      - name: Run Android instrumentation tests
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        env:
+          ROMARR_BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash scripts/build-android.sh connectedDebugAndroidTest
