@@ -39,7 +39,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest "mcp==1.30.0" "playwright==1.62.0"
           python -m playwright install --with-deps chromium
-          pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/0d4f7114db4b047bc90a78912574a823e3b10527.tar.gz"
+          pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/2936ffa8861b7768d7888670587ba6e15c8c3929.tar.gz"
 
       - uses: actions/checkout@v5
         with:
@@ -274,6 +274,28 @@ jobs:
   # Browser download client. The default image is Alpine, where Playwright
   # cannot be installed at all (issue #35), so this is a separate tag rather
   # than a flag. No Chromium inside: it talks to a `playwright run-server`.
+  fuse-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build the image for FUSE validation
+        run: docker build --tag romarr:smoke .
+      - name: Verify a non-root user can mount a local fixture
+        run: |
+          echo "--- a PUID user can mount a cloud folder with FUSE ---"
+          # fusermount3 refuses a caller with no /etc/passwd entry, which
+          # every numeric PUID used to be; the entrypoint now names it.
+          docker run --rm --network none --device /dev/fuse --cap-add SYS_ADMIN \
+            --security-opt apparmor=unconfined -e PUID=1026 -e PGID=100 \
+            romarr:smoke sh -c 'mkdir -p /tmp/src /tmp/mnt && echo ok > /tmp/src/f && rclone mount /tmp/src /tmp/mnt --allow-other --daemon --daemon-wait 10s && test "$(cat /tmp/mnt/f)" = ok && fusermount3 -u /tmp/mnt' \
+            || { echo "a PUID user cannot mount with FUSE"; exit 1; }
+
   image-browser:
     needs: test
     runs-on: ubuntu-latest

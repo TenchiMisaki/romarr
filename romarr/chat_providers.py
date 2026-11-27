@@ -19,6 +19,7 @@ back from the provider.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from urllib.parse import urlsplit
@@ -30,6 +31,7 @@ LABELS = {"ollama": "Ollama", "openai": "OpenAI-compatible API", "anthropic": "A
 DEFAULT_URLS = {"ollama": "http://127.0.0.1:11434",
                 "openai": "https://api.openai.com/v1",
                 "anthropic": "https://api.anthropic.com"}
+URL_ENV = {provider: f"ROMARR_CHAT_{provider.upper()}_URLS" for provider in PROVIDERS}
 ANTHROPIC_VERSION = "2023-06-01"
 #: Connect fast, but give a local model on a small GPU time to load and think.
 TIMEOUT = (5, 180)
@@ -50,14 +52,40 @@ class ProviderError(Exception):
 def normalise_url(provider: str, url: str) -> str:
     """Return a clean base URL, or raise ValueError naming what is wrong."""
     url = str(url or "").strip().rstrip("/") or DEFAULT_URLS.get(provider, "")
+    if any(c.isspace() or ord(c) < 32 or c in ("\\", "\x7f") for c in url):
+        raise ValueError("Base URL contains invalid characters")
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("Base URL must start with http:// or https://")
-    if parts.username or parts.password:
+    if parts.username is not None or parts.password is not None:
         raise ValueError("Put the API key in the key field, not in the URL")
-    if parts.query or parts.fragment:
+    if "?" in url or "#" in url:
         raise ValueError("Base URL must not carry a query string or fragment")
+    try:
+        _ = parts.port  # Validate an explicitly specified port.
+    except ValueError:
+        raise ValueError("Base URL has an invalid port") from None
     return url
+
+
+def approved_base_url(provider: str, url: str) -> str:
+    """Select a built-in or deployment-approved URL for this provider."""
+    if provider not in DEFAULT_URLS:
+        raise ValueError("Unknown chat provider")
+    requested = normalise_url(provider, url)
+    default = DEFAULT_URLS[provider]
+    if requested == default:
+        return default
+    env_var = URL_ENV[provider]
+    for entry in os.environ.get(env_var, "").split():
+        try:
+            approved = normalise_url(provider, entry)
+        except ValueError:
+            continue
+        if requested == approved:
+            return approved
+    raise ValueError(f"Base URL is not approved for {LABELS[provider]}. "
+                     f"Add the exact URL to {env_var} on the ROMarr server and restart it.")
 
 
 def _scrub(text: str, cfg: dict) -> str:
@@ -84,7 +112,7 @@ def _headers(cfg: dict) -> dict:
 
 def _endpoint(cfg: dict, path: str) -> str:
     """Join a provider path onto the base URL without doubling `/v1`."""
-    base = normalise_url(cfg["provider"], cfg.get("base_url", ""))
+    base = approved_base_url(cfg["provider"], cfg.get("base_url", ""))
     if cfg["provider"] == "anthropic" and not base.endswith("/v1"):
         base += "/v1"
     return base + path
@@ -108,8 +136,11 @@ def _detail(response) -> str:
 
 def _request(cfg: dict, method: str, path: str, *, body=None, stream=False, timeout=TIMEOUT):
     """One provider request; every failure becomes a readable ProviderError."""
+    try:
+        url = _endpoint(cfg, path)
+    except ValueError as exc:
+        raise ProviderError(str(exc)) from None
     label = LABELS[cfg["provider"]]
-    url = _endpoint(cfg, path)
     parts = urlsplit(url)
     if cfg.get("api_key") and parts.scheme != "https" and parts.hostname not in (
             "localhost", "127.0.0.1", "::1"):
@@ -227,6 +258,19 @@ def _ollama(cfg, messages, tools, max_tokens, json_mode):
         body["format"] = "json"
     response = _request(cfg, "POST", "/api/chat", body=body, stream=True)
     calls = 0
+    # Ollama sends a tool call whole, with dict arguments -- or, from builds
+    # that stream like the OpenAI API, as indexed pieces: the first names the
+    # function, later ones carry string fragments of its arguments. Pieces are
+    # collected by index and emitted once, whole, when the reply ends.
+    pending: dict[int, dict] = {}
+
+    def flush():
+        for index in sorted(pending):
+            slot = pending[index]
+            yield "tool_call", {"id": slot["id"] or f"call_{index + 1}", "name": slot["name"],
+                                "arguments": _parse_args(slot["args"])}
+        pending.clear()
+
     for line in _lines(response, cfg.get("_reply_deadline", float("inf"))):
         if not line.strip():
             continue
@@ -241,11 +285,24 @@ def _ollama(cfg, messages, tools, max_tokens, json_mode):
             yield "text", message["content"]
         for call in message.get("tool_calls") or []:
             fn = call.get("function") or {}
+            args = fn.get("arguments")
+            if "index" in call or isinstance(args, str):
+                slot = pending.setdefault(int(call.get("index") or 0), {"id": "", "name": "", "args": ""})
+                slot["id"] = slot["id"] or str(call.get("id") or "")
+                if fn.get("name"):
+                    slot["name"] = str(fn["name"])
+                if isinstance(args, str):
+                    slot["args"] += args
+                elif isinstance(args, dict):
+                    slot["args"] = json.dumps(args)
+                continue
             calls += 1
             yield "tool_call", {"id": f"call_{calls}", "name": str(fn.get("name") or ""),
-                                "arguments": _parse_args(fn.get("arguments"))}
+                                "arguments": _parse_args(args)}
         if chunk.get("done"):
+            yield from flush()
             yield "usage", int(chunk.get("prompt_eval_count") or 0) + int(chunk.get("eval_count") or 0)
+    yield from flush()
 
 
 # -- OpenAI-compatible ---------------------------------------------------------

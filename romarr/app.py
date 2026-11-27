@@ -31,7 +31,9 @@ Routes:
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import dataclasses
 import json
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +42,9 @@ from copy import copy, deepcopy
 import logging
 from typing import NamedTuple
 import os
+import platform as host_platform
+import socket
+import ssl
 import pathlib
 import re
 import threading
@@ -47,6 +52,7 @@ import subprocess
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from http import client as http_client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, unquote_plus, urlparse, urlsplit, urlunsplit
@@ -58,18 +64,20 @@ import requests
 
 from .libraries import (
     FolderScanError, LIBRARY_TYPES, RETROBAT_FOLDERS, build_library, build_library_from_config, library_counts,
-    load_backend_plugins, merge_library_secrets, redact_library, route_library,
+    load_backend_plugins, merge_library_secrets, redact_library, rom_file_extensions, route_library,
 )
 from .clients import QBittorrent, QbitConfig, QbitAuthenticationError, Romm, RommConfig
 from . import soundtracks as soundtracks_mod
 from . import hub  # ROM Hub bridge -- the Cartridge plugin layer
+from . import plugin_dashboard  # per-plugin dashboard (settings, how-to, try it)
 from . import clamav, scanners, nup, mdm
 from .emulators import EmulatorHub
 from .libretro import CoreHub
 from .cartridge import CartridgeHub
 from .emulator_catalog import resource_catalog
-from .dat import DatIndex, dat_from_record, parse_dat
+from .dat import Dat, DatIndex, dat_from_record, parse_dat
 from .decompress import run_batch as run_decompress_batch
+from . import switch_compress
 from .switch_report import report as build_switch_report
 from .titled import classify_tid, TitleDBIndex, build_index as build_titled_index, validate_switch_rom
 from .downloaders import (
@@ -91,6 +99,7 @@ from .capture import status as capture_status
 from .catalogue import (Submission, check_source, facets as hub_facets,
                         search as hub_search, submission_link)
 from .frontends import FORMATS as FRONTEND_FORMATS
+from .free_game_collector import FreeGameCollector
 from .metadata import PROVIDERS as METADATA_PROVIDERS, SECRET_FIELDS as METADATA_SECRET_FIELDS
 from .notify import (NOTIFIERS, Message, Notifier, failed, grabbed, imported,
                      FIELD_HELP, FIELD_LABELS, send_test,
@@ -106,20 +115,21 @@ from .openapi import spec as openapi_spec
 from .ops import (LogRing, RateLimiter, make_backup, read_backup,
                   render_metrics, to_csv)
 from .platforms import PLATFORMS, by_slug, resolve, romm_fs_slug
-from .sso import ForwardAuth
+from .sso import ForwardAuth, trusted_peer
 from .totp import Totp
 from .playability import (
     DOWNLOAD, MOONLIGHT_KINDS, NCI_DEFAULT_PORT, PAIRING_IS_MANUAL, PLAYERS,
     WOLF, MoonlightHost, PlayerPolicy, RetroArchNCI, StreamServer,
     StreamSources, routes_for, routes_for_file)
-from .lists import LIST_TYPES
+from .lists import (DEVICE_REPORT_MAX_BYTES, LIST_TYPES, OWNED_PROVIDERS,
+                    device_report, owned_games, owned_provider)
 from . import release_controls
 
 #: List-source fields that are credentials: masked on the way out, kept on
 #: edit when the form returns the placeholder.
 LIST_SECRETS = ("api_key", "openxbl_key", "npsso", "itchio_key",
                 "epic_code", "epic_refresh", "ea_token",
-                "battlenet_cookie", "humble_cookie")
+                "battlenet_cookie", "battlenet_json", "humble_cookie")
 from .scheduler import Scheduler, next_search_due
 from .selection import (Release, best_release, clean_group_name, infer_platform,
                         judge, score,
@@ -127,7 +137,8 @@ from .selection import (Release, best_release, clean_group_name, infer_platform,
                         package_class)
 from .game_packages import (BASE, DEFAULT_PARTS, GAME_FOLDER_LIBRARIES, PACKAGE_PLATFORMS, PARTS,
                             describe_parts, imported_role, normalise_parts)
-from .store import Event, QueueItem, SeerrRequest, Store
+from . import portal_player, portal_socket
+from .store import Event, QueueItem, SeerrRequest, Store, SwitchCompressionJob, now_iso
 from .ui import favicon_svg as ui_favicon_svg
 from .ui import web_manifest, service_worker, app_icon
 from .ui import page as ui_page
@@ -136,6 +147,9 @@ from .ui import login_page as ui_login_page
 from .version import compare_key, derive_version, is_unknown
 from .sidecars import read_nfo
 from .build_info import get_build_info
+LIST_ACCOUNT_FIELDS = ("type", "provider", "source", "content", "profile", "url",
+                       "steam_id", "gog_username", *LIST_SECRETS)
+LIST_SYNC_FIELDS = ("owned_snapshot", "unmatched", "last_sync", "_epic_saved")
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +200,7 @@ MASKED_ITEM_FIELDS = {
     "connections": ("url", "urls", "token", "password", "key", "secret"),
     "import_lists": LIST_SECRETS,
 }
+SERVER_OWNED_SETTINGS = ("chat_agent", "cloud_storage", "owned_devices", "giveaway_history")
 _SECRET_KEY_WORDS = ("secret", "password", "token", "passkey", "api_key", "apikey")
 
 
@@ -797,6 +812,7 @@ class ROMarr:
             base_url=e.get("QBITTORRENT_URL", ""),
             username=e.get("QBITTORRENT_USER", ""),
             password=e.get("QBITTORRENT_PASS", ""),
+            api_key=e.get("QBITTORRENT_API_KEY", ""),
             category=category_for(e, "QBITTORRENT"),
         ))
         # Usenet is not an afterthought: Prowlarr indexes both protocols, and
@@ -858,6 +874,10 @@ class ROMarr:
             nightly.git_checkout_revision(startup_install)
             if startup_install.kind == "git" else "")
         self._collection_lock = threading.RLock()
+        # One set pass at a time. The scheduler and the page's "Run next"
+        # button both step batches; without this two passes could take the
+        # same slice and request every title in it twice.
+        self._collection_batch_lock = threading.RLock()
         self._probe_lock = threading.Lock()
         self._inflight_probes: dict[int, tuple[object, threading.Event, dict[str, object]]] = {}
         # Background sweeps overlap, and client I/O happens before the queue row
@@ -885,6 +905,7 @@ class ROMarr:
         self._metadata_lock = threading.RLock()
         self._collection_source_lock = threading.RLock()
         self._mdm_lock = threading.Lock()
+        self._list_sync_lock = threading.Lock()
         # Lets a configuration change wake the background refresh instead of
         # waiting out its interval. Created before reload_libraries, which sets
         # it.
@@ -895,6 +916,8 @@ class ROMarr:
         # lost everything you had asked for, which is the difference between a
         # tool and a demo.
         self.store = Store(e.get("ROMARR_DATA", "/opt/romarr/romarr.json"))
+        self.free_game_collector = FreeGameCollector(
+            region=e.get("ROMARR_GIVEAWAY_COUNTRY", "US"), store=self.store)
         self._remember_collection_owners()
         # A library path saved through the UI has to win over the environment,
         # or the setting is one you can change but not apply. A *default* must
@@ -916,6 +939,10 @@ class ROMarr:
         hub.configure_flaresolverr(
             str(self.store.settings.get("flaresolverr_url")
                 or e.get("ROM_HUB_FLARESOLVERR_URL", "") or "")
+        )
+        hub.configure_github_token(
+            str(self.store.settings.get("_github_token")
+                or e.get("ROM_HUB_GITHUB_TOKEN", "") or "")
         )
 
         # The headless RetroArch stream server, if the operator runs one. It is
@@ -1202,6 +1229,23 @@ class ROMarr:
                 return float(self.store.settings.get(key) or 0) * 3600
             return read
 
+        # Cloud storage (romarr/cloud_storage.py, cloud_jobs.py). Built here so
+        # file-host accounts are registered for grabs before anyone opens the
+        # page; rclone itself starts only on first use.
+        from .cloud_storage import CloudStorage
+        from .cloud_jobs import CloudJobs
+        self.cloud = CloudStorage(self)
+        self.cloud_jobs = CloudJobs(self.cloud, self)
+        import atexit
+        atexit.register(self._cloud_close)
+        try:
+            self.cloud_jobs.automount()
+        except Exception:                          # noqa: BLE001 - never fatal
+            log.warning("cloud automount did not start", exc_info=True)
+
+        self._active_switch_compression: set[str] = set()
+        self._switch_reconcile_offset = 0
+        self._switch_reconcile_thread: threading.Thread | None = None
         self.scheduler = Scheduler()
         self.scheduler.add("SoundtrackTorrents", "Add finished soundtrack torrents to RomM",
                            lambda: 30 if self._soundtracks_watching() else 0,
@@ -1210,6 +1254,10 @@ class ROMarr:
             "ImportCompleted", "Import completed downloads",
             _minutes("auto_import_interval_minutes", gate="auto_import"),
             lambda: self._auto_import_summary())
+        self.scheduler.add(
+            "SwitchCompression", "Reconcile unfinished Switch compression",
+            lambda: 60 if self.store.pending_switch_compression() else 0,
+            self._schedule_switch_reconciliation)
         self.scheduler.add(
             "MissingGameSearch", "Search the Wanted list",
             _hours("search_missing_interval_hours"),
@@ -1225,10 +1273,27 @@ class ROMarr:
             lambda: (900 if self.store.settings.get(
                 "blocklist_failed_downloads", True) else 0),
             lambda: self.retire_dead_downloads()["message"])
+        # A set queued on the Collections page used to sit at 0% until someone
+        # pressed "Run next" for every slice -- 380 presses for a 1,900-title
+        # set. One slice per interval keeps the original promise (a set is
+        # not more important than the indexers' other traffic) without
+        # needing a person at the keyboard. Off when nothing is queued.
+        self.scheduler.add(
+            "CollectionSets", "Work through queued collection sets",
+            lambda: (60 * self._collection_interval_minutes()
+                     if self._collection_batches_active() else 0),
+            lambda: self.collection_tick()["message"])
+        self.scheduler.add(
+            "CloudJobs", "Run scheduled cloud storage jobs",
+            lambda: 60 if self.cloud_jobs.scheduled() else 0,
+            lambda: self.cloud_jobs.tick())
         self.scheduler.add(
             "ListSync", "Sync import lists into Wanted",
             _hours("list_sync_interval_hours"),
             lambda: self.list_sync()["message"])
+        self.scheduler.add(
+            "FreeGameCollector", "Record current game giveaways",
+            lambda: 1800, self._collect_free_games)
         self.scheduler.add(
             "UpdateCheck", "Check github.com for a newer ROMarr",
             lambda: 86400 if self.store.settings.get("update_check", True) else 0,
@@ -1262,6 +1327,11 @@ class ROMarr:
                 self.start_hash_seed(quiet=True)
         except Exception:                          # noqa: BLE001 - never fatal
             log.debug("startup hash seed did not start", exc_info=True)
+
+    def _collect_free_games(self) -> str:
+        """Run the giveaway collector even when nobody has opened Lists."""
+        offers = self.free_game_collector.view()
+        return offers["error"] or f"{len(offers['items'])} active and {len(offers['upcoming'])} upcoming"
 
     def _refresh_counts(self) -> None:
         """Keep the count and the library fresh without ever blocking a request.
@@ -1632,7 +1702,8 @@ class ROMarr:
             })
 
         add("qbittorrent", e.get("QBITTORRENT_URL", ""),
-            username=e.get("QBITTORRENT_USER", ""), password=e.get("QBITTORRENT_PASS", ""))
+            username=e.get("QBITTORRENT_USER", ""), password=e.get("QBITTORRENT_PASS", ""),
+            api_key=e.get("QBITTORRENT_API_KEY", ""))
         add("sabnzbd", e.get("SABNZBD_URL", ""), api_key=e.get("SABNZBD_API_KEY", ""))
         add("nzbget", e.get("NZBGET_URL", ""),
             username=e.get("NZBGET_USER", ""), password=e.get("NZBGET_PASS", ""))
@@ -2090,8 +2161,9 @@ class ROMarr:
         # here by name for the same reason as the two above: the underscore
         # is a naming convention, not a boundary, and `_romm_url` proves the
         # convention is not a reliable one to filter on.
+        out["github_token_set"] = bool(str(out.get("_github_token") or "").strip())
         for secret in ("_api_key", "_password_hash", "_peers",
-                       "_oidc_client_secret"):
+                       "_oidc_client_secret", "_github_token"):
             out.pop(secret, None)
         # Everything else that carries a credential, by the same masking the
         # dedicated endpoints already use. The dedicated endpoints masked these;
@@ -2100,6 +2172,11 @@ class ROMarr:
         for key, fields in MASKED_ITEM_FIELDS.items():
             if isinstance(out.get(key), list):
                 out[key] = [mask_item(item, fields) for item in out[key]]
+        out.pop("owned_devices", None)
+        out.pop("giveaway_history", None)
+        for item in out.get("import_lists", []):
+            if isinstance(item, dict):
+                item.pop("owned_snapshot", None)
         for key, value in list(out.items()):
             if (isinstance(value, str) and value
                     and any(t in key.lower() for t in _SECRET_KEY_WORDS)):
@@ -2110,6 +2187,20 @@ class ROMarr:
             chat["api_key"] = SECRET_MASK if chat.get("api_key") else ""
             out["chat_agent"] = chat
         return out
+
+    @staticmethod
+    def _restore_list_sync_fields(item: dict, stored: dict) -> None:
+        """Carry sync data across edits to the same storefront account."""
+        if (item.get("type") == "epic" and item.get("epic_code")
+                and item["epic_code"] != stored.get("epic_code")
+                and item.get("epic_refresh") == stored.get("epic_refresh")):
+            item.pop("epic_refresh", None)
+        same_account = all((item.get(key) or "") == (stored.get(key) or "")
+                           for key in LIST_ACCOUNT_FIELDS)
+        for key in LIST_SYNC_FIELDS:
+            item.pop(key, None)
+            if same_account and key in stored:
+                item[key] = stored[key]
 
     def restore_masked_items(self, patch: dict) -> dict:
         """Undo masking in a settings patch so a masked echo never overwrites a secret."""
@@ -2128,15 +2219,20 @@ class ROMarr:
                         if item.get(f) in (SECRET_MASK, None) or (f in item and item[f] == ""
                                                                   and old.get(f)):
                             item[f] = old.get(f, "")
+                    if key == "import_lists":
+                        self._restore_list_sync_fields(item, old)
                 fixed.append(item)
             patch[key] = fixed
         for key in list(patch):
             if (isinstance(patch[key], str) and patch[key] == SECRET_MASK
                     and any(t in key.lower() for t in _SECRET_KEY_WORDS)):
                 patch[key] = self.store.settings.get(key, "")
-        if "chat_agent" in patch:
-            # A settings save echoes this masked; /api/v1/chat/config is where it changes.
-            patch["chat_agent"] = self.store.settings.get("chat_agent", {})
+        # Settings owned by their own endpoints (/api/v1/chat/config,
+        # /api/v1/cloud/*): a settings save echoes them, and must not rewrite them.
+        for key in SERVER_OWNED_SETTINGS:
+            # Dropped rather than echoed back: writing a snapshot taken here
+            # could undo a change a dedicated endpoint saved a moment ago.
+            patch.pop(key, None)
         return patch
 
 
@@ -2149,6 +2245,17 @@ class ROMarr:
                 self._reports_manager = FileReports(lambda: self.library, self.store.path.parent,
                     lambda: dict(self.store.settings), self._env, version=VERSION)
             return self._reports_manager
+
+    def _cloud_close(self) -> None:
+        """Unmount cloud mounts and stop rclone when ROMarr exits."""
+        try:
+            self.cloud_jobs.unmount_all()
+        except Exception:                          # noqa: BLE001 - exiting anyway
+            pass
+        try:
+            self.cloud.close()
+        except Exception:                          # noqa: BLE001 - exiting anyway
+            pass
 
     def setup_status(self) -> dict:
         """A quick setup checklist, without probing services or returning secrets."""
@@ -2317,6 +2424,11 @@ class ROMarr:
         have handled differently.
         """
         kind = str(cfg.get("type") or "").lower()
+        if kind == "hydra":
+            # A source has no key to reject. What matters is whether it reads,
+            # and whether each kind of link in it has a client to go to.
+            from .hydra import check_config
+            return check_config(cfg, self.clients)
         url, key = cfg.get("url", ""), cfg.get("api_key", "")
         if not url:
             return {"ok": False, "message": "a URL is required"}
@@ -2519,17 +2631,10 @@ class ROMarr:
         # timeout took the whole request down -- and an unrecognised platform
         # name silently routes here, which is how `?platform=psx` returned no
         # status code at all rather than a result or an error.
-        if platform is not None:
-            releases = self._search_releases(game, platform)
-        else:
-            try:
-                releases = self.prowlarr.search(game)
-            except Exception as err:
-                log.warning("prowlarr search failed for %r: %s", game, err)
-                releases = []
-            # The hub lane joins here too, or this endpoint answers a
-            # different question than the request path it claims to mirror.
-            releases = releases + self._hub_releases(game, None)
+        # Without a platform the same merged search runs with the bare title
+        # only, so every directly added indexer (a Hydra source, a Torznab
+        # feed) is asked too -- not Prowlarr and the Hub alone.
+        releases = self._search_releases(game, platform)
         asked = self._request_parts(game, platform)
         favoured = self._preferred_group(game, platform)
         pick = best_release(releases, game, platform,
@@ -2586,7 +2691,25 @@ class ROMarr:
             return False
         return bool(hub.searchable_plugins())
 
-    def _hub_releases(self, game: str, platform=None) -> list:
+    def _selective_torrent_client(self):
+        """Choose a configured torrent client that can select one exact file."""
+        return pick_client("torrent", [
+            client for client in self.clients
+            if isinstance(client, QBittorrent) or getattr(client, "supports_selective", False)
+        ])
+
+    def _minerva_search_ready(self, searchable: list[str]) -> bool:
+        """MiNERVA can search and grab with a selective torrent client alone."""
+        return ("minerva-archive" in searchable
+                and self._selective_torrent_client() is not None)
+
+    def _repacks_search_ready(self, searchable: list[str]) -> bool:
+        """FitGirl & DODI Repacks can search and grab with any configured torrent client."""
+        return ("repacks" in searchable
+                and pick_client("torrent", self.clients) is not None)
+
+    def _hub_releases(self, game: str, platform=None, *,
+                      only: str | tuple[str, ...] | None = None) -> list:
         """Turn ROM Hub search rows into releases for the shared grab flow.
 
         Magnet rows from ordinary torrent plugins use the configured torrent
@@ -2599,12 +2722,21 @@ class ROMarr:
         Non-torrent plugin rows keep their hub download URL and are fetched
         through ROM Hub's bounded FetchPlan lane.
         """
-        if not self._hub_enabled():
-            return []
+        if only is None and not self._hub_enabled():
+            searchable = hub.searchable_plugins()
+            ready: list[str] = []
+            if self._minerva_search_ready(searchable):
+                ready.append("minerva-archive")
+            if self._repacks_search_ready(searchable):
+                ready.append("repacks")
+            if not ready:
+                return []
+            only = ready[0] if len(ready) == 1 else tuple(ready)
         from .selection import Release
         try:
-            rows, err = hub.search(game,
-                                   platform=platform.slug if platform else None)
+            search_options = {"only": only} if only else {}
+            rows, err = hub.search(game, platform=platform.slug if platform else None,
+                                   **search_options)
         except Exception as exc:
             log.warning("rom hub search failed for %r: %s", game, exc)
             return []
@@ -2624,7 +2756,18 @@ class ROMarr:
             if not row.get("title"):
                 continue
             plugin_slug = str(row.get("plugin") or "")
+            if only is not None and (plugin_slug != only if isinstance(only, str) else plugin_slug not in only):
+                continue
+            if plugin_slug in hub.NON_GAME_PLUGINS:
+                # Guides, videos, mods and tools are not the game.
+                continue
             extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+            if str(extra.get("downloadable") or "") == "browser":
+                # Arcade Punks and The ROM Depot: the download needs the
+                # member's own browser session, so the Hub cannot fetch it
+                # and a grab would only ever fail. Shown on the plugin's
+                # card instead.
+                continue
             is_minerva = plugin_slug == "minerva-archive"
             magnet = str(row.get("magnet") or "")
             file_path = str(extra.get("path") or "")
@@ -2667,8 +2810,8 @@ class ROMarr:
                 title=row["title"],
                 size=int(row.get("size_bytes") or 0),
                 seeders=0,
-                # A plugin result is a game by definition -- it came from a
-                # ROM source. 1000 is the console range the scorer accepts;
+                # A result from a game source (NON_GAME_PLUGINS are skipped
+                # above) is a game. 1000 is the console range the scorer accepts;
                 # inventing a category would make `is_game_release` reject
                 # every row the Hub returned.
                 categories=(1000,),
@@ -2681,6 +2824,9 @@ class ROMarr:
 
     def _search_releases(self, game: str, platform) -> list:
         """Find releases for a game, favouring recall over a tidy query.
+
+        ``platform`` may be None (a search with no platform chosen): then only
+        the bare title is asked, of every source.
 
         Searching "<game> <platform.name>" alone was far too narrow: indexers
         match the whole string, and almost no release is named "Super Metroid
@@ -2702,6 +2848,14 @@ class ROMarr:
         sources: list[tuple[str, object]] = [("prowlarr", prowlarr)]
         sources += [(getattr(i, "name", "indexer"), i)
                     for i in getattr(self, "indexers", [])]
+        timing_lock = threading.Lock()
+        by_source: dict[str, dict] = {}
+
+        def record_timing(label: str, elapsed_ms: int, count: int) -> None:
+            with timing_lock:
+                entry = by_source.setdefault(label, {"source": label, "ms": 0, "found": 0})
+                entry["ms"] = max(entry["ms"], elapsed_ms)
+                entry["found"] += count
 
         def search_term(term):
             """Query all captured indexer sources for one search string."""
@@ -2709,6 +2863,7 @@ class ROMarr:
             with ExitStack() as sessions:
                 for label, source in sources:
                     client = source
+                    t0 = time.monotonic()
                     try:
                         if isinstance(source, Prowlarr) or getattr(source, "_owns_session", False):
                             client = copy(source)
@@ -2716,26 +2871,39 @@ class ROMarr:
                             client._session = sessions.enter_context(requests.Session())
                         if isinstance(client, Prowlarr) and source is prowlarr:
                             client._privacy = privacy
-                        releases.extend(client.search(term))
+                        found = list(client.search(term) or [])
+                        releases.extend(found)
+                        record_timing(label, int((time.monotonic() - t0) * 1000), len(found))
                     except Exception as err:
+                        record_timing(label, int((time.monotonic() - t0) * 1000), 0)
                         log.warning("%s search failed for %r: %s", label, term, err)
             return releases
+
+        def timed_hub():
+            t0 = time.monotonic()
+            try:
+                found = list(self._hub_releases(game, platform) or [])
+            except Exception:
+                record_timing("rom-hub", int((time.monotonic() - t0) * 1000), 0)
+                raise
+            record_timing("rom-hub", int((time.monotonic() - t0) * 1000), len(found))
+            return found
 
         # Enabled ROM Hub plugins are searched alongside the indexers: the
         # same titles, scored by the same rules, grabbable from the same
         # Interactive Search page. One query, not per-term: the Hub's own
         # fan-out already merges every plugin's answer for it.
         with ThreadPoolExecutor(max_workers=3) as pool:
-            hub_search = pool.submit(self._hub_releases, game, platform)
+            hub_search = pool.submit(timed_hub)
             privacy = {}
-            if isinstance(prowlarr, Prowlarr):
+            if isinstance(prowlarr, Prowlarr) and prowlarr._config.base_url:
                 try:
                     privacy = prowlarr._private_ids()
                 except Exception as err:
                     log.warning("prowlarr privacy lookup failed: %r", err)
-            searches = [pool.submit(search_term, game),
-                        pool.submit(search_term, f"{game} {platform.name}"),
-                        hub_search]
+            searches = [pool.submit(search_term, game), hub_search]
+            if platform is not None:
+                searches.insert(1, pool.submit(search_term, f"{game} {platform.name}"))
         seen: set[tuple[str, str]] = set()
         merged = []
         for search in searches:
@@ -2749,6 +2917,7 @@ class ROMarr:
                 if key not in seen:
                     seen.add(key)
                     merged.append(release)
+        self._last_search_timings = sorted(by_source.values(), key=lambda x: -x["ms"])
         return merged
 
     def _preferred_group(self, game: str, platform) -> str:
@@ -2950,6 +3119,19 @@ class ROMarr:
         except ValueError as err:
             return {"ok": False, "error": str(err)}
         client = pick_client(pick.protocol, self.clients)
+        if pick.protocol == "torrent" and getattr(pick, "file_selection_required", False):
+            selective = self._selective_torrent_client()
+            if selective is not None:
+                client = selective
+        if client is None and getattr(pick, "mirrors", ()):
+            # A Hydra row offers its other links too: with no client for the
+            # magnet, a mirror the file-host route can fetch still gets it.
+            route = pick_client("hoster", self.clients)
+            if route is not None:
+                pick = dataclasses.replace(pick, protocol="hoster",
+                                           download_url=pick.mirrors[0],
+                                           mirrors=tuple(pick.mirrors[1:]))
+                client = route
         if client is None:
             # Not the release's fault -- blocklisting it here would punish a
             # perfectly good torrent because the operator has not set up a
@@ -3045,6 +3227,15 @@ class ROMarr:
                         else (getattr(client, "last_error", "")
                               or f"{client_label} did not confirm the torrent")
                     )
+        elif getattr(client, "protocol", "") == "hoster":
+            # Every link the source listed, best first: a file host no route
+            # can take falls through to the next instead of failing the grab.
+            ok = client.add(pick.download_url, name=pick.title,
+                            mirrors=getattr(pick, "mirrors", ()))
+            download_id = client.last_job_id if ok else ""
+            release_fault = False
+            if not ok:
+                failure_detail = client.last_error or failure_detail
         else:
             ok, download_id = hand_off_with_id(client, pick.download_url,
                                                name=pick.title)
@@ -3093,7 +3284,8 @@ class ROMarr:
             except Exception:
                 reasons = ()
             self.notify(grabbed(pick.title, platform_slug,
-                                getattr(pick, "indexer", ""), reasons))
+                                getattr(pick, "indexer", ""), reasons,
+                                external_request_id=external_request_id))
         else:
             self.store.ensure_wanted(game, platform_slug, parts=asked)
             self.store.note_failure(game, platform_slug, item.detail)
@@ -3106,6 +3298,53 @@ class ROMarr:
         if not ok:
             result["error"] = failure_detail
         return result
+
+    def grab_arcade_punks(self, url: str, game: str = "", platform_slug: str = "") -> dict:
+        """Send one pasted Arcade Punks link to the client that can take it.
+
+        NZB zips go to the Usenet client, .torrent links to the torrent
+        client, Mega and Rapidgator links to a debrid service. With a
+        platform (given, or read from an Atomiswave-style title) the job is
+        queued like any grab and imported when it finishes. A whole build has
+        no platform to import into, so it is downloaded and recorded only.
+        """
+        from . import arcade_punks
+        try:
+            link = arcade_punks.classify(url)
+        except arcade_punks.LinkError as err:
+            return {"ok": False, "error": str(err)}
+        lane = arcade_punks.ArcadePunksLane(self.clients)
+        if lane.target(link.kind) is None:
+            return {"ok": False, "kind": link.kind, "error": arcade_punks.no_client(link.kind)}
+        label = arcade_punks.job_name(link)
+        pack = arcade_punks.parse_pack(game or link.name)
+        game = str(game or pack.game or label).strip()[:200]
+        platform = None
+        if platform_slug:
+            platform = resolve(platform_slug)
+            if platform is None:
+                return {"ok": False, "error": f"unknown platform: {platform_slug!r}"}
+        elif pack.platform:
+            platform = resolve(pack.platform)
+        out = {"kind": link.kind, "release": label, "pack": pack.as_dict()}
+        if platform is None:
+            ok = lane.add(link.url, name=label)
+            if not ok:
+                return {**out, "ok": False, "error": lane.last_error}
+            self.store.record(Event(
+                kind="grabbed", game=game, platform="", release=label,
+                indexer=f"arcade-punks:{link.kind}",
+                detail=f"sent to {lane.delegate_name}; download only, not imported "
+                       "(no platform)"))
+            return {**out, "ok": True, "queued": False, "client": lane.delegate_name}
+        pick = Release(title=label, size=0, seeders=0, categories=(1000,),
+                       download_url=link.url, protocol=lane.protocol,
+                       indexer=f"arcade-punks:{link.kind}")
+        result = self._submit_grab(lane, pick, game, platform.slug, True, "", None)
+        if not result.get("ok") and lane.last_error:
+            result["error"] = lane.last_error
+        return {**out, **result, "queued": bool(result.get("ok")),
+                "platform": platform.slug, "client": lane.delegate_name}
 
     # -- interactive search -------------------------------------------------
     #
@@ -3132,15 +3371,30 @@ class ROMarr:
                     "game": game, "platform": None, "unknown_platform": platform_name,
                     "items": []}
 
+        t_start = time.monotonic()
+        timings: list[dict] = []
+        self._last_search_timings = []
         try:
-            releases = (self._search_releases(game, platform) if platform
-                        else self.prowlarr.search(game)
-                        + self._hub_releases(game, None))
+            if platform is None and not self.indexers:
+                t0 = time.monotonic()
+                p_rel = list(self.prowlarr.search(game) or [])
+                timings.append({"source": "prowlarr", "ms": int((time.monotonic() - t0) * 1000),
+                                "found": len(p_rel)})
+                t1 = time.monotonic()
+                h_rel = list(self._hub_releases(game, None) or [])
+                timings.append({"source": "rom-hub", "ms": int((time.monotonic() - t1) * 1000),
+                                "found": len(h_rel)})
+                timings.sort(key=lambda x: -x["ms"])
+                releases = p_rel + h_rel
+            else:
+                releases = self._search_releases(game, platform)
+                timings = list(getattr(self, "_last_search_timings", []) or [])
         except Exception as err:
             log.warning("interactive search failed for %r: %s", game, err)
             return {"error": f"search failed: {type(err).__name__}",
                     "game": game, "platform": platform.slug if platform else None,
                     "items": []}
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
         judged = []
         parts_for = {}   # one Wanted lookup per platform, not per release
@@ -3202,6 +3456,8 @@ class ROMarr:
             "platform": platform.slug if platform else None,
             "found": len(items),
             "accepted": sum(1 for i in items if i["accepted"]),
+            "elapsed_ms": elapsed_ms,
+            "timings": timings,
             "items": items,
         }
 
@@ -3595,6 +3851,7 @@ class ROMarr:
                 "name": getattr(c, "display_name", getattr(c, "name", type(c).__name__)),
                 "protocol": getattr(c, "protocol", ""),
                 "url": getattr(c, "_config").base_url,
+                "save_path": c._config.save_path if isinstance(c, HubDownloader) else "",
                 "category": getattr(getattr(c, "_config"), "category", ""),
                 "configured": configured,
                 "ok": bool(configured and c.reachable()),
@@ -4566,6 +4823,10 @@ class ROMarr:
                 log.warning("%s failed_jobs() failed: %s", name, err)
         return jobs
 
+    #: qBittorrent states for a torrent that is waiting its turn or was paused
+    #: by the operator -- not stalled, whatever its age (see below).
+    _WAITING_TORRENT_STATES = frozenset({"queuedDL", "pausedDL", "stoppedDL"})
+
     def _is_download_active_or_complete(self, row: QueueItem) -> bool:
         """Return True if a download client reports `row` is completed or actively transferring (#108).
 
@@ -4606,6 +4867,17 @@ class ROMarr:
                             return True
                         dlspeed = int(item.get("dlspeed", 0) or 0)
                         state = str(item.get("state") or "")
+                        # Waiting, not dead. With queueing on, qBittorrent
+                        # holds every torrent past `max_active_downloads` (4
+                        # by default) in queuedDL, and one the operator
+                        # paused sits in pausedDL/stoppedDL. Neither has had
+                        # a chance to download, so the grab's age says
+                        # nothing about the release: retiring them after the
+                        # stall timeout blocklisted and deleted 2,240 queued
+                        # torrents on one install.
+                        if state in self._WAITING_TORRENT_STATES:
+                            row.waited_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            return True
                         if dlspeed > 0 or state in (
                             "downloading", "forcedDL", "checkingDL",
                             "checkingUP", "allocating", "moving",
@@ -4652,13 +4924,29 @@ class ROMarr:
 
     @staticmethod
     def _row_age_minutes(row, now) -> float | None:
-        """How long this row has been waiting, or None if it will not say."""
+        """How long this row has been eligible to download, or None if it will not say.
+
+        Measured from the grab, or from the last time a client reported the
+        download waiting in its queue or paused, whichever is later: a
+        torrent that waited out the whole stall timeout behind qBittorrent's
+        active-download limit must not be retired the moment it starts.
+        """
         try:
             stamped = datetime.fromisoformat(row.at)
         except (TypeError, ValueError):
             return None
         if stamped.tzinfo is None:
             stamped = stamped.replace(tzinfo=timezone.utc)
+        waited = getattr(row, "waited_at", "") or ""
+        if waited:
+            try:
+                left = datetime.fromisoformat(waited)
+            except (TypeError, ValueError):
+                left = None
+            if left is not None:
+                if left.tzinfo is None:
+                    left = left.replace(tzinfo=timezone.utc)
+                stamped = max(stamped, left)
         return (now - stamped).total_seconds() / 60.0
 
     def unblock(self, entry_id: str) -> bool:
@@ -4918,11 +5206,13 @@ class ROMarr:
             forced = force and status == BAD_DUMP
             self._index_hash(verdict, platform.slug, source.stem,
                              outcome.destination, sha1=outcome.sha1)
+            self._identify_after_import(verdict, platform.slug, source.stem)
             self.store.record(Event(
                 kind="imported", game=source.stem, platform=platform.slug,
                 release=source.name, library=label,
                 detail=(f"manual import ({'FORCED over ' + str(status) if forced else status or 'unknown'})"
                         f": {outcome.destination} ({outcome.import_method or 'copy'}) {outcome.fallback_reason}")))
+            self._compress_after_import(outcome.destination, platform.slug, source.stem, target_cfg)
             imported.append({
                 "file": str(outcome.destination),
                 "verdict": status,
@@ -4950,74 +5240,96 @@ class ROMarr:
 
     # ------------------------------------------------------- collections --
 
-    def _present_titles(self, platform_slug: str = "") -> dict[str, str]:
-        """What the library already has, keyed by DAT-style name.
-
-        Read from the platform's directory on disk when there is one, and only
-        from the cached shelf otherwise. The shelf is a page -- a few hundred
-        rows kept for the Library grid -- and comparing a 1,900-entry DAT
-        against the first page of a 166,578-game library reports almost
-        everything as missing. The directory is the whole truth for one
-        platform and costs one listing.
-
-        Matched by name, not by hash. Hashing a library that size to draw a
-        progress bar would take hours, and the verdict recorded when ROMarr
-        imported a file is already the better answer where it exists.
-        """
+    def _present_titles(self, platform_slug: str = "", dat: Dat | None = None,
+                        *, scan: dict | None = None) -> dict[str, str]:
+        """Read the platform folders or the cached shelf, keyed by DAT title."""
+        from .audit_archive import single_zip_fingerprint
         from .collections import PRESENT_UNKNOWN, PRESENT_VERIFIED, PRESENT_BAD
+
+        platform = resolve(platform_slug) if platform_slug else None
+        slug = platform.slug if platform else platform_slug
+        dat_games = dat.games if dat is not None else ()
+        names: dict[str, str | None] = {}
+        fingerprints: dict[tuple[int, str], str | None] = {}
+
+        def name_key(name: str) -> str:
+            return unicodedata.normalize("NFC", name).casefold()
+
+        for name in dat_games:
+            key = name_key(name)
+            names[key] = None if key in names else name
+        if platform and not platform.archive_is_the_rom and dat is not None:
+            for game in dat.games.values():
+                for rom in game.roms:
+                    if rom.size > 0 and rom.crc:
+                        key = (rom.size, rom.crc.lower())
+                        # A shared fingerprint or one track of a larger set
+                        # cannot identify a complete DAT entry.
+                        fingerprints[key] = (
+                            game.name if len(game.roms) == 1
+                            and key not in fingerprints else None)
 
         verdicts: dict[str, str] = {}
         for event in self.store.events:
-            if event.kind != "imported" or not event.game:
+            if (event.kind != "imported" or not event.game
+                    or (slug and event.platform != slug)):
                 continue
             detail = (event.detail or "").lower()
             if "verified" in detail:
-                verdicts[event.game.lower()] = PRESENT_VERIFIED
+                verdicts[name_key(event.game)] = PRESENT_VERIFIED
             elif "bad-dump" in detail or "bad dump" in detail:
-                verdicts[event.game.lower()] = PRESENT_BAD
+                verdicts[name_key(event.game)] = PRESENT_BAD
 
         present: dict[str, str] = {}
 
-        def note(name: str) -> None:
-            if name:
-                present[name] = verdicts.get(name.lower(), PRESENT_UNKNOWN)
+        def note(name: str) -> bool:
+            if dat is not None and name not in dat_games:
+                name = names.get(name_key(name))
+            if not name:
+                return False
+            present[name] = verdicts.get(name_key(name), PRESENT_UNKNOWN)
+            return True
 
-        listed = False
-        if platform_slug:
+        folders = []
+        if platform:
             for cfg, _ in self.game_libraries:
-                folder = platform_dir(self.library_root(cfg), platform_slug,
+                folder = platform_dir(self.library_root(cfg), slug,
                                       layout=self.library_layout(cfg),
                                       platform_folders=self.platform_folders(cfg))
+                row = {"path": str(folder), "files": None}
+                folders.append(row)
                 try:
-                    # Recursive on purpose. iterdir() sees one level: a game
-                    # filed in a subfolder ("Nintendo/Chrono Trigger.zip", a
-                    # disc-set's inner tracks, anything under Translations/)
-                    # surfaced as its PARENT DIRECTORY's name and the title
-                    # itself read as missing -- so collection import queued a
-                    # fresh download of a game already on disk. Walk the tree;
-                    # a directory named for a game (a disc set) still answers
-                    # to its own name via its files' stems below.
-                    # is_dir() guard first: rglob on a MISSING directory
-                    # yields nothing instead of raising, which would mark the
-                    # platform as listed and skip the shelf fallback below.
                     if not folder.is_dir():
                         continue
                     entries = [p for p in folder.rglob("*") if p.is_file()]
                 except OSError:
                     continue
-                listed = True
+                row["files"] = len(entries)
                 for entry in entries:
-                    # A cartridge zip answers to its stem. A disc-set file
-                    # inside a game-named directory answers to BOTH its own
-                    # stem and the directory name, because that is how the
-                    # set is filed and how the DAT names the game.
-                    note(entry.stem)
+                    # Also count folders named for disc sets and nested ROMs.
+                    if (not note(entry.stem) and entry.suffix.lower() == ".zip"
+                            and fingerprints
+                            and (fingerprint := single_zip_fingerprint(entry))
+                            and (name := fingerprints.get(fingerprint))):
+                        # Central directory metadata identifies the dump. Only a
+                        # full read can verify that the payload is intact.
+                        present.setdefault(name, PRESENT_UNKNOWN)
                     for parent in entry.relative_to(folder).parents:
-                        if str(parent) not in (".", ""):
+                        if parent != Path("."):
                             note(parent.name)
-        if not listed:
-            for item in (self.library_view() or {}).get("items", []):
-                note(str(item.get("name") or ""))
+
+        on_disk = any(row["files"] is not None for row in folders)
+        cached_rows = 0
+        if not on_disk and (platform or not slug):
+            games = self._library_cache[0] or ()
+            for game in games:
+                if not self._is_local(game) or (platform and self._slug_of(game) != slug):
+                    continue
+                note(game.name)
+                cached_rows += 1
+        if scan is not None:
+            scan.update(folders=folders, used_cache=not on_disk,
+                        cached_rows=cached_rows)
         return present
 
     def dat_names(self) -> list[str]:
@@ -5257,12 +5569,15 @@ class ROMarr:
             else "prefer",
             preferred_languages=preferred_languages,
         )
-        plan = build_plan(dat, self._present_titles(platform), policy)
+        scan: dict = {}
+        present = self._present_titles(platform, dat, scan=scan)
+        plan = build_plan(dat, present, policy)
         return {
             "dat": plan.dat,
             "dat_version": plan.dat_version,
             "platform": platform,
             "counts": plan.counts(),
+            "library_scan": scan,
             "policy": {"regions": list(policy.regions),
                        "one_game_one_rom": policy.one_game_one_rom,
                        "exclude": sorted(policy.exclude),
@@ -5298,6 +5613,22 @@ class ROMarr:
 
         from .collections import Batch, BATCH_PENDING
 
+        # Every title in a set is requested for ONE platform. With none, the
+        # request has nowhere to go: each one failed as "unknown platform"
+        # and the batch still read 100% done. Default to the DAT's own
+        # platform, and refuse plainly when that cannot be worked out.
+        dat_name, dat_error = self._loaded_dat_name(str(dat_name or ""))
+        if dat_error:
+            return {"error": dat_error}
+        platform = str(platform or "").strip()
+        if not platform:
+            platform = self._dat_platform(dat_name)
+        chosen = resolve(platform) if platform else None
+        if chosen is None:
+            return {"error": "pick the platform this DAT is for before "
+                             "requesting a set; ROMarr could not work it "
+                             "out from the DAT's name"}
+        platform = chosen.slug
         plan = self.collection_plan(dat_name, platform, **policy_kw)
         if plan.get("error"):
             return plan
@@ -5320,6 +5651,10 @@ class ROMarr:
         other traffic. Draining the queue in one pass would also mean losing
         the lot if the process stopped halfway.
         """
+        with self._collection_batch_lock:
+            return self._collection_step(batch_id)
+
+    def _collection_step(self, batch_id: str) -> dict:
         from .collections import BATCH_DONE, BATCH_PAUSED, BATCH_RUNNING
 
         batches = self._batches()
@@ -5329,21 +5664,90 @@ class ROMarr:
         if batch.status == BATCH_PAUSED:
             return {"paused": True, **batch.progress()}
 
+        if not resolve(batch.platform or ""):
+            guess = self._dat_platform(batch.dat)
+            if guess:
+                batch.platform = guess
         batch.status = BATCH_RUNNING
         for name in batch.take():
+            if not resolve(batch.platform or ""):
+                batch.record(name, ok=False,
+                             reason="this set has no platform; cancel it and "
+                                    "request it again with a platform chosen")
+                continue
             try:
-                self.request(name, batch.platform)
-                batch.record(name, ok=True)
+                # The same once-only handoff RSS and the Wanted sweep use: a
+                # title already queued, downloading or awaiting import review
+                # (from any path, or another set) is not handed off again.
+                result = self._automatic_request(name, batch.platform)
             except Exception as err:  # noqa: BLE001 - one title must not stop the set
                 batch.record(name, ok=False,
                              reason=f"{err.__class__.__name__}: {err}")
+                continue
+            # `request` reports most failures in its result rather than
+            # raising. Counting those as done showed a set as complete when
+            # nothing had been grabbed.
+            if isinstance(result, dict) and result.get("skipped"):
+                # Already on its way. Counted as requested, never as failed.
+                batch.record(name, ok=True)
+                continue
+            if isinstance(result, dict) and result.get("ok") is False:
+                reason = str(result.get("error") or "request failed")
+                if reason.startswith("no usable release"):
+                    # `request` put the title on Wanted; say so, because
+                    # "failed" alone reads as "dropped".
+                    reason += " (kept on Wanted; the Wanted search retries it)"
+                batch.record(name, ok=False, reason=reason)
+            else:
+                batch.record(name, ok=True)
         if not batch.queue:
             batch.status = BATCH_DONE
         self.store.put_item("batches", batch.to_dict())
         self.store.save()
         return batch.progress()
 
+    #: Minutes between scheduled set passes when the setting is absent.
+    COLLECTION_INTERVAL_MINUTES = 10
+
+    def _collection_interval_minutes(self) -> int:
+        """Minutes between scheduled set passes (setting, at least 1)."""
+        try:
+            value = int(self.store.settings.get("collection_batch_interval_minutes")
+                        or self.COLLECTION_INTERVAL_MINUTES)
+        except (TypeError, ValueError):
+            value = self.COLLECTION_INTERVAL_MINUTES
+        return max(1, value)
+
+    def _collection_batches_active(self) -> bool:
+        """Whether any queued set still has titles to request."""
+        from .collections import BATCH_PENDING, BATCH_RUNNING
+        return any(raw.get("queue") and raw.get("status") in (BATCH_PENDING, BATCH_RUNNING)
+                   for raw in self.store.list_items("batches"))
+
+    def collection_tick(self) -> dict:
+        """One scheduled pass: the next slice of every set that is not paused."""
+        from .collections import BATCH_PENDING, BATCH_RUNNING
+        stepped, requested, failed = 0, 0, 0
+        for batch in list(self._batches().values()):
+            if batch.status not in (BATCH_PENDING, BATCH_RUNNING) or not batch.queue:
+                continue
+            before_done, before_failed = len(batch.done), len(batch.failed)
+            after = self.collection_step(batch.id)
+            if after.get("error") or after.get("paused"):
+                continue
+            stepped += 1
+            requested += max(0, int(after.get("done", 0)) - before_done)
+            failed += max(0, int(after.get("failed", 0)) - before_failed)
+        if not stepped:
+            return {"stepped": 0, "message": "no collection set is queued"}
+        return {"stepped": stepped, "requested": requested, "failed": failed,
+                "message": f"{stepped} set(s): {requested} requested, {failed} failed"}
+
     def collection_control(self, batch_id: str, action: str) -> dict:
+        with self._collection_batch_lock:
+            return self._collection_control(batch_id, action)
+
+    def _collection_control(self, batch_id: str, action: str) -> dict:
         from .collections import BATCH_PAUSED, BATCH_PENDING
 
         batches = self._batches()
@@ -5366,9 +5770,47 @@ class ROMarr:
         self.store.save()
         return batch.progress()
 
+    def _loaded_dat_name(self, dat_name: str) -> tuple[str, str]:
+        """The loaded DAT a set will use, as (name, error).
+
+        `collection_plan` falls back to the first loaded DAT when the name is
+        empty. A NAMED DAT that is not loaded must not take that fallback: the
+        platform would be inferred from the requested name while the titles
+        came from a different system's DAT.
+        """
+        names = self.dat_names()
+        if dat_name:
+            if dat_name in names:
+                return dat_name, ""
+            return "", (f"DAT {dat_name!r} is not loaded; pick one of the "
+                        "loaded DATs")
+        if not names:
+            return "", ("no DAT loaded. Point DAT_PATH at a No-Intro or "
+                        "Redump directory, or add one under Settings.")
+        return names[0], ""
+
+    def _dat_platform(self, dat_name: str) -> str:
+        """The platform slug a DAT most likely covers, or "" (a UI default)."""
+        from .collections import platform_for_dat
+        catalog = self.store.settings.get("dat_catalog_platforms")
+        return platform_for_dat(dat_name, catalog if isinstance(catalog, dict) else None)
+
+    #: How many failure reasons each batch row carries to the page. Enough
+    #: to see the pattern ("no usable release" forty times); the full list
+    #: stays in the store for Retry failed.
+    _BATCH_FAILURES_SHOWN = 20
+
     def collection_status(self) -> dict:
-        return {"batches": [b.progress() for b in self._batches().values()],
-                "dats": self.dat_names()}
+        dats = self.dat_names()
+        return {"batches": [
+                    {**b.progress(),
+                     "failures": [{"title": name, "reason": reason}
+                                  for name, reason in
+                                  list(b.failed.items())[:self._BATCH_FAILURES_SHOWN]]}
+                    for b in self._batches().values()],
+                "dats": dats,
+                "dat_platforms": {name: self._dat_platform(name) for name in dats},
+                "interval_minutes": self._collection_interval_minutes()}
 
     def _is_source_torrent(self, client, row) -> bool:
         """Keep active DAT sources out of ordinary completion and import previews."""
@@ -5502,7 +5944,10 @@ class ROMarr:
         import shutil
         import uuid
 
-        platform = str(platform or "").strip()
+        dat_name, dat_error = self._loaded_dat_name(str(dat_name or ""))
+        if dat_error:
+            return {"error": dat_error}
+        platform = str(platform or "").strip() or self._dat_platform(dat_name)
         if not platform:
             return {"error": "select a platform before starting source acquisition"}
         selected_platform = resolve(platform)
@@ -6009,38 +6454,38 @@ class ROMarr:
         }
 
     def frontend_rows(self, platform: str = "") -> list[dict]:
-        """The library flattened into the shape every frontend export wants.
-
-        One shape for all three, because the differences between LaunchBox,
-        Playnite and EmulationStation are in how the fields are *written*, not
-        in which fields exist -- and three near-identical row builders would
-        drift apart the first time one of them gained a column.
-        """
-        items = (self.library_view() or {}).get("items", [])
-        wanted = str(platform or "").strip().lower()
+        """Export the full cached library with filenames supplied by its backend."""
+        games = self._library_cache[0] or ()
+        wanted = platform.strip().lower()
+        sources = {cfg.get("name") or getattr(backend, "name", "library"): cfg
+                   for cfg, backend in self.game_libraries}
+        default = next(iter(sources.values()), {}) if len(sources) == 1 else {}
+        directories = {}
+        extensions = rom_file_extensions()
         rows = []
-        for item in items:
-            slug = str(item.get("platform_slug") or item.get("platform") or "")
-            if wanted and slug.lower() != wanted:
+        for game in games:
+            slug = (game.platform_slug or game.platform).lower()
+            if wanted and wanted != slug:
                 continue
-            name = str(item.get("file_name") or item.get("filename")
-                       or item.get("name") or "")
-            rows.append({
-                "id": item.get("id") or item.get("rom_id") or "",
-                "title": item.get("name") or item.get("title") or name,
-                "platform": slug,
-                "filename": name,
-                # The default library root, not library_root(None): that
-                # helper reads its argument, and handing it None was a 500
-                # on every export whose backend rows carry no path -- which
-                # is what RomM's cached rows look like. Caught live by
-                # scripts/playnite_proof.ps1.
-                "path": item.get("path") or item.get("full_path")
-                        or (str(self.library / slug / name)
-                            if name and slug else ""),
-                "region": item.get("region") or "",
-                "verified": item.get("verified") or "",
-            })
+            if game.origin == "cloud" or not game.file_name:
+                continue
+            if os.path.splitext(game.file_name)[1].lower() not in extensions:
+                continue
+            if not game.local_path and (not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug)
+                    or any(char in game.file_name for char in ("/", chr(92), ":", chr(0)))
+                    or game.file_name in (".", "..")):
+                continue
+            key = (game.source, slug)
+            cfg = sources.get(game.source, default)
+            if key not in directories:
+                directories[key] = platform_dir(
+                    self.library_root(cfg), slug, layout=self.library_layout(cfg),
+                    platform_folders=self.platform_folders(cfg)) if slug else self.library_root(cfg)
+            path = game.local_path or str(directories[key] / game.file_name)
+            rows.append({"id": game.id, "title": game.name, "platform": slug,
+                         "library_key": str(cfg.get("id") or game.source or "local"),
+                         "filename": game.file_name, "path": path,
+                         "region": ", ".join(game.regions)})
         return rows
 
     def metrics(self) -> str:
@@ -6278,6 +6723,13 @@ class ROMarr:
         """Publish a refresh pass only if the library configuration is unchanged."""
         if generation != getattr(self, "_library_generation", 0):
             log.info("library refresh finished for a configuration that has since changed; not published")
+            return
+        cached, at, _ = self._library_cache
+        if partial and cached is not None and not getattr(self, "_library_partial", True):
+            # Keep the completed catalogue readable while another pass is
+            # traversing its sources, or when the new pass ends incomplete.
+            if error:
+                self._library_cache = (cached, at, error)
             return
         self._publish_library(shelf, error, partial=partial)
 
@@ -6798,6 +7250,189 @@ class ROMarr:
         roots = [self.library]
         roots.extend(self.library_root(cfg) for cfg, _ in self.game_libraries)
         return {"hash_index": index, "duplicate_roots": tuple(dict.fromkeys(roots))}
+
+    def _identify_after_import(self, verdict, platform: str, game: str) -> None:
+        """Name a verified import from its hashes, in the background (#247).
+
+        The import has already verified the file against a DAT, so it holds
+        the dump's CRC, MD5 and SHA-1; hash-aware providers (ScreenScraper)
+        identify by those far more reliably than by a file name. Queued on one
+        worker and never awaited: metadata must not slow, block or fail an
+        import, and a provider that is down costs nothing but the metadata.
+        """
+        from .dat import VERIFIED
+        if getattr(verdict, "status", "") != VERIFIED or not game:
+            return
+        with self._metadata_lock:
+            metadata = self.metadata
+        try:
+            if metadata is None or not metadata.can_identify():
+                return
+        except Exception:                          # noqa: BLE001 - enhancement only
+            return
+
+        def job():
+            try:
+                info = metadata.identify(verification=verdict, platform=platform)
+                if not info.found:
+                    return
+                self.store.set_game_identity(platform, game, {
+                    "title": info.title, "summary": info.summary,
+                    "released": info.released, "rating": info.rating,
+                    "genres": list(info.genres), "cover_url": info.cover_url,
+                    "source": info.source, "matched_by": info.matched_by,
+                    "identified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                })
+            except Exception:                      # noqa: BLE001 - enhancement only
+                log.debug("metadata for %s could not be fetched", game, exc_info=True)
+
+        with self._lock:
+            pool = getattr(self, "_identify_pool", None)
+            if pool is None:
+                pool = self._identify_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="romarr-identify")
+        try:
+            pool.submit(job)
+        except RuntimeError:                       # interpreter shutting down
+            pass
+
+    def _compress_after_import(self, destination, platform: str, game: str,
+                               library_cfg: dict | None = None) -> None:
+        """Queue an eligible Switch import after its library references are saved."""
+        if platform != "switch" or not destination or self.store.settings.get("compress_switch_imports") is not True:
+            return
+        path = Path(destination)
+        if not switch_compress.wants_compression(path):
+            return
+        if path.suffix.lower() == ".xci" and self.store.settings.get("compress_switch_xci") is not True:
+            return
+        compression = str(self.store.settings.get("nsz_compression")
+                          or switch_compress.DEFAULT_COMPRESSION)
+        from . import compressatorium_plugin
+        url, api_key, _source = compressatorium_plugin.connection(self._env)
+        source = str(path)
+        endpoint = hashlib.sha256(url.rstrip("/").encode()).hexdigest()
+        cfg = library_cfg or {}
+        record = SwitchCompressionJob(
+            source, platform, game, endpoint,
+            library_root=str(self.library_root(cfg).resolve()), library_id=str(cfg.get("id") or ""))
+
+        def track_job(job_id: str, previous_ids: tuple[str, ...]) -> None:
+            self.store.track_switch_compression(replace(record, job_id=job_id, previous_ids=previous_ids))
+
+        def job():
+            try:
+                try:
+                    outcome = switch_compress.compress_import(
+                        path, url=url, api_key=api_key, compression=compression, track_job=track_job)
+                except Exception as exc:  # noqa: BLE001 - the import stays successful
+                    log.warning("compress: could not process %s", path.name, exc_info=True)
+                    tracked = self.store.switch_compression_job(source)
+                    status = switch_compress.PENDING if tracked is not None else switch_compress.FAILED_STATUS
+                    outcome = switch_compress.CompressOutcome(
+                        source, status, error=f"unexpected error: {type(exc).__name__}")
+                self._record_compress(outcome, record)
+            except Exception:  # noqa: BLE001 - a tracked job is reconciled separately
+                log.warning("compress: could not record %s", path.name, exc_info=True)
+            finally:
+                with self._lock:
+                    self._active_switch_compression.discard(source)
+
+        with self._lock:
+            if (source in self._active_switch_compression
+                    or self.store.switch_compression_job(source) is not None):
+                return
+            self._active_switch_compression.add(source)
+            pool = getattr(self, "_compress_pool", None)
+            if pool is None:
+                pool = self._compress_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="romarr-compress")
+        try:
+            pool.submit(job)
+        except RuntimeError:  # interpreter shutting down
+            with self._lock:
+                self._active_switch_compression.discard(source)
+
+    def _schedule_switch_reconciliation(self) -> str:
+        """Keep polling and hashing large ROMs off the shared scheduler thread."""
+        with self._lock:
+            if self._switch_reconcile_thread is not None and self._switch_reconcile_thread.is_alive():
+                return "Switch compression reconciliation is already running"
+            self._switch_reconcile_thread = threading.Thread(
+                target=self._reconcile_switch_compression, name="romarr-compress-reconcile", daemon=True)
+            self._switch_reconcile_thread.start()
+        return "Switch compression reconciliation started"
+
+    def _reconcile_switch_compression(self) -> str:
+        """Poll tracked jobs once, including submissions from a previous run."""
+        from . import compressatorium, compressatorium_plugin
+        url, api_key, _source = compressatorium_plugin.connection(self._env)
+        endpoint = hashlib.sha256(url.rstrip("/").encode()).hexdigest()
+        client = compressatorium.CompressatoriumClient(
+            compressatorium.CompressatoriumConfig(base_url=url, api_key=api_key, timeout=5)) if url else None
+        rows = self.store.pending_switch_compression()
+        start = self._switch_reconcile_offset % len(rows) if rows else 0
+        # Bound network work per scheduler tick, rotating past slow jobs.
+        batch = (rows[start:] + rows[:start])[:4]
+        self._switch_reconcile_offset = start + len(batch)
+        settled = 0
+        for row in batch:
+            with self._lock:
+                if (row.source in self._active_switch_compression
+                        or self.store.switch_compression_job(row.source) != row):
+                    continue
+                self._active_switch_compression.add(row.source)
+            try:
+                service = client if row.endpoint == endpoint else None
+                if service is not None and not row.job_id:
+                    job_id = switch_compress.resolve_job_id(row.source, row.previous_ids, service)
+                    if job_id:
+                        row = replace(row, job_id=job_id)
+                        self.store.track_switch_compression(row)
+                outcome = switch_compress.reconcile_import(row.source, row.job_id, service)
+                if outcome is not None:
+                    self._record_compress(outcome, row)
+                    settled += 1
+            except Exception:  # noqa: BLE001 - leave this job for the next poll
+                log.warning("compress: could not reconcile %s", Path(row.source).name, exc_info=True)
+            finally:
+                with self._lock:
+                    self._active_switch_compression.discard(row.source)
+        return f"Settled {settled} Switch compression job(s)"
+
+    def _record_compress(self, outcome, job: SwitchCompressionJob) -> None:
+        """Persist the compression result before asking the owning library to rescan."""
+        target, label, output = None, "", ""
+        if outcome.status == switch_compress.COMPRESSED:
+            root = Path(job.library_root) if job.library_root else self.library
+            output = outcome.output
+            physical = ""
+            try:
+                with Path(output).open("rb") as file:
+                    physical = hashlib.file_digest(file, lambda: hashlib.sha1(usedforsecurity=False)).hexdigest()
+            except OSError:
+                log.warning("compress: could not hash %s", Path(output).name, exc_info=True)
+            self.hashes.move_paths({outcome.source: output}, root=root,
+                                   physical_hashes={outcome.source: physical})
+            target = next(((cfg, backend) for cfg, backend in self.game_libraries
+                           if job.library_id and cfg.get("id") == job.library_id
+                           and self.library_root(cfg).resolve() == root), None)
+            if target is not None:
+                label = target[0].get("name") or getattr(target[1], "name", "library")
+        detail = outcome.describe()
+        event = Event(kind="compress", game=job.game, platform=job.platform,
+                      release=Path(outcome.source).name, library=label, detail=detail)
+        if outcome.status == switch_compress.PENDING:
+            self.store.record(event)
+        elif not self.store.finish_switch_compression(
+                event, outcome.source, output, job_id=outcome.job_id):
+            return
+        log.info("compress: %s", detail)
+        if target is not None and self.store.settings.get("rescan_after_import", True):
+            try:
+                self._rescan_library(target[1], target[0], job.platform)
+            except Exception:  # noqa: BLE001 - the outcome is already committed
+                log.warning("compress: library rescan failed for %s", event.release, exc_info=True)
 
     def _index_hash(self, verdict, platform: str, fallback: str,
                     destination=None, *, sha1: str = "",
@@ -7825,6 +8460,18 @@ class ROMarr:
             except Exception as err:
                 log.warning("%s feed read failed: %s", label,
                             err.__class__.__name__)
+        # Automatic FitGirl & DODI Repacks RSS subscription: when the `repacks`
+        # plugin is installed/enabled and a PC (`win`) title is monitored, poll
+        # its subscribed RSS feeds (`fitgirl-repacks.site/feed/` and
+        # `dodi-repacks.site/feed/`) alongside Torznab/Newznab feeds.
+        if any((resolve(w.platform) and resolve(w.platform).slug == "win") for w in wanted):
+            searchable = hub.searchable_plugins()
+            if "repacks" in searchable and (self._hub_enabled() or self._repacks_search_ready(searchable)):
+                try:
+                    releases += self._hub_releases("latest", resolve("win"), only="repacks")
+                    sources += 1
+                except Exception as err:
+                    log.warning("repacks rss feed read failed: %s", err.__class__.__name__)
         if not sources:
             return "no indexer could be read"
         grabbed_count = skipped_in_flight = 0
@@ -8421,8 +9068,9 @@ class ROMarr:
             return html_bytes
         import re
         text = re.sub(r'\s+crossorigin(?:="[^"]*")?', '', text)
-        safe_origin = json.dumps(origin)
-        safe_path = json.dumps(initial_path if initial_path.startswith("/") else "/" + initial_path)
+        safe_origin = json.dumps(origin).replace("<", "\\u003c")
+        safe_path = json.dumps(initial_path if initial_path.startswith("/") else "/" + initial_path).replace("<", "\\u003c")
+        socket_paths = json.dumps(sorted(portal_socket.SOCKET_PATHS))
         shim = (
             "<script>(function(){"
             f"var TARGET={safe_origin};"
@@ -8447,7 +9095,17 @@ class ROMarr:
             "XMLHttpRequest.prototype.open=function(m,u){"
             "var a=Array.prototype.slice.call(arguments);a[1]=rw(u);"
             "return _o.apply(this,a);};"
-            "})();</script>"
+            "var WS=window.WebSocket;"
+            f"var SOCKETS={socket_paths};"
+            "if(WS){window.WebSocket=new Proxy(WS,{construct:function(c,a,n){"
+            "try{var u=new URL(a[0],location.href);"
+            "if(/^(https?|wss?):$/.test(u.protocol)&&SOCKETS.indexOf(u.pathname)!==-1&&"
+            "(u.host===location.host||u.host===new URL(TARGET).host)){"
+            "var relay=new URL(PROXY+encodeURIComponent(u.pathname+u.search),location.origin);"
+            "relay.protocol=location.protocol==='https:'?'wss:':'ws:';a[0]=relay.href;}"
+            "}catch(e){}return Reflect.construct(c,a,n);}});}"
+            + portal_player.PLAYER_SHIM
+            + "})();</script>"
         )
         lower = text.lower()
         idx = lower.find("<head>")
@@ -8684,21 +9342,42 @@ class ROMarr:
         for game in games:
             counts[game.launcher] = counts.get(game.launcher, 0) + 1
         return {
-            "items": [{"name": g.name, "launcher": g.launcher, "path": g.path}
+            "items": [{"name": g.name, "launcher": g.launcher, "path": g.path,
+                       "store_id": g.store_id, "installed": g.installed}
                       for g in games],
             "counts": counts,
             "total": len(games),
         }
 
+    def save_device_library(self, body: dict) -> dict:
+        """Replace one device's catalogue with its most recent report."""
+        report = device_report(body, now_iso())
+        with self._lock:
+            stored = self.store.list_items("owned_devices")
+            if len(stored) >= 24 and not any(row["id"] == report["id"] for row in stored):
+                raise OverflowError("This server already has 24 device reports")
+            self.store.put_item("owned_devices", report, require_persist=True)
+        return {"ok": True, "count": len(report["games"])}
+
     def connect_launchers(self, name: str = "Local launchers",
-                          platform: str = "") -> dict:
-        """Scan this machine's launchers and save the result as an import list."""
+                          platform: str = "", *, report: bool = False) -> dict:
+        """Scan this machine and report it or save an acquisition list."""
         found = self.scan_launchers()
         if found.get("error"):
             return found
-        if not found["items"]:
+        if not found["items"] and not report:
             return {"ok": False, "added": 0,
                     "message": "no launcher libraries found on this machine"}
+        if report:
+            host = socket.gethostname()
+            slug = re.sub(r"[^a-z0-9_.-]", "-", host.lower()).lstrip("._-")[:73]
+            os_name = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}.get(
+                host_platform.system(), "other")
+            saved = self.save_device_library({
+                "device_id": slug or "local-romarr", "name": host[:100], "os": os_name,
+                "games": [{**game, "provider": game["launcher"]} for game in found["items"]],
+            })
+            return {**saved, "message": f"Reported {saved['count']} game(s) from {host}"}
         content = "\n".join(g["name"] for g in found["items"])
         saved = self.store.put_item("import_lists", {
             "name": name, "type": "paste", "platform": platform,
@@ -8718,6 +9397,56 @@ class ROMarr:
         that were acquired, imported and fulfilled -- a slow loop
         re-downloading its own history.
         """
+        if not self._list_sync_lock.acquire(blocking=False):
+            return {"added": 0, "busy": True, "message": "List sync is already running"}
+        try:
+            return self._sync_import_lists()
+        finally:
+            self._list_sync_lock.release()
+
+    def reconnect_import_list(self, item_id: str, pasted: str) -> dict:
+        """Test a replacement credential before updating one account snapshot."""
+        from .connect import RECONNECT_FIELDS, extract_value
+        from .lists import fetch_entries
+
+        original = self.store.get_item("import_lists", item_id)
+        if original is None:
+            return {"error": "This import list no longer exists"}
+        field = RECONNECT_FIELDS.get(original.get("type"))
+        if not field:
+            return {"error": "This source cannot be reconnected here"}
+        if original["type"] == "steam" and not original.get("steam_id"):
+            return {"error": "Link your Steam account before adding its Web API key"}
+        if not isinstance(pasted, str) or not 0 < len(pasted) <= 8192:
+            return {"error": "Paste a credential from the provider page"}
+        try:
+            value = extract_value(field, pasted)
+        except ValueError:
+            return {"error": "Paste the credential from the provider page"}
+        if not value or any(char.isspace() for char in value):
+            return {"error": "Paste the credential from the provider page"}
+        candidate = {**original, field: value}
+        try:
+            entries = fetch_entries(candidate)
+        except requests.RequestException:
+            return {"error": "The provider could not read this library. Check its connection and try again."}
+        except ValueError as err:
+            return {"error": str(err)}
+        at = now_iso()
+        candidate["last_sync"] = {"at": at, "fetched": len(entries)}
+        if owned_provider(candidate):
+            candidate["owned_snapshot"] = {"at": at, "games": [
+                {"name": entry.game, "store_id": entry.store_id} for entry in entries
+            ]}
+        candidate["unmatched"] = list(dict.fromkeys(
+            entry.game for entry in entries
+            if resolve(entry.platform or candidate.get("platform") or "") is None))[:500]
+        if not self.store.replace_list_sync(original, candidate):
+            return {"error": "The list changed during the check. Reopen it and try again."}
+        return {"ok": True, "fetched": len(entries)}
+
+    def _sync_import_lists(self) -> dict:
+        """Read each list once and retain storefront entries beside its ledger."""
         from .lists import fetch_entries
         lists = self.store.list_items("import_lists")
         if not lists:
@@ -8727,12 +9456,11 @@ class ROMarr:
         for cfg in lists:
             if not cfg.get("enable", True):
                 continue
-            from .store import now_iso
+            original = dict(cfg)
             try:
                 entries = fetch_entries(cfg)
-                cfg["last_sync"] = {"at": now_iso(),
-                                    "fetched": len(entries)}
-                self.store.put_item("import_lists", cfg)
+                synced_at = now_iso()
+                cfg["last_sync"] = {"at": synced_at, "fetched": len(entries)}
             except Exception as err:
                 # Which list failed matters, and so does WHY: "2 list(s)
                 # unreadable" sends somebody hunting through logs for a
@@ -8745,17 +9473,21 @@ class ROMarr:
                 failures.append({"id": cfg.get("id"),
                                  "name": cfg.get("name"), "reason": reason})
                 cfg["last_sync"] = {"at": now_iso(), "error": reason}
-                self.store.put_item("import_lists", cfg)
+                self.store.replace_list_sync(original, cfg)
                 failed_lists += 1
                 continue
+            if owned_provider(cfg):
+                cfg["owned_snapshot"] = {"at": synced_at, "games": [
+                    {"name": entry.game, "store_id": entry.store_id} for entry in entries
+                ]}
             # Epic swaps its single-use code for a refresh token during the
             # fetch; persisting that is what makes the next sync silent.
             if cfg.get("epic_refresh") and not cfg.get("_epic_saved"):
                 cfg["epic_code"] = ""
                 cfg["_epic_saved"] = True
-                self.store.put_item("import_lists", cfg)
             ledger = set(cfg.get("added") or [])
-            changed = False
+            pending = []
+            seen_unmatched = set()
             # Titles with no ROM platform -- a Battle.net or PSN library is
             # mostly modern games -- are kept on the list, visibly, rather
             # than discarded. "133 skipped" with no way to see which 133 is
@@ -8765,7 +9497,8 @@ class ROMarr:
                 platform = resolve(entry.platform or cfg.get("platform") or "")
                 if platform is None:
                     unknown += 1
-                    if entry.game not in unmatched:
+                    if entry.game not in seen_unmatched:
+                        seen_unmatched.add(entry.game)
                         unmatched.append(entry.game)
                     continue
                 key = f"{platform.slug}/{entry.game.strip().lower()}"
@@ -8773,13 +9506,11 @@ class ROMarr:
                     known += 1
                     continue
                 ledger.add(key)
-                changed = True
-                self.store.want(entry.game, platform.slug)
-                added += 1
-            if changed or unmatched != (cfg.get("unmatched") or []):
-                cfg["added"] = sorted(ledger)
-                cfg["unmatched"] = unmatched[:500]
-                self.store.put_item("import_lists", cfg)
+                pending.append((entry.game, platform.slug))
+            cfg["added"] = sorted(ledger)
+            cfg["unmatched"] = unmatched[:500]
+            if self.store.replace_list_sync(original, cfg, pending):
+                added += len(pending)
         message = f"added {added} to Wanted"
         if known:
             message += f", {known} already added before"
@@ -8809,6 +9540,8 @@ class ROMarr:
             return self.retire_dead_downloads()
         if name == "ListSync":
             return self.list_sync()
+        if name == "FreeGameCollector":
+            return {"message": self._collect_free_games()}
         if name == "UpdateCheck":
             return self.check_update(manual=True)
         if name == "ApplyUpdate":
@@ -8922,7 +9655,9 @@ class ROMarr:
             f"{f.signature} in {Path(f.path).name}" for f in found)
         self.store.record(Event(kind="failed", game=name, platform=platform.slug,
                                 detail=detail))
-        self.notify(failed(name, detail))
+        req_id = getattr(queue_item, "external_request_id", "") if queue_item is not None else ""
+        self.notify(failed(name, detail, platform=platform.slug,
+                           external_request_id=req_id))
         if queue_item is not None:
             queue_item.state = "import-failed"
             queue_item.release_fault = True
@@ -9031,6 +9766,7 @@ class ROMarr:
                         item.state = "grabbed"
             self.store.save()
         results = []
+        compression_candidates = []
         finished = []
         for client in self.clients:
             if not getattr(client, "configured", True):
@@ -9312,6 +10048,8 @@ class ROMarr:
                     [*queue_item.imported_paths,
                      *(str(o.destination) for o in outcomes if o.ok and o.destination)]))
             fulfils_base = not (queue_item and queue_item.import_intent.get("existing_game"))
+            req_id = getattr(queue_item, "external_request_id", "") if queue_item is not None else ""
+            imported_assets = tuple(str(o.destination) for o in outcomes if o.ok and getattr(o, "destination", None))
             for outcome in outcomes:
                 if outcome.ok:
                     if outcome.sha1 or outcome.physical_sha1:
@@ -9319,18 +10057,27 @@ class ROMarr:
                             outcome.verification, platform.slug, game_title,
                             outcome.destination, sha1=outcome.sha1,
                             physical_sha1=outcome.physical_sha1)
+                    if outcome.sha1:
+                        self._identify_after_import(outcome.verification, platform.slug, game_title)
+                    if (platform.slug == "switch" and self.store.settings.get("compress_switch_imports")
+                            and (queue_item is None or all_ok)):
+                        compression_candidates.append((outcome.destination, platform.slug, game_title, target_cfg))
                     self.store.record(Event(kind="imported", game=game_title,
                                             platform=platform.slug, release=name,
                                             library=label,
                                             detail=f"{outcome.destination} ({outcome.import_method or 'copy'}) {outcome.fallback_reason}"))
                     if all_ok and fulfils_base:
                         self.notify(imported(game_title, platform.slug,
-                                             outcome.verification))
+                                             outcome.verification,
+                                             external_request_id=req_id,
+                                             assets=imported_assets))
                 else:
                     self.store.record(Event(kind="failed", game=game_title,
                                             platform=platform.slug,
                                             detail=outcome.reason))
-                    self.notify(failed(game_title, str(outcome.reason)))
+                    self.notify(failed(game_title, str(outcome.reason),
+                                       platform=platform.slug,
+                                       external_request_id=req_id))
             if queue_item is not None:
                 # Marked so the scheduled sweep never re-attempts it; the
                 # Tasks page button clears failure marks to retry.
@@ -9410,9 +10157,15 @@ class ROMarr:
             results.append({"name": name, "ok": all_ok,
                             "reason": "" if all_ok else next((str(o.reason) for o in outcomes if not o.ok), ""),
                             "library": label, "transfers": [{"method": o.import_method, "fallback_reason": o.fallback_reason} for o in outcomes if o.ok]})
-        # The sweep marks rows in place; without this the marks live only in
-        # memory and a restart re-imports everything it had already done.
-        self.store.save()
+        # Save the import paths before a worker can replace their files. A
+        # partial queue-backed import publishes no paths, so it waits for retry.
+        try:
+            self.store.save(raise_on_error=bool(compression_candidates))
+        except OSError:
+            log.warning("compress: import state could not be saved; keeping originals")
+        else:
+            for candidate in compression_candidates:
+                self._compress_after_import(*candidate)
         return results
 
 
@@ -9628,6 +10381,21 @@ def make_handler(service: ROMarr):
                 if close is not None:
                     close()
 
+        def _cloud_post(self, path: str, length: int):
+            """POST /api/v1/cloud/*: a bounded JSON body, then cloud storage."""
+            from .cloud_routes import post as cloud_post
+            if length < 0 or length > 65536:
+                self.close_connection = True
+                return self._json(413, {"error": "Cloud request exceeds 64 KiB"})
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "invalid json"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "Send a JSON object"})
+            code, payload = cloud_post(service, path, body)
+            return self._json(code, payload)
+
         def _chat_post(self, path: str, length: int):
             """POST /api/v1/chat*: a bounded JSON body, then the chat agent."""
             from . import chat_agent
@@ -9701,7 +10469,12 @@ def make_handler(service: ROMarr):
         #: it takes no parameters, reads no invitation, touches no state and
         #: returns identical bytes to every caller. The invitation id is in
         #: the URL fragment, which never reaches this server at all.
+        # /api/v1/cloud/oauth/callback: a provider's redirect is a cross-site
+        # top-level GET, so the SameSite=Strict session cookie never comes
+        # with it. The pending sign-in's single-use, unguessable state is
+        # what authorises it, and the handler accepts nothing else.
         OPEN_PATHS = ("/", "/login", "/link", "/api/health", "/api/v1/login",
+                      "/api/v1/cloud/oauth/callback",
                       "/api/v1/setup", "/api/v1/connect/steam/return",
                       # The OIDC round trip: /oidc/login starts it (no session
                       # yet — that is the point), and /oidc/callback arrives as
@@ -9959,6 +10732,21 @@ def make_handler(service: ROMarr):
             """Serve UI HTML pages and JSON API GET endpoints."""
             route = urlparse(self.path)
             query = parse_qs(route.query)
+            if route.path == "/api/v1/cloud/oauth/callback":
+                from .cloud_routes import oauth_callback
+                ok, message = oauth_callback(service, {k: v[0] for k, v in query.items()})
+                if ok:
+                    self.send_response(302)
+                    self.send_header("Location", "/#cloud")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return None
+                return self._json(400, {"error": message})
+            if route.path == "/api/v1/cloud" or route.path.startswith("/api/v1/cloud/"):
+                from .cloud_routes import get as cloud_get
+                code, payload = cloud_get(service, route.path,
+                                          {k: v[0] for k, v in query.items()})
+                return self._json(code, payload)
 
 
 
@@ -10123,12 +10911,27 @@ def make_handler(service: ROMarr):
                 items = [redact_indexer(i)
                          for i in service.store.list_items("indexers")]
                 proxied, err = [], None
-                try:
-                    proxied = service.prowlarr.indexers()
-                except Exception as exc:
-                    err = str(exc)
+                prowlarr_cfg = getattr(service.prowlarr, "_config", None)
+                if str(getattr(prowlarr_cfg, "base_url", "") or "").strip():
+                    try:
+                        proxied = service.prowlarr.indexers()
+                    except Exception as exc:
+                        # A sentence, not a Python exception: the card shows it.
+                        log.warning("prowlarr indexer list failed: %s", exc)
+                        err = ("Prowlarr did not answer. Check its address and API key "
+                               "under Indexers.")
                 return self._json(200, {"items": items, "proxied": proxied,
                                         "error": err})
+            if route.path == "/api/v1/hydra/library":
+                from .hydra import library_sources
+
+                try:
+                    rows = library_sources(query=(query.get("q") or [""])[0][:100])
+                except Exception as err:
+                    return self._json(502, {"items": [], "error":
+                                            f"library.hydra.wiki did not answer "
+                                            f"({type(err).__name__})"})
+                return self._json(200, {"items": rows})
             if route.path == "/api/v1/downloadclient":
                 return self._json(200, {"items": service.download_clients()})
             if route.path == "/api/v1/downloadclient/schema":
@@ -10425,7 +11228,13 @@ def make_handler(service: ROMarr):
                     return self._json(400, {
                         "error": "unknown format",
                         "known": sorted(FRONTEND_FORMATS)})
+                from .frontends import mapped_rows
                 rows = service.frontend_rows(query.get("platform", [""])[0])
+                try:
+                    rows = mapped_rows(rows, query.get("path_from", [""])[0],
+                                       query.get("path_to", [""])[0])
+                except ValueError as err:
+                    return self._json(400, {"error": str(err)})
                 return self._send(200, spec["render"](rows).encode("utf-8"),
                                   spec["content_type"])
             if route.path == "/api/v1/indexer/schema":
@@ -10433,8 +11242,11 @@ def make_handler(service: ROMarr):
             if route.path == "/api/v1/library":
                 return self._json(200, {"items": service.libraries_status()})
             if route.path == "/api/v1/library/config":
-                return self._json(200, {"items": [
-                    redact_library(lib) for lib in service.store.list_items("libraries")]})
+                return self._json(200, {
+                    "items": [redact_library(lib) for lib in service.store.list_items("libraries")],
+                    "ggrequestz_url": service.ggrequestz_url,
+                    "library_path": str(service.library),
+                })
             if route.path == "/api/v1/library/schema":
                 return self._json(200, {"types": LIBRARY_TYPES})
             if route.path == "/api/v1/switch/updates":
@@ -10560,12 +11372,28 @@ def make_handler(service: ROMarr):
                 if platform and game:
                     return self._json(200, service.store.game_meta(platform, game))
                 return self._json(200, {"items": service.store.all_game_meta()})
+            if route.path == "/api/v1/lists/offers":
+                return self._json(200, service.free_game_collector.view())
+            if route.path == "/api/v1/lists/owned":
+                try:
+                    offset = max(0, int(query.get("offset", ["0"])[0]))
+                    limit = max(1, min(250, int(query.get("limit", ["100"])[0])))
+                except ValueError:
+                    return self._json(400, {"error": "offset and limit must be integers"})
+                return self._json(200, owned_games(
+                    service.store.list_items("import_lists"),
+                    devices=service.store.list_items("owned_devices"),
+                    q=query.get("q", [""])[0], provider=query.get("provider", [""])[0],
+                    offset=offset, limit=limit))
             if route.path == "/api/v1/importlist":
                 items = []
                 for cfg in service.store.list_items("import_lists"):
                     # The ledger is bookkeeping, not configuration; its size
                     # is the interesting part.
                     ledger = cfg.pop("added", None) or []
+                    snapshot = cfg.pop("owned_snapshot", None)
+                    if snapshot is not None:
+                        cfg["owned_count"] = len(snapshot["games"])
                     for secret in LIST_SECRETS:
                         if cfg.get(secret):
                             cfg[secret] = "********"
@@ -10703,6 +11531,12 @@ def make_handler(service: ROMarr):
                     game, (query.get("platform") or [""])[0]))
             if route.path == "/api/v1/hub/plugins":
                 return self._json(200, hub.plugins())
+            if route.path == "/api/v1/hub/plugin/detail":
+                slug = (query.get("slug") or [""])[0].strip()
+                if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                    return self._json(400, {"error": "a plugin slug is required"})
+                result = plugin_dashboard.detail(slug)
+                return self._json(200 if result.get("ok") else 404, result)
             if route.path == "/api/v1/hub/igir":
                 return self._json(200, hub.igir_status())
             if route.path == "/api/v1/hub/exo2romm":
@@ -10711,6 +11545,16 @@ def make_handler(service: ROMarr):
                 return self._json(200, _compressatorium_status(service))
             if route.path == "/api/v1/hub/mdm":
                 return self._json(200, _mdm_status())
+            if route.path == "/api/v1/arcade-punks":
+                return self._json(200, _arcade_punks_status(service))
+            if route.path == "/api/v1/arcade-punks/search":
+                from . import arcade_punks
+                try:
+                    limit = int(query.get("limit", ["25"])[0] or 25)
+                except ValueError:
+                    return self._json(400, {"error": "limit must be a number"})
+                return self._json(200, arcade_punks.search(
+                    query.get("q", [""])[0], limit=limit))
             if route.path == "/api/v1/hub/fleet":
                 return self._json(200, hub.fleet_profiles())
             if route.path == "/api/v1/chat/config":
@@ -10733,23 +11577,22 @@ def make_handler(service: ROMarr):
                 confined, why = hub.sandbox_state()
                 searchable = hub.searchable_plugins()
                 lane_ready = service._hub_enabled()
+                minerva_ready = service._minerva_search_ready(searchable)
                 return self._json(200, {"available": hub.available(),
                                         "sandboxed": confined,
                                         "sandbox_detail": why,
                                         "archive_org_auth": hub.archive_org_auth_status(),
                                         "compressatorium": _compressatorium_status(service),
                                         "mdm": _mdm_status(),
+                                        "arcade_punks": _arcade_punks_status(service),
                                         "flaresolverr_configured": bool(hub.flaresolverr_url()),
                                         "searchable_plugins": searchable,
-                                        # The Plugins page says out loud what
-                                        # enabling a plugin now does: its
-                                        # results join Interactive Search,
-                                        # provided the ROM Hub download client
-                                        # is configured to stage the fetches.
+                                        "minerva_search_ready": minerva_ready,
                                         "acquisition": ("ready" if lane_ready
-                                                        else ("no ROM Hub download client configured"
-                                                              if searchable else
-                                                              "no enabled plugin declares search"))})
+                                                        else "selective" if minerva_ready
+                                                        else "no ROM Hub download client configured"
+                                                        if searchable else
+                                                        "no enabled plugin declares search")})
             if route.path == "/api/search":
                 game = (query.get("game") or [""])[0]
                 if not game:
@@ -10762,6 +11605,9 @@ def make_handler(service: ROMarr):
 
         def _serve_portal_proxy(self, target: str, sub_path: str,
                                 method: str = "GET", body: bytes | None = None):
+            upgrade = self.headers.get("Upgrade", "")
+            if upgrade and method == "GET":
+                return self._serve_portal_socket(target, sub_path)
             res = service.proxy_portal(
                 target,
                 sub_path,
@@ -10784,10 +11630,92 @@ def make_handler(service: ROMarr):
                         "Content-Disposition", "Access-Control-Allow-Origin"):
                 if hdr in resp_headers:
                     self.send_header(hdr, resp_headers[hdr])
+            # RomM uses these headers on its standalone emulator pages to
+            # make SharedArrayBuffer available for threaded cores.
+            if code == 200 and ctype.startswith("text/html"):
+                for name, value in (("Cross-Origin-Opener-Policy", "same-origin"),
+                                    ("Cross-Origin-Embedder-Policy", "require-corp")):
+                    if resp_headers.get(name) == value:
+                        self.send_header(name, value)
             if code == 200 and (sub_path.startswith("/assets/") or "/loader.js" in sub_path):
                 self.send_header("Cache-Control", "private, max-age=3600")
             self.end_headers()
             return self.wfile.write(raw)
+
+        def _serve_portal_socket(self, target: str, sub_path: str):
+            """Upgrade a same-origin, signed-in Socket.IO request to its library."""
+            from base64 import b64encode
+            from requests.cookies import get_cookie_header
+            from urllib.parse import urlsplit
+
+            self.close_connection = True
+            if not self._authorised():
+                return self._json(401, {"error": "unauthorised"})
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            if (self.request_version != "HTTP/1.1"
+                    or self.headers.get("Upgrade", "").lower() != "websocket"
+                    or "upgrade" not in portal_socket.connection_tokens(self.headers.get("Connection", ""))
+                    or self.headers.get("Sec-WebSocket-Version", "") != portal_socket.WS_VERSION
+                    or not portal_socket.valid_key(key)
+                    or self.headers.get("Content-Length", "0") != "0"
+                    or self.headers.get("Transfer-Encoding")
+                    or not portal_socket.valid_path(sub_path)):
+                return self._json(400, {"error": "invalid library WebSocket upgrade"})
+            proxies = service._env.get("ROMARR_TRUSTED_PROXIES", "").split(",")
+            forwarded = (self.headers.get("X-Forwarded-Proto", "")
+                         if trusted_peer(self.client_address[0], proxies) else "")
+            if not portal_socket.origin_allowed(
+                    self.headers.get("Origin", ""), self.headers.get("Host", ""), forwarded,
+                    str(service.store.settings.get("public_url") or ""),
+                    "https" if isinstance(self.connection, ssl.SSLSocket) else "http"):
+                return self._json(403, {"error": "library WebSocket origin refused"})
+            try:
+                offered = portal_socket.protocols(self.headers.get("Sec-WebSocket-Protocol", ""))
+                parts = urlsplit(target or service.active_portal_url())
+            except ValueError:
+                return self._json(400, {"error": "invalid library WebSocket request"})
+            origin = f"{parts.scheme}://{parts.netloc}"
+            credentials = service._portal_targets().get(origin)
+            if credentials is None:
+                return self._json(403, {"error": "not a configured library origin"})
+            if not portal_socket.CONNECTIONS.acquire(blocking=False):
+                return self._json(503, {"error": "too many library WebSocket connections"})
+            try:
+                headers = {}
+                try:
+                    username, password = credentials.get("username"), credentials.get("password")
+                    if username and password:
+                        basic = b64encode(f"{username}:{password}".encode("latin-1")).decode("ascii")
+                        headers["Authorization"] = f"Basic {basic}"
+                    elif credentials.get("api_key"):
+                        api_key = credentials["api_key"]
+                        headers.update({"Authorization": f"Bearer {api_key}", "X-Api-Key": api_key})
+                    session = getattr(service, "_portal_sessions", {}).get(origin)
+                    if session is not None:
+                        cookie = get_cookie_header(
+                            session.cookies, requests.Request("GET", origin + sub_path).prepare())
+                        if cookie:
+                            headers["Cookie"] = cookie
+                    upstream, protocol, frames = portal_socket.open_upstream(
+                        origin, sub_path, key, offered, headers)
+                except (OSError, ValueError, http_client.HTTPException, portal_socket.HandshakeError) as exc:
+                    log.warning("library WebSocket handshake failed (%s)", type(exc).__name__)
+                    return self._json(502, {"error": "library WebSocket handshake failed"})
+                try:
+                    header = ("HTTP/1.1 101 Switching Protocols\r\n"
+                              "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                              f"Sec-WebSocket-Accept: {portal_socket.accept_key(key)}\r\n")
+                    if protocol:
+                        header += f"Sec-WebSocket-Protocol: {protocol}\r\n"
+                    self.wfile.write((header + "\r\n").encode("ascii"))
+                    self.wfile.flush()
+                    portal_socket.relay(self.connection, upstream.sock, frames)
+                except OSError:
+                    pass
+                finally:
+                    upstream.close()
+            finally:
+                portal_socket.CONNECTIONS.release()
 
         def _post(self):
             """Dispatch POST requests, coordinating configuration writes and reloads."""
@@ -10799,6 +11727,8 @@ def make_handler(service: ROMarr):
             if route.path in ("/api/v1/chat", "/api/v1/chat/confirm", "/api/v1/chat/config",
                               "/api/v1/chat/models", "/api/v1/chat/test"):
                 return self._chat_post(route.path, length)
+            if route.path.startswith("/api/v1/cloud/"):
+                return self._cloud_post(route.path, length)
 
 
 
@@ -10825,6 +11755,9 @@ def make_handler(service: ROMarr):
             # which is not a refusal. Only this route is bounded here: a
             # restore legitimately posts a large backup, and a blanket cap
             # would break it.
+            if route.path == "/api/v1/lists/device" and length > DEVICE_REPORT_MAX_BYTES:
+                self._discard(length)
+                return self._json(413, {"error": "Device report is too large"})
             if (route.path == "/api/v1/capture"
                     and length > CAPTURE_MAX_BODY):
                 # Drained in chunks and thrown away rather than read whole.
@@ -11361,18 +12294,24 @@ def make_handler(service: ROMarr):
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 return self._json(200, meta)
+            if route.path == "/api/v1/importlist/reconnect":
+                result = service.reconnect_import_list(str(body.get("id") or ""), body.get("credential"))
+                return self._json(200 if result.get("ok") else 400, result)
             if route.path == "/api/v1/importlist":
                 cfg = {k: body.get(k, "") for k in
                        ("id", "name", "type", "platform", "content", "url",
                         "steam_id", "profile", "api_key", "source",
                         "gog_username", "openxbl_key", "npsso", "itchio_key",
-                        "epic_code", "ea_token", "battlenet_json")}
+                        "epic_code", "ea_token", "battlenet_json",
+                        "humble_cookie", "battlenet_cookie", "provider")}
                 cfg["enable"] = bool(body.get("enable", True))
                 cfg["type"] = str(cfg["type"] or "paste").lower()
                 if cfg["type"] not in LIST_TYPES:
                     return self._json(400, {
                         "error": f"unknown list type {cfg['type']!r}",
                         "known": sorted(LIST_TYPES)})
+                provider = str(cfg.get("provider") or "")
+                cfg["provider"] = provider if cfg["type"] == "paste" and provider in OWNED_PROVIDERS else ""
                 # Take the whole document a person pasted, not just the
                 # bare value: every token page is JSON and select-all-copy
                 # is what actually happens.
@@ -11393,18 +12332,29 @@ def make_handler(service: ROMarr):
                     if old:
                         cfg["added"] = old.get("added") or []
                         for secret in LIST_SECRETS:
-                            if cfg.get(secret) in ("********", ""):
+                            if cfg.get(secret) in ("********", "", None):
                                 cfg[secret] = old.get(secret, "")
+                        service._restore_list_sync_fields(cfg, old)
                 saved = service.store.put_item("import_lists", cfg)
                 saved.pop("added", None)
+                saved.pop("owned_snapshot", None)
                 for secret in LIST_SECRETS:
                     if saved.get(secret):
                         saved[secret] = "********"
                 return self._json(200, saved)
-            if route.path == "/api/v1/launchers/connect":
-                return self._json(200, service.connect_launchers(
-                    str(body.get("name") or "Local launchers"),
-                    str(body.get("platform") or "")))
+            if route.path in ("/api/v1/lists/device", "/api/v1/launchers/connect"):
+                try:
+                    if route.path == "/api/v1/lists/device":
+                        return self._json(200, service.save_device_library(body))
+                    return self._json(200, service.connect_launchers(
+                        str(body.get("name") or "Local launchers"),
+                        str(body.get("platform") or ""), report=body.get("report") is True))
+                except ValueError as err:
+                    return self._json(400, {"error": str(err)})
+                except OverflowError as err:
+                    return self._json(409, {"error": str(err)})
+                except OSError:
+                    return self._json(500, {"error": "Could not save the device report"})
             if route.path == "/api/v1/importlist/preview":
                 from .lists import fetch_entries as _fetch_entries
                 preview_cfg = {k: body.get(k) or ""
@@ -11612,11 +12562,40 @@ def make_handler(service: ROMarr):
                 if result.get("ok"):
                     service.reload_clients()
                 return self._json(200 if result.get("ok") else 400, result)
+            if route.path == "/api/v1/arcade-punks/grab":
+                payload = body if isinstance(body, dict) else {}
+                fields = {k: payload.get(k, "") for k in ("url", "game", "platform")}
+                if any(not isinstance(v, str) for v in fields.values()):
+                    return self._json(400, {"ok": False,
+                                            "error": "url, game and platform must be strings"})
+                result = service.grab_arcade_punks(
+                    fields["url"], game=fields["game"], platform_slug=fields["platform"])
+                return self._json(200 if result.get("ok") else 400, result)
             if route.path == "/api/v1/hub/archive-org/auth":
                 payload = body if isinstance(body, dict) else {}
                 result = hub.archive_org_auth_configure(
                     email=payload.get("email", ""), password=payload.get("password", ""),
                     clear=payload.get("clear", False))
+                return self._json(200 if result.get("ok") else 400, result)
+            if route.path in ("/api/v1/hub/plugin/config", "/api/v1/hub/plugin/run"):
+                payload = body if isinstance(body, dict) else {}
+                slug = str(payload.get("slug") or "").strip()
+                if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                    return self._json(400, {"error": "a plugin slug is required"})
+                if route.path == "/api/v1/hub/plugin/config":
+                    values, secrets_in = payload.get("values") or {}, payload.get("secrets") or {}
+                    clear = payload.get("clear") or []
+                    if not (isinstance(values, dict) and isinstance(secrets_in, dict)
+                            and isinstance(clear, list)):
+                        return self._json(400, {"error": "values and secrets are objects, clear a list"})
+                    result = plugin_dashboard.save(slug, values, secrets_in, clear)
+                else:
+                    result = plugin_dashboard.run(
+                        slug, str(payload.get("action") or ""),
+                        query=str(payload.get("query") or ""),
+                        platform=str(payload.get("platform") or ""),
+                        rom_id=str(payload.get("rom_id") or ""),
+                        source_id=str(payload.get("source_id") or ""))
                 return self._json(200 if result.get("ok") else 400, result)
             if route.path == "/api/v1/hub/plugin":
                 slug = (body.get("slug") or "").strip()
@@ -11731,6 +12710,14 @@ def make_handler(service: ROMarr):
                 key = "indexers" if is_indexer else "download_clients"
                 with service._metadata_lock:
                     existing = service.store.get_item(key, body.get("id")) if body.get("id") else None
+                    if (not is_indexer
+                            and str(body.get("type") or "").lower() == "hub"
+                            and str((existing or {}).get("type") or "").lower() != "hub"
+                            and any(str(row.get("type") or "").lower() == "hub"
+                                    for row in service.store.list_items(key))):
+                        return self._json(409, {
+                            "error": "ROM Hub is already set up. Edit its existing download client."
+                        })
                     # Each family merges against its OWN type specs: the
                     # downloaders merge looks secrets up in CLIENT_TYPES, which
                     # has no entry for "prowlarr" -- it silently merged nothing
@@ -12003,6 +12990,11 @@ def make_handler(service: ROMarr):
                 secret = body.get("_oidc_client_secret")
                 if "_oidc_client_secret" in body and secret in ("", "********"):
                     body.pop("_oidc_client_secret")
+                # Same rule for the GitHub token; `clear_github_token` empties it.
+                if body.pop("clear_github_token", False):
+                    body["_github_token"] = ""
+                elif "_github_token" in body and body["_github_token"] in ("", "********"):
+                    body.pop("_github_token")
                 # Serialize public settings writes with the updater launch.
                 try:
                     with service._lock:
@@ -12010,6 +13002,8 @@ def make_handler(service: ROMarr):
                         updated = service.store.update_settings(body)
                         if "flaresolverr_url" in body:
                             hub.configure_flaresolverr(str(updated.get("flaresolverr_url") or ""))
+                        if "_github_token" in body:
+                            hub.configure_github_token(str(updated.get("_github_token") or ""))
                 except ValueError as exc:
                     return self._json(400, {"error": str(exc)})
                 if any(str(k).startswith("oidc") or k == "_oidc_client_secret"
@@ -12037,9 +13031,19 @@ def make_handler(service: ROMarr):
             # sender cannot attach an authentication header, so redact it
             # before it can reach either stdout or the in-app log ring.
             message = redact_query_credentials(fmt % args)
+            if "/api/v1/cloud/oauth/callback" in message:
+                # An authorization code and its state are credentials too.
+                message = re.sub(r"(/api/v1/cloud/oauth/callback)\?[^\s\"]*",
+                                 r"\1?[REDACTED]", message)
             log.info("%s %s", self.address_string(), message)
 
     return Handler
+
+
+def _arcade_punks_status(service) -> dict:
+    """The Arcade Punks card's state: plugin, link routes and setup hints."""
+    from . import arcade_punks
+    return arcade_punks.status(service._env, service.clients)
 
 
 def _compressatorium_status(service) -> dict:
@@ -12071,11 +13075,21 @@ def serve(port: int = 6868, env: dict[str, str] | None = None):
         compressatorium_plugin.preinstall_in_background()
         mdm_plugin.preinstall_in_background()
         preinstalled_plugins.preinstall_defaults_in_background()
+        from . import arcade_punks
+        arcade_punks.preinstall_in_background()
     except Exception:
         log.exception("plugin preinstall skipped (non-fatal)")
 
     bind_env = env if env is not None else os.environ
-    host = str(bind_env.get("ROMARR_HOST") or "0.0.0.0")
+    host = str(bind_env.get("ROMARR_HOST") or "0.0.0.0").strip()
+    if host in ("127.0.0.1", "localhost", "::1") and (
+            Path("/.dockerenv").exists() or bind_env.get("container")):
+        log.warning(
+            "ROMARR_HOST=%s inside a container only accepts loopback traffic; "
+            "Docker port publishing and Gluetun (network_mode: service:gluetun) "
+            "will reset external connections. Set ROMARR_HOST=0.0.0.0 to expose the UI.",
+            host,
+        )
     ThreadingHTTPServer.request_queue_size = 256
     httpd = ThreadingHTTPServer((host, port), make_handler(service))
 
@@ -12102,4 +13116,16 @@ def serve(port: int = 6868, env: dict[str, str] | None = None):
              scheme, host, port, service.library)
     if service.load_dats_in_background():
         log.info("loading DATs in the background; verification waits for them")
+
+    # `docker stop` sends SIGTERM to PID 1, which is this process. Without a
+    # handler it is ignored until Docker gives up and sends SIGKILL, and the
+    # atexit cleanup (unmounting cloud mounts, stopping rclone) never runs.
+    import signal
+
+    def _terminate(signum, frame):
+        raise SystemExit(0)
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except (ValueError, AttributeError, OSError):   # not the main thread, or no SIGTERM
+        pass
     httpd.serve_forever()

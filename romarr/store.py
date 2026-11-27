@@ -19,6 +19,8 @@ service will not start again.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import copy
 import json
 import logging
@@ -194,6 +196,11 @@ class QueueItem:
     # The parts the request asked for when this row was grabbed, so an
     # import that brings only some of them can leave the rest on Wanted.
     parts: list[str] = field(default_factory=list)
+    # When a client last reported this download waiting its turn or paused
+    # (qBittorrent queuedDL / pausedDL / stoppedDL). The stall timeout runs
+    # from the later of this and `at`, so a torrent that sat in the queue
+    # past the timeout still gets the whole timeout to start once it leaves.
+    waited_at: str = ""
 
 
 @dataclass
@@ -255,6 +262,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # used by ROM Hub's broker/downloader when an allowed HTTPS source answers
     # with a Cloudflare challenge. Never passed to untrusted plugin code.
     "flaresolverr_url": "",
+    # Extra git forges plugins may be installed from, comma separated. They
+    # add to catalogue.DEFAULT_ALLOWED_HOSTS; they never replace it.
+    "plugin_hosts": "",
     "romm_public_url": "",
     # --- OpenID Connect sign-in (Authentik or any OIDC IdP) ---
     # Off until an issuer + client id exist. Distinct from forward-auth SSO
@@ -279,6 +289,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Confidential-client secret, if the IdP issued one. Underscore prefix
     # marks it a credential so it is masked out of any settings response.
     "_oidc_client_secret": "",
+    # A GitHub token for ROM Hub's GitHub API reads (plugin listings of
+    # releases, cores, cheats, thumbnails). A token with no scopes is enough.
+    # Write-only, like the OIDC secret: never returned by the settings API.
+    "_github_token": "",
     # Read ROM hashes from the library server so netplay can match on bytes.
     # Daily and at startup; off only if you never want the traffic.
     "hash_index": True,
@@ -324,6 +338,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "rename_on_import": True,
     "prefer_hardlinks": False,
     "switch_attach_extras": True,   # file Switch updates/DLC in <game>/update|dlc
+    # Compress each imported Switch .nsp to .nsz through the
+    # configured Compressatorium (see switch_compress). Off by default: it
+    # needs the service and the operator's prod.keys mounted into it.
+    "compress_switch_imports": False,
+    # Also compress .xci to .xcz. Separate and off by default: Compressatorium
+    # rarely rebuilds an XCI byte for byte, so most XCI jobs fail their
+    # round-trip and keep the original.
+    "compress_switch_xci": False,
+    # "<solid|block>:<level>", level 1-22. An .xci is always sent as block.
+    "nsz_compression": "block:18",
     "game_package_folders": True,   # RomM libraries: base/update/DLC in <Title>/, update/, dlc/
     "retain_downloads_after_import": True,
     "overwrite_existing": False,
@@ -352,7 +376,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "video_standard_strict": False,
     "preferred_formats": {},
     "platform_profiles": {},         # slug -> {min_size_mb, max_size_mb, ...}
-    "protocol": "torrent",       # torrent | usenet
+    "protocol": "torrent",       # Legacy settings API key. Grabs use the release protocol.
     # Remote path mappings, the same concept Radarr and Sonarr expose.
     #
     # A download client reports the path it sees. When the client and this
@@ -368,6 +392,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # entry keeps a ledger of what it already added, so a list re-syncing
     # never resurrects a title that was acquired and fulfilled.
     "import_lists": [],
+    "owned_devices": [],
     "list_sync_interval_hours": 6,
     # Download clients and indexers, each a list of stored configurations.
     #
@@ -428,6 +453,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True)
+class SwitchCompressionJob:
+    """A Switch compression submission that can outlive ROMarr."""
+
+    source: str
+    platform: str
+    game: str
+    endpoint: str
+    job_id: str = ""
+    previous_ids: tuple[str, ...] = ()
+    library_root: str = ""
+    library_id: str = ""
+
+
 class Store:
     """Everything ROMarr remembers."""
 
@@ -451,6 +490,7 @@ class Store:
         self.events: list[Event] = []
         self.wanted: list[WantedItem] = []
         self.queue: list[QueueItem] = []
+        self._switch_compression: dict[str, SwitchCompressionJob] = {}
         self.load()
 
     # -- persistence -------------------------------------------------------
@@ -497,6 +537,8 @@ class Store:
             # simply an empty queue -- the same thing those installs had after
             # every restart anyway.
             self.queue = _rows(raw.get("queue"), QueueItem)
+            self._switch_compression = {
+                job.source: job for job in _rows(raw.get("switch_compression"), SwitchCompressionJob)}
 
     def save(self, *, raise_on_error: bool = False) -> None:
         """Write state atomically while holding the Store lock through replacement.
@@ -509,6 +551,7 @@ class Store:
                 "events": [asdict(e) for e in self.events[-self.MAX_EVENTS:]],
                 "wanted": [asdict(w) for w in self.wanted],
                 "queue": [asdict(q) for q in self.queue[-self.MAX_QUEUE:]],
+                "switch_compression": [asdict(j) for j in self._switch_compression.values()],
             }
             tmp = None
             try:
@@ -530,6 +573,51 @@ class Store:
                         os.unlink(tmp)
                     except OSError:
                         pass
+
+    def track_switch_compression(self, job: SwitchCompressionJob) -> None:
+        """Persist the conversion before the service may remove the source."""
+        with self._lock:
+            previous = self._switch_compression.get(job.source)
+            self._switch_compression[job.source] = job
+            try:
+                # Before submitting, a durable snapshot is required. After
+                # acknowledgement, keep the ID in memory even if saving fails.
+                self.save(raise_on_error=not job.job_id)
+            except OSError:
+                if previous is None:
+                    self._switch_compression.pop(job.source, None)
+                else:
+                    self._switch_compression[job.source] = previous
+                raise
+
+    def switch_compression_job(self, source: str) -> SwitchCompressionJob | None:
+        """Read the currently tracked job for an imported path."""
+        with self._lock:
+            return self._switch_compression.get(source)
+
+    def pending_switch_compression(self) -> tuple[SwitchCompressionJob, ...]:
+        """Return tracked conversion jobs without exposing the mutable store."""
+        with self._lock:
+            return tuple(self._switch_compression.values())
+
+    def finish_switch_compression(self, event: Event, source: str, output: str, *, job_id: str) -> bool:
+        """Replace existing references and retire only the matching job."""
+        with self._lock:
+            tracked = self._switch_compression.get(source)
+            if tracked is not None and tracked.job_id != job_id:
+                return False
+            if output:
+                for row in self.queue:
+                    if source in row.imported_paths:
+                        row.imported_paths = [output if p == source else p for p in row.imported_paths]
+                for request in self.settings.get("integration_requests", []):
+                    assets = request.get("assets") or []
+                    if source in assets:
+                        request["assets"] = [output if p == source else p for p in assets]
+                        request["updated_at"] = now_iso()
+            self._switch_compression.pop(source, None)
+            self.record(event)
+            return True
 
     # -- history -----------------------------------------------------------
 
@@ -785,8 +873,8 @@ class Store:
             if notes is not None:
                 row["notes"] = str(notes)
             fields = {k: v for k, v in row.items()
-                      if k in ("status", "rating", "notes")
-                      and v not in ("", 0, None)}
+                      if k in ("status", "rating", "notes", "identity")
+                      and v not in ("", 0, None, {})}
             if fields:
                 row = {**fields, "game": game, "platform": platform}
                 table[key] = row
@@ -798,6 +886,21 @@ class Store:
                 table.pop(key, None)
         self.save()
         return dict(row)
+
+    def set_game_identity(self, platform: str, game: str, identity: dict) -> None:
+        """What the metadata providers said a verified import is (#247).
+
+        Kept beside the operator's own status, rating and notes, under its
+        own key so a provider's rating never overwrites theirs.
+        """
+        key = self._meta_key(platform, game)
+        with self._lock:
+            table = self.settings.setdefault("game_meta", {})
+            row = dict(table.get(key) or {})
+            row.update({"identity": dict(identity), "game": row.get("game") or game,
+                        "platform": row.get("platform") or platform})
+            table[key] = row
+        self.save()
 
     def game_meta(self, platform: str, game: str) -> dict:
         with self._lock:
@@ -877,6 +980,25 @@ class Store:
             self.save()
         return out
 
+    def replace_list_sync(self, previous: dict, item: dict,
+                          pending: Iterable[tuple[str, str]] = ()) -> bool:
+        """Publish a list snapshot and its Wanted additions in one state write."""
+        with self._lock:
+            if self.get_item("import_lists", previous.get("id")) != previous:
+                return False
+            known = {(row.game.lower(), row.platform) for row in self.wanted}
+            before = len(self.wanted)
+            for game, platform in pending:
+                if (game.lower(), platform) not in known:
+                    self.wanted.append(WantedItem(game=game, platform=platform))
+                    known.add((game.lower(), platform))
+            try:
+                self.put_item("import_lists", item, require_persist=True)
+            except Exception:
+                del self.wanted[before:]
+                raise
+            return True
+
     def delete_item(self, key: str, item_id: str, *, require_persist: bool = False) -> bool:
         with self._lock:
             items = self._collection(key)
@@ -912,6 +1034,15 @@ class Store:
                 if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
                     raise ValueError("FlareSolverr URL must start with http:// or https://")
             patch = dict(patch, flaresolverr_url=raw_solver)
+        for key in ("compress_switch_imports", "compress_switch_xci"):
+            if key in patch and not isinstance(patch[key], bool):
+                raise ValueError(f"{key} must be true or false")
+        if "nsz_compression" in patch:
+            from .switch_compress import parse_compression
+            patch = dict(patch, nsz_compression=parse_compression(patch["nsz_compression"]))
+        if "plugin_hosts" in patch:
+            from .catalogue import parse_hosts
+            patch = dict(patch, plugin_hosts=", ".join(parse_hosts(patch["plugin_hosts"])))
         with self._lock:
             # No catalog provenance can be trusted without a selected DAT root.
             # Refuse the whole patch before changing memory or the saved file.

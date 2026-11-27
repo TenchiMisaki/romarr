@@ -33,6 +33,35 @@ def configure_flaresolverr(url: str | None) -> None:
         _FLARESOLVERR_URL = str(url or "").strip().rstrip("/")
 
 
+_GITHUB_TOKEN_LOCK = threading.Lock()
+_GITHUB_TOKEN = ""
+
+
+def configure_github_token(token: str | None) -> None:
+    """Set the GitHub token ROM Hub's host fetcher sends to api.github.com.
+
+    ROM Hub reads ROM_HUB_GITHUB_TOKEN, and only ever sends it on GET
+    requests to api.github.com. Without one, every plugin that lists GitHub
+    releases or files shares the anonymous 60-requests-an-hour limit of the
+    whole network's public address. Applied to ROMarr's own environment for
+    the in-process search, and to the Hub CLI's through `_host_env`; plugin
+    subprocesses never see it.
+    """
+    global _GITHUB_TOKEN
+    value = str(token or "").strip()
+    with _GITHUB_TOKEN_LOCK:
+        _GITHUB_TOKEN = value
+        if value:
+            os.environ["ROM_HUB_GITHUB_TOKEN"] = value
+        else:
+            os.environ.pop("ROM_HUB_GITHUB_TOKEN", None)
+
+
+def github_token_set() -> bool:
+    with _GITHUB_TOKEN_LOCK:
+        return bool(_GITHUB_TOKEN or os.environ.get("ROM_HUB_GITHUB_TOKEN", "").strip())
+
+
 def flaresolverr_url() -> str:
     """Return the active FlareSolverr URL from settings or environment."""
     with _FLARESOLVERR_LOCK:
@@ -77,6 +106,8 @@ def _wrap_download_transport(base_transport):
 
         class _BinaryDownloadSolverTransport(FlareSolverrTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.scheme != "https" or request.extensions.get("rom_hub_bypass_solver"):
+                    return self._inner.handle_request(request)
                 req = self._apply_cached(request)
                 response = self._inner.handle_request(req)
                 if request.method.upper() != "GET" or response.status_code not in (403, 503):
@@ -320,6 +351,9 @@ def _host_env() -> dict:
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env.update(_backend_env())
+    token = os.environ.get("ROM_HUB_GITHUB_TOKEN", "").strip()
+    if token:
+        env["ROM_HUB_GITHUB_TOKEN"] = token
     return env
 
 
@@ -350,6 +384,28 @@ def _sandbox_policy() -> bool:
             "ROMARR_ALLOW_UNSANDBOXED_PLUGINS=1 to allow no confinement.")
     log.warning("running plugins WITHOUT confinement by explicit operator choice: %s", why)
     return True
+
+
+def _plugin_secrets(plugin) -> dict:
+    """The plugin's saved `secret` settings, resolved the way the Hub CLI does.
+
+    ROM Hub keeps secrets out of `state.json` and hands them to a plugin
+    only in its start-up frame. The CLI does that through `prepare_secrets`;
+    ROMarr's own in-process starts (search, torrent resolve, download plan)
+    did not, so a plugin whose key was saved -- Demozoo, CurseForge, Nexus
+    Mods, GitHub Games, Mister Download Manager -- ran as if it had none.
+    A store that cannot be read means no secrets, never a failed search.
+    """
+    try:
+        from rom_hub.cli import prepare_secrets
+    except Exception:  # noqa: BLE001 - an older Hub without secret support
+        return {}
+    try:
+        return prepare_secrets(plugin, HOME)
+    except Exception as exc:  # noqa: BLE001 - logged; the plugin runs keyless
+        log.warning("could not read saved secrets for %s: %s",
+                    getattr(plugin, "slug", "?"), type(exc).__name__)
+        return {}
 
 
 def _plugin_env() -> dict:
@@ -546,6 +602,69 @@ def archive_org_auth_configure(email="", password="", clear=False) -> dict:
     return configure(HOME, email=email, password=password, clear=clear)
 
 
+#: Plugins whose search results are not game files: guides, video
+#: tutorials, manuals, mods, artwork, cheats, save tools, BIOS and emulator
+#: listings, and source repositories. Their rows are useful on their own
+#: pages but are never a release for a game request -- a "Super Metroid
+#: review" video must not be grabbed and imported as Super Metroid.
+NON_GAME_PLUGINS = frozenset({
+    "youtube-tutorials", "strategywiki", "gamefaqs", "game-manuals",
+    "moddb", "gamebanana", "nexusmods", "modrinth", "curseforge", "thunderstore",
+    "github-games", "ludusavi", "retroarch-autoconfig", "libretro-cheats",
+    "libretro-thumbnails", "libretro-overlays", "libretro-database", "openvgdb",
+    "hasheous", "open-bios", "emulators", "libretro-cores", "retroachievements",
+    "compressatorium", "mdm",
+})
+
+#: Plugins whose catalogue only covers specific platforms. When an operator
+#: searches for a specific system outside a plugin's scope (e.g. searching for
+#: a Switch or SNES game while `demozoo`, `aminet` or `worldofspectrum` is
+#: enabled), skipping incompatible plugins avoids waiting on slow remote APIs
+#: whose results could never match the requested platform.
+PLATFORM_SCOPED_PLUGINS: dict[str, frozenset[str]] = {
+    "demozoo": frozenset({
+        "dos", "amiga", "c64", "zxs", "zx81", "sinclair-zx81", "atari-st",
+        "cpc", "msx", "msx2", "vic-20", "plus4", "atari800", "atari2600",
+        "apple2", "appleii", "win", "linux",
+    }),
+    "aminet": frozenset({"amiga", "cd32"}),
+    "whdload": frozenset({"amiga", "cd32"}),
+    "lemon64": frozenset({"c64"}),
+    "csdb": frozenset({"c64", "vic-20", "plus4"}),
+    "worldofspectrum": frozenset({"zxs", "zx81", "sinclair-zx81"}),
+    "zxart": frozenset({"zxs", "zx81", "sinclair-zx81"}),
+    "famicom-world": frozenset({"nes", "fds"}),
+    "snes-central": frozenset({"snes"}),
+    "smwcentral": frozenset({"snes", "n64"}),
+    "exodos": frozenset({"dos", "win"}),
+    "repacks": frozenset({"win", "pc", "windows", "dos", "linux"}),
+    "scummvm-freeware": frozenset({"dos", "win", "amiga", "atari-st", "mac"}),
+}
+
+
+def _plugin_supports_platform(plugin, platform: str | None) -> bool:
+    """Whether `plugin` can return game releases for `platform` when `only` is None."""
+    slug = str(getattr(plugin, "slug", "") or "")
+    if slug in NON_GAME_PLUGINS:
+        return False
+    if not platform:
+        return True
+    resolved = resolve(platform)
+    candidates = {str(platform).lower(), str(_search_platform(platform) or "").lower()}
+    if resolved is not None:
+        candidates.add(resolved.slug.lower())
+    candidates.discard("")
+    scoped = PLATFORM_SCOPED_PLUGINS.get(slug)
+    if scoped is not None and not (candidates & scoped):
+        return False
+    manifest_plats = getattr(getattr(plugin, "manifest", None), "platforms", None) or ()
+    if manifest_plats:
+        declared = {str(p).strip().lower() for p in manifest_plats if str(p).strip()}
+        if declared and not (declared & {"*", "all", "any"}) and not (candidates & declared):
+            return False
+    return True
+
+
 def searchable_plugins() -> list[str]:
     """Slugs of installed, enabled plugins that declare `search`."""
     try:
@@ -579,11 +698,13 @@ def _search_platform(platform: str | None) -> str | None:
 
 
 def search(query: str, platform: str | None = None, limit: int = 25,
-           timeout: float = 90.0) -> tuple[list[dict], str]:
+           timeout: float = 90.0, only: str | tuple[str, ...] | None = None) -> tuple[list[dict], str]:
     """Search every enabled ROM Hub plugin, merged.
 
     Returns `(rows, error)`. Rows are plain dicts with the Hub's SearchResult
-    fields (source_id, title, platform, size_bytes, url, plugin). `error` is
+    fields (source_id, title, platform, size_bytes, url, plugin). `only`
+    limits the fan-out to those plugin slugs (one plugin's own search box).
+    `error` is
     a string when the Hub itself could not be used at all; a single plugin
     failing is not an error -- the Hub's fan-out already isolates those, and
     "two of three sources answered" is a normal search, not a fault.
@@ -597,6 +718,8 @@ def search(query: str, platform: str | None = None, limit: int = 25,
     try:
         plugins = [p for p in _registry.Registry(HOME).installed()
                    if getattr(p, "enabled", True)
+                   and (only is None or (p.slug == only if isinstance(only, str) else p.slug in only))
+                   and (only is not None or _plugin_supports_platform(p, platform))
                    and "search" in (getattr(p.manifest, "capabilities", ())
                                     or ())]
     except Exception as exc:
@@ -644,6 +767,7 @@ def search(query: str, platform: str | None = None, limit: int = 25,
             continue
         try:
             outcome = search_all(group, fetcher=fetcher, query=query,
+                                 secrets_for=_plugin_secrets,
                                  platform=_search_platform(platform), limit=call_limit, timeout=timeout,
                                  allow_unsandboxed=_unsandboxed())
         except Exception as exc:
@@ -654,6 +778,10 @@ def search(query: str, platform: str | None = None, limit: int = 25,
         for source in getattr(outcome, "statuses", []):
             if source.slug == "archive-org" and not source.ok:
                 auth_error = f"Archive.org search failed: {source.error}"
+            elif only is not None and source.slug == only and not source.ok:
+                # Asked about one plugin, its failure is the answer -- not
+                # an empty result list that reads as "the site has nothing".
+                auth_error = f"{only} search failed: {source.error}"
         for r in outcome.results:
             try:
                 rows.append(r.model_dump())
@@ -749,6 +877,7 @@ def resolve_torrents(rows: list[dict]) -> list[dict]:
                         plugin_dir=plugin.path, manifest=manifest,
                         config=getattr(plugin, "config", {}) or {},
                         fetcher=fetcher, timeout=90.0,
+                        secrets=_plugin_secrets(plugin),
                         allow_unsandboxed=_unsandboxed()) as proc:
                     for row in plugin_rows:
                         raw = raw_magnet(row)
@@ -833,12 +962,12 @@ def fetch(row: dict, dest_dir) -> dict:
         with PluginProcess(plugin_dir=plugin.path, manifest=plugin.manifest,
                            config=getattr(plugin, "config", {}) or {},
                            fetcher=fetcher,
+                           secrets=_plugin_secrets(plugin),
                            allow_unsandboxed=_unsandboxed()) as proc:
             plan = proc.plan(result)
-            with HttpDownloader(
-                    allowlist=list(getattr(plugin.manifest, "network", [])
-                                   or []),
-                    transport=dl_transport) as downloader:
+            allowlist = getattr(proc, "network_policy",
+                                list(getattr(plugin.manifest, "network", []) or []))
+            with HttpDownloader(allowlist=allowlist, transport=dl_transport) as downloader:
                 files = []
                 for f in plan.files:
                     dl_kwargs = {"headers": f.headers} if getattr(f, "headers", None) else {}
