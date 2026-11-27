@@ -49,7 +49,10 @@ start() {
             exit 1
         fi
     done
-    mkdir -p "$CFG_ROMARR_CONFIG"
+    if ! mkdir -p "$CFG_ROMARR_CONFIG"; then
+        echo "ROMarr: unable to create config directory: $CFG_ROMARR_CONFIG" >&2
+        return 1
+    fi
 
     # docker start never applies new mounts or environment, so the existing
     # container is reused only when the image and every setting match the

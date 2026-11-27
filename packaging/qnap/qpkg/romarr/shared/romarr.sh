@@ -65,7 +65,10 @@ start() {
             exit 1
         fi
     done
-    mkdir -p "$CFG_ROMARR_CONFIG"
+    if ! mkdir -p "$CFG_ROMARR_CONFIG"; then
+        echo "ROMarr: unable to create config directory: $CFG_ROMARR_CONFIG" >&2
+        return 1
+    fi
     # App Center's Open button follows the port actually published.
     /sbin/setcfg "$QPKG_NAME" Web_Port "$CFG_ROMARR_HOST_PORT" -f "$CONF"
     /sbin/setcfg "$QPKG_NAME" Service_Port "$CFG_ROMARR_HOST_PORT" -f "$CONF"
