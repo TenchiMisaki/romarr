@@ -30,8 +30,10 @@ jobs:
         id: python
         with:
           python-version: '3.13'
-      - name: Install Android build tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+      - name: Install Android SDK and build tools
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
       - name: Build APKs and release bundle
         env:
           ROMARR_BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
