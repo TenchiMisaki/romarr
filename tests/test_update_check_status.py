@@ -164,7 +164,7 @@ def test_in_flight_manual_check_returns_busy_without_second_request(
         """Hold the first fetch until another request attempts the check."""
         count.append(1)
         started.set()
-        assert release.wait(5)
+        assert release.wait(30), "test did not release the mocked fetch"
         return Release()
     monkeypatch.setattr(requests, "get", blocking_get)
     errors = []
@@ -177,13 +177,13 @@ def test_in_flight_manual_check_returns_busy_without_second_request(
     t = threading.Thread(target=run_first)
     t.start()
     try:
-        assert started.wait(5)
+        assert started.wait(30), "first update check did not reach the mocked fetch"
         second = svc.run_command("UpdateCheck")
         assert second["busy"] is True
         assert svc.update_status()["check_status"]["in_progress"] is True
     finally:
         release.set()
-        t.join(5)
+        t.join(30)
     assert not t.is_alive()
     assert not errors
     assert count == [1]

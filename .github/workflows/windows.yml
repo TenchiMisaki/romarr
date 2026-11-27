@@ -138,8 +138,23 @@ jobs:
           $python = Join-Path $env:RUNNER_TEMP 'ROMarr native smoke/python environment/Scripts/python.exe'
           & $python -m pip install pytest
           if ($LASTEXITCODE -ne 0) { throw 'Report test dependency installation failed' }
-          & $python -m pytest tests/test_file_reports.py tests/test_file_report_paths.py tests/test_clamav.py tests/test_sidecars.py -q
+          $report = Join-Path $env:RUNNER_TEMP 'windows-source-smoke.xml'
+          & $python -m pytest tests/test_file_reports.py tests/test_file_report_paths.py tests/test_clamav.py tests/test_sidecars.py tests/test_library.py::test_staged_publication_falls_back_when_windows_denies_hardlinks tests/test_quarantine.py::test_restore_uses_no_clobber_rename_when_hardlinks_are_denied -q --junitxml=$report
           if ($LASTEXITCODE -ne 0) { throw 'Windows report/path checks failed' }
+          [xml]$results = Get-Content -LiteralPath $report -Raw
+          $required = @(
+            'test_windows_native_rename_survives_both_parent_replacements'
+            'test_staged_publication_falls_back_when_windows_denies_hardlinks'
+            'test_restore_uses_no_clobber_rename_when_hardlinks_are_denied'
+            'test_windows_parent_handle_blocks_replacement'
+          )
+          foreach ($name in $required) {
+            $case = @($results.SelectNodes("//testcase[@name='$name']"))
+            if ($case.Count -ne 1 -or $case[0].SelectSingleNode('skipped|failure|error')) {
+              throw "Required Windows case did not pass: $name"
+            }
+            Write-Output "PASS: $name"
+          }
 
   desktop:
     name: Native desktop package and EXE proof

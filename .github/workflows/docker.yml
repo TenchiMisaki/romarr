@@ -34,8 +34,11 @@ jobs:
 
       - name: Install
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools p7zip-full unar
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest "mcp==1.30.0"
+          pip install -r requirements.txt pytest "mcp==1.30.0" "playwright==1.62.0"
+          python -m playwright install --with-deps chromium
           pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/0d4f7114db4b047bc90a78912574a823e3b10527.tar.gz"
 
       - uses: actions/checkout@v5
@@ -62,6 +65,12 @@ jobs:
       - name: Test without credentials
         id: source_tests
         env:
+          # These cases are required by the Windows source-smoke job.
+          PYTEST_ADDOPTS: >-
+            --deselect=tests/test_file_report_paths.py::test_windows_native_rename_survives_both_parent_replacements
+            --deselect=tests/test_library.py::test_staged_publication_falls_back_when_windows_denies_hardlinks
+            --deselect=tests/test_quarantine.py::test_restore_uses_no_clobber_rename_when_hardlinks_are_denied
+            --deselect=tests/test_sidecars.py::test_windows_parent_handle_blocks_replacement
           ROMARR_ARCHIVE_ORG_PLUGIN_SOURCE: ${{ runner.temp }}/archive-org-proof
         run: >-
           python -I "$RUNNER_TEMP/romarr-ci-evidence.py" run
