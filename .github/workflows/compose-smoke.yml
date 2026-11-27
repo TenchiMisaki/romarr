@@ -1,0 +1,29 @@
+name: Compose library startup
+
+on:
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'romarr/**'
+      - 'requirements.txt'
+      - 'scripts/compose-library-smoke.sh'
+      - '.github/workflows/compose-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose-library:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Build the standard image
+        run: docker build --tag romarr-compose-smoke:local .
+      - name: Check startup with and without the library directory
+        run: bash scripts/compose-library-smoke.sh romarr-compose-smoke:local

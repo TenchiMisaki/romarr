@@ -153,7 +153,11 @@ services:
       # page green. Of everything in this file that can be wrong, the two
       # paths are the only ones that are wrong *silently*, so they are the
       # only ones that stop the run.
-      - ${ROMARR_ROMS:?set ROMARR_ROMS to your library root on the host, e.g. ROMARR_ROMS=/mnt/roms}:/roms
+      - type: bind
+        source: ${ROMARR_ROMS:?set ROMARR_ROMS to your library root on the host, e.g. ROMARR_ROMS=/mnt/roms}
+        target: /roms
+        bind:
+          create_host_path: false
 
       # Your download client's completed directory.
       #
