@@ -48,6 +48,16 @@ health() {
 echo "== post-install"
 sh "$PKG/CONTROL/post-install.sh"
 test -f "$WORK/share/Docker/romarr/romarr.env"
+echo "== preserve an unrelated container with the same name"
+version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$PKG/CONTROL/config.json")
+foreign_id=$(docker create --name romarr "ghcr.io/blizzhacker/romarr:$version")
+for action in start stop reload; do
+    if sh "$PKG/CONTROL/start-stop.sh" "$action"; then echo "unexpected success: $action on unrelated container"; exit 1; fi
+done
+if sh "$PKG/CONTROL/pre-uninstall.sh"; then echo "uninstall accepted an unrelated container"; exit 1; fi
+test "$(docker inspect -f '{{.Id}}' romarr)" = "$foreign_id"
+docker rm "$foreign_id" >/dev/null
+
 echo "== start"
 sh "$PKG/CONTROL/start-stop.sh" start; health; echo
 test -d "$WORK/share/Media/Games"

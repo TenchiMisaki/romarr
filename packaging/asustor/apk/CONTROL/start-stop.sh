@@ -28,7 +28,16 @@ read_env() {
     CFG_ROMARR_HOST_PORT=${CFG_ROMARR_HOST_PORT:-6868}
 }
 
+container_id() {
+    entry=$("$DOCKER" container inspect -f '{{.Id}} {{index .Config.Labels "org.romarr.package"}}' "$NAME" 2>/dev/null) || return 0
+    case "$entry" in
+        *" asustor") printf '%s\n' "${entry% *}" ;;
+        *) echo "ROMarr: container $NAME is not owned by this package" >&2; return 1 ;;
+    esac
+}
+
 start() {
+    existing=$(container_id) || return 1
     read_env
     # The shipped default library folder is created; anything else the
     # operator named must already exist, so a typo cannot file games into a
@@ -47,16 +56,18 @@ start() {
     # fingerprint it was created with. Anything edited gets a new container.
     spec=$(printf '%s|' "$IMAGE" "$CFG_PUID" "$CFG_PGID" "$CFG_TZ" "$CFG_ROMARR_CONFIG" \
         "$CFG_ROMARR_ROMS" "$CFG_ROMARR_DOWNLOADS" "$CFG_ROMARR_HOST_PORT" | cksum | cut -d' ' -f1)
-    if [ "$("$DOCKER" inspect -f '{{index .Config.Labels "org.romarr.spec"}}' "$NAME" 2>/dev/null)" = "$spec" ]; then
-        "$DOCKER" start "$NAME" >/dev/null && return 0
+    if [ -n "$existing" ] && [ "$("$DOCKER" inspect -f '{{index .Config.Labels "org.romarr.spec"}}' "$existing" 2>/dev/null)" = "$spec" ]; then
+        "$DOCKER" start "$existing" >/dev/null && return 0
     fi
     # Have the image before touching the old container: a registry outage
     # then leaves the previous one in place.
     "$DOCKER" image inspect "$IMAGE" >/dev/null 2>&1 || "$DOCKER" pull "$IMAGE" >/dev/null || \
         { echo "ROMarr: could not pull $IMAGE"; exit 1; }
-    "$DOCKER" rm -f "$NAME" >/dev/null 2>&1
+    if [ -n "$existing" ]; then
+        "$DOCKER" rm -f "$existing" >/dev/null || return 1
+    fi
     "$DOCKER" run -d --name "$NAME" --restart unless-stopped \
-        --label "org.romarr.spec=$spec" \
+        --label "org.romarr.package=asustor" --label "org.romarr.spec=$spec" \
         -p "${CFG_ROMARR_HOST_PORT}:6868" \
         -e PUID="$CFG_PUID" -e PGID="$CFG_PGID" -e UMASK=002 \
         -e TZ="$CFG_TZ" -e LIBRARY_PATH=/roms \
@@ -67,16 +78,20 @@ start() {
     echo "ROMarr: started $IMAGE"
 }
 
+stop() {
+    existing=$(container_id) || return 1
+    [ -z "$existing" ] || "$DOCKER" stop -t 30 "$existing" >/dev/null
+}
+
 case "$1" in
     start)
-        start
+        start || exit 1
         ;;
     stop)
-        "$DOCKER" stop -t 30 "$NAME" >/dev/null 2>&1
+        stop || exit 1
         ;;
     reload|restart)
-        "$DOCKER" stop -t 30 "$NAME" >/dev/null 2>&1
-        start
+        stop && start || exit 1
         ;;
     *)
         echo "usage: $0 {start|stop|reload}"

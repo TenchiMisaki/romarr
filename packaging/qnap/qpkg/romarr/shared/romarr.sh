@@ -46,8 +46,17 @@ read_env() {
 
 log() { /sbin/log_tool -t 0 -a "ROMarr: $*" 2>/dev/null; echo "ROMarr: $*"; }
 
+container_id() {
+    entry=$("$DOCKER" container inspect -f '{{.Id}} {{index .Config.Labels "com.qnap.qpkg"}}' "$NAME" 2>/dev/null) || return 0
+    case "$entry" in
+        *" $QPKG_NAME") printf '%s\n' "${entry% *}" ;;
+        *) echo "ROMarr: container $NAME is not owned by this package" >&2; return 1 ;;
+    esac
+}
+
 start() {
     DOCKER=$(docker_bin) || { log "Container Station's docker was not found"; exit 1; }
+    existing=$(container_id) || return 1
     chmod 600 "$ENV_FILE" 2>/dev/null
     read_env
     for dir in "$CFG_ROMARR_ROMS" "$CFG_ROMARR_DOWNLOADS"; do
@@ -66,14 +75,16 @@ start() {
     # fingerprint it was created with. Anything edited gets a new container.
     spec=$(printf '%s|' "$IMAGE" "$CFG_PUID" "$CFG_PGID" "$CFG_TZ" "$CFG_ROMARR_CONFIG" \
         "$CFG_ROMARR_ROMS" "$CFG_ROMARR_DOWNLOADS" "$CFG_ROMARR_HOST_PORT" | cksum | cut -d' ' -f1)
-    if [ "$("$DOCKER" inspect -f '{{index .Config.Labels "org.romarr.spec"}}' "$NAME" 2>/dev/null)" = "$spec" ]; then
-        "$DOCKER" start "$NAME" >/dev/null && return 0
+    if [ -n "$existing" ] && [ "$("$DOCKER" inspect -f '{{index .Config.Labels "org.romarr.spec"}}' "$existing" 2>/dev/null)" = "$spec" ]; then
+        "$DOCKER" start "$existing" >/dev/null && return 0
     fi
     # Have the image before touching the old container: a registry outage
     # then leaves the previous one in place.
     "$DOCKER" image inspect "$IMAGE" >/dev/null 2>&1 || "$DOCKER" pull "$IMAGE" >/dev/null || \
         { log "could not pull $IMAGE"; exit 1; }
-    "$DOCKER" rm -f "$NAME" >/dev/null 2>&1
+    if [ -n "$existing" ]; then
+        "$DOCKER" rm -f "$existing" >/dev/null || return 1
+    fi
     "$DOCKER" run -d --name "$NAME" --restart unless-stopped \
         --label "com.qnap.qpkg=$QPKG_NAME" --label "org.romarr.spec=$spec" \
         -p "${CFG_ROMARR_HOST_PORT}:6868" \
@@ -88,8 +99,8 @@ start() {
 
 stop() {
     DOCKER=$(docker_bin) || exit 0
-    "$DOCKER" stop -t 30 "$NAME" >/dev/null 2>&1
-    return 0
+    existing=$(container_id) || return 1
+    [ -z "$existing" ] || "$DOCKER" stop -t 30 "$existing" >/dev/null
 }
 
 case "$1" in
@@ -99,22 +110,25 @@ case "$1" in
             echo "$QPKG_NAME is disabled."
             exit 1
         fi
-        start
+        start || exit 1
         ;;
     stop)
-        stop
+        stop || exit 1
         ;;
     restart)
-        stop
-        start
+        stop && start || exit 1
         ;;
     status)
         DOCKER=$(docker_bin) || exit 1
-        [ "$("$DOCKER" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = "true" ] || exit 1
+        existing=$(container_id) || exit 1
+        [ -n "$existing" ] || exit 1
+        [ "$("$DOCKER" inspect -f '{{.State.Running}}' "$existing" 2>/dev/null)" = "true" ] || exit 1
         ;;
     remove)
         # The container goes; ROMARR_CONFIG on the share stays.
-        DOCKER=$(docker_bin) && "$DOCKER" rm -f "$NAME" >/dev/null 2>&1
+        DOCKER=$(docker_bin) || exit 0
+        existing=$(container_id) || exit 1
+        [ -z "$existing" ] || "$DOCKER" rm -f "$existing" >/dev/null || exit 1
         exit 0
         ;;
     *)

@@ -61,6 +61,15 @@ health() {
     docker logs romarr; return 1
 }
 
+echo "== preserve an unrelated container with the same name"
+
+foreign_id=$(docker create --name romarr "ghcr.io/blizzhacker/romarr:$version")
+for action in start stop restart status remove; do
+    if "$WORK/romarr.sh" "$action"; then echo "unexpected success: $action on unrelated container"; exit 1; fi
+done
+test "$(docker inspect -f '{{.Id}}' romarr)" = "$foreign_id"
+docker rm "$foreign_id" >/dev/null
+
 echo "== start ghcr.io/blizzhacker/romarr:$version"
 "$WORK/romarr.sh" start; health; echo
 "$WORK/romarr.sh" status
