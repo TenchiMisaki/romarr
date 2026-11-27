@@ -14,6 +14,12 @@ Demo, kiosk and trial builds are refused, as are executables named like a ROM or
 
 ScreenScraper can be added under **Settings → Metadata**. It identifies a verified ROM by its hash and needs ScreenScraper developer credentials. SteamGridDB, with a free API key, only supplies a cover when the provider that named the game had none.
 
+### Hydra Launcher sources
+
+A **Hydra Launcher source** is a JSON list of releases and download links. Use **Settings → Indexers → Hydra Launcher sources** to check a URL or browse the community catalogue. The preview identifies the download clients needed for that source before you save it. See the [Hydra setup guide](HYDRA.md) for the full walkthrough. ROMarr caches the source contents for up to an hour.
+
+Console sources such as Redump, No-Intro and Rutracker consoles name each row's platform. That platform counts as evidence for it, and a row filed under a different platform is refused, so a PS2 request never takes the PS3 game of the same name. Magnets go to your torrent client, links to a file go to Mister Download Manager or Direct HTTP, and links to a file host's page (1fichier, Gofile, pixeldrain and others) take the first route that can fetch them: the host's own public download API where it has one, otherwise Real-Debrid or AllDebrid. A row's other links are kept as mirrors and tried in turn. ROMarr never solves a captcha or waits out a free-download timer; a link nothing can fetch fails the grab with the host's name and what to add. The reader is ported from RetroArr (MIT).
+
 ## Files, verification and names
 
 The importer reads supported archives, identifies ROM candidates and files them under the destination platform. Multi-track discs need all referenced tracks. Arcade/Neo Geo and DOS archives can be kept intact because their internal layout matters to the emulator.
@@ -28,11 +34,17 @@ DAT checksums distinguish **verified**, **bad dump** and **unknown**. Every memb
 
 RAR archives, split RAR sets (`.part01.rar`, `.rar` + `.r00`, `.001`) and any other `.7z`/`.zip` (a zipped cue/bin, a multi-disc set) have no Compressatorium mode, so ROMarr extracts them itself with the same readers the importer uses. These run without the sidecar. One file lands beside its archive; several land in a folder named after it. Nothing is overwritten, and partly extracted output is never left under a final name. Every output is checked against the loaded DATs. An original (for a RAR set, every volume) is deleted only when deletion was asked for and every output verified. A dry run lists which engine would handle each file.
 
+### Switch compression on import
+
+**Settings → Media Management → Compress Switch imports** sends each imported Switch `.nsp` to the same Compressatorium sidecar as an `nsz_compress` job. It is off by default. **Also compress XCI imports to XCZ** adds `.xci` files, is off by default as well, and shows a warning when ticked. An `.nsz` or `.xcz` is already compressed and is left alone. **NSZ compression** takes `solid:<level>` or `block:<level>` with a level from 1 to 22, and defaults to `block:18`. Block mode keeps random access in an NSZ, and an `.xci` is always sent as block because an XCZ cannot be solid.
+
+Compressatorium removes the original only after the compressed file passes its round-trip check. ROMarr then points the hash index, queue row, and published request assets at the `.nsz` or `.xcz` before asking the library server to rescan. After three hours ROMarr requests cancellation and checks an unresolved job in the background, including after a restart. Failed and cancelled jobs keep the original. The outcome is recorded in **History** as a `compress` event. Compressatorium rarely rebuilds an XCI byte for byte, so most `.xci` jobs end failed with the original kept, which is why XCI has its own setting. ROMarr handles no keys: the sidecar needs the operator's own `prod.keys` (its `SWITCH_KEYS`), and without them its nsz tool is reported unavailable and no job is submitted.
+
 ## Collections and existing set torrents
 
 ![Collections 1G1R comparison and set torrent planner](img/collections.png)
 
-**Collections** compares a loaded DAT with the selected library/platform. You can review missing entries and apply the available region/1G1R policy. A DAT describes a set; it does not supply downloads.
+**Collections** compares a loaded DAT with the selected library/platform. You can review missing entries and apply the available region/1G1R policy. A DAT describes a set; it does not supply downloads. The [Collections guide](COLLECTIONS.md) walks through a first set, every option, worked examples and every status and error.
 
 For an existing qBittorrent or Transmission set torrent, selective acquisition first previews matched files and sidecars. ROMarr changes file priorities for a batch within your staging budget, verifies downloaded data before importing, and saves progress across restarts. Completion or cancellation restores the original file selection, priorities and paused state. The workflow does not delete the source torrent or its original downloaded data. Account for those source files separately from the staging budget.
 
@@ -100,6 +112,10 @@ Use `ws://HOST:3000` as Browser Host, with an address reachable from ROMarr. Kee
 CAPTCHAs, access challenges and blocked downloads can stop a fetch. The client reports the reason; it does not promise to bypass source restrictions.
 
 `GET /api/v1/downloadclient/browser` reports availability and why the client cannot run when a requirement is missing.
+
+## Cloud storage and file-host accounts
+
+Connect Google Drive, OneDrive, Dropbox, MEGA, Box, pCloud, S3/B2/Wasabi/R2 and every other provider rclone supports, or use the built-in Google Drive and OneDrive clients. Jobs back up, mirror or offload library folders, import from a cloud folder or a Google Drive share link, and back up ROMarr's settings; an rclone mount can be a library root. Rapidgator and 1fichier premium accounts fetch those hosts' links, and MultiUp links are split into their mirrors. See [Cloud storage](CLOUD-STORAGE.md).
 
 ## Notifications
 

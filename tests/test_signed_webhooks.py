@@ -116,3 +116,15 @@ def test_signed_webhook_requires_https_before_sending(wire):
     assert not notify._webhook(hook(url="http://hook.test/in", secret="s" * 20),
                                Message(ON_GRAB, "test"))
     assert calls == []
+
+
+def test_generic_webhook_carries_request_id_platform_and_assets(wire):
+    calls, _ = wire
+    msg = imported("Super Mario Bros. Wonder", "switch", None,
+                   external_request_id="req-42",
+                   assets=["/roms/switch/Super Mario Bros. Wonder.xci"])
+    Notifier([hook()]).send(msg)
+    payload = json.loads(calls[0]["data"])
+    assert payload["platform"] == "switch"
+    assert payload["external_request_id"] == "req-42"
+    assert payload["assets"] == ["/roms/switch/Super Mario Bros. Wonder.xci"]

@@ -153,6 +153,37 @@ class SABnzbd:
         self._added.job_id = str(ids[0]) if ids else ""
         return True
 
+    def add_nzb(self, data: bytes, *, name: str = "") -> bool:
+        """Upload an NZB document (mode=addfile) rather than a URL to fetch.
+
+        For NZBs ROMarr fetched itself -- Arcade Punks ships its NZBs zipped,
+        and the zip is opened and checked here before anything is queued.
+        """
+        self._added.job_id = ""
+        if not self.configured or not data:
+            return False
+        filename = (str(name or "romarr").strip() or "romarr") + ".nzb"
+        params = {"mode": "addfile", "output": "json",
+                  "apikey": self._config.api_key, "cat": self._config.category}
+        if name:
+            params["nzbname"] = name
+        try:
+            response = self._session.post(
+                f"{self._config.base_url.rstrip('/')}/api", params=params,
+                files={"name": (filename, data, "application/x-nzb")},
+                timeout=max(self._config.timeout, 120))
+            response.raise_for_status()
+            out = response.json()
+        except (requests.RequestException, ValueError) as err:
+            log.warning("sabnzbd addfile failed: %s", err.__class__.__name__)
+            return False
+        if not out or not out.get("status"):
+            log.warning("sabnzbd rejected the nzb")
+            return False
+        ids = out.get("nzo_ids") or []
+        self._added.job_id = str(ids[0]) if ids else ""
+        return True
+
     def completed(self, timeout: float | None = None) -> list[dict]:
         """Finished items in our category, shaped like qBittorrent's."""
         if not self.configured:
@@ -310,13 +341,28 @@ class NZBGet:
         return bool(self.configured and self._rpc("version"))
 
     def add(self, url: str, *, name: str = "") -> bool:
+        """Queue an NZB by URL; NZBGet fetches it."""
+        return self._append(url, name)
+
+    def add_nzb(self, data: bytes, *, name: str = "") -> bool:
+        """Queue an NZB document ROMarr already holds (base64 in `append`).
+
+        NZBGet's `append` takes either a URL or the base64 of the NZB itself,
+        and only the second works for a zipped NZB: NZBGet does not open a
+        zip it fetched. ROMarr unzips and validates it first.
+        """
+        if not data:
+            return False
+        return self._append(base64.b64encode(data).decode("ascii"), name)
+
+    def _append(self, content: str, name: str) -> bool:
         # append(NZBFilename, Content, Category, Priority, AddToTop, AddPaused,
         #        DupeKey, DupeScore, DupeMode, PPParameters)
         filename = str(name or "romarr").strip() or "romarr"
         if not filename.lower().endswith(".nzb"):
             filename += ".nzb"
         result = self._rpc("append", [
-            filename, url, self._config.category, 0,
+            filename, content, self._config.category, 0,
             False, False, "", 0, "SCORE", [],
         ])
         # A new-enough NZBGet returns the new id; anything falsy is a refusal.
@@ -1071,6 +1117,7 @@ class DelugeConfig:
     base_url: str
     password: str = ""
     category: str = "romarr"
+    save_path: str = ""
     timeout: int = 30
 
 
@@ -1091,41 +1138,48 @@ class Deluge:
     protocol = "torrent"
     name = "Deluge"
     RPC_PATH = "/json"
+    supports_torrent_file = True
 
     def __init__(self, config, session=None):
         self._config = config
         self._session = session or requests.Session()
         self._id = 0
+        self.last_job_id = ""
+        self.last_error = ""
 
     @property
     def configured(self) -> bool:
         return bool(self._config.base_url)
 
-    def _call(self, method: str, params: list) -> dict:
+    def _call(self, method: str, params: list, *, _timeout: float | None = None) -> dict:
         self._id += 1
         url = self._config.base_url.rstrip("/") + self.RPC_PATH
+        req_timeout = (self._config.timeout if _timeout is None
+                       else max(0.01, min(float(self._config.timeout or 30), float(_timeout))))
         response = self._session.post(
             url,
             data=json.dumps({"method": method, "params": params, "id": self._id}),
             headers={"Content-Type": "application/json"},
-            timeout=self._config.timeout)
+            timeout=req_timeout)
         try:
             return response.json() or {}
         except Exception:
             return {}
 
-    def _ready(self) -> bool:
-        if not self._call("auth.login", [self._config.password]).get("result"):
+    def _ready(self, *, _timeout: float | None = None) -> bool:
+        if not self._call("auth.login", [self._config.password], _timeout=_timeout).get("result"):
+            self.last_error = "Deluge rejected the WebUI password"
             log.warning("Deluge rejected the WebUI password")
             return False
-        if self._call("web.connected", []).get("result"):
+        if self._call("web.connected", [], _timeout=_timeout).get("result"):
             return True
-        hosts = self._call("web.get_hosts", []).get("result") or []
+        hosts = self._call("web.get_hosts", [], _timeout=_timeout).get("result") or []
         if not hosts:
+            self.last_error = "Deluge WebUI is not attached to a daemon"
             log.warning("Deluge WebUI is not attached to a daemon and knows "
                         "no hosts to attach to")
             return False
-        return bool(self._call("web.connect", [hosts[0][0]]).get("result", True))
+        return bool(self._call("web.connect", [hosts[0][0]], _timeout=_timeout).get("result", True))
 
     def reachable(self) -> bool:
         try:
@@ -1134,25 +1188,144 @@ class Deluge:
             log.warning("Deluge unreachable: %s", exc)
             return False
 
+    def _apply_label(self, torrent_hash: str) -> None:
+        if not self._config.category or not torrent_hash:
+            return
+        # Best effort: the Label plugin may not be enabled, and a missing
+        # label is no reason to call a successful add a failure. When the
+        # plugin is enabled but the label has not been created yet, Deluge
+        # returns an Unknown Label error; creating it once and retrying makes
+        # a fresh Deluge install work out of the box.
+        reply = self._call("label.set_torrent", [torrent_hash, self._config.category])
+        err = str((reply.get("error") or {}).get("message") or "")
+        if "unknown label" in err.lower():
+            self._call("label.add", [self._config.category])
+            self._call("label.set_torrent", [torrent_hash, self._config.category])
+
     def add(self, magnet_or_url: str, *, save_path: str | None = None) -> bool:
+        self.last_job_id = ""
+        self.last_error = ""
         try:
             if not self._ready():
                 return False
-            options = {"download_location": save_path} if save_path else {}
-            body = self._call("core.add_torrent_magnet", [magnet_or_url, options])
+            dest = save_path or getattr(self._config, "save_path", "")
+            options = {"download_location": dest} if dest else {}
+            target = str(magnet_or_url or "").strip()
+            method = ("core.add_torrent_url"
+                      if target.lower().startswith(("http://", "https://"))
+                      else "core.add_torrent_magnet")
+            body = self._call(method, [target, options])
             if body.get("error") or not body.get("result"):
+                err_msg = str((body.get("error") or {}).get("message") or body.get("error") or "refused")
+                self.last_error = f"Deluge refused the torrent: {err_msg}"
                 log.warning("Deluge refused the torrent: %s", body.get("error"))
                 return False
-            if self._config.category:
-                # Best effort: the Label plugin may not be enabled, and a
-                # missing label is no reason to call a successful add a
-                # failure.
-                self._call("label.set_torrent",
-                           [body.get("result"), self._config.category])
+            self.last_job_id = str(body.get("result") or "").lower()
+            self._apply_label(str(body.get("result") or ""))
             return True
         except Exception as exc:
+            self.last_error = f"Deluge add failed: {exc}"
             log.warning("Deluge add failed: %s", exc)
             return False
+
+    def add_torrent_file(self, torrent: bytes, *, save_path: str | None = None) -> bool:
+        """Upload locally fetched .torrent bytes via core.add_torrent_file."""
+        self.last_job_id = ""
+        self.last_error = ""
+        if not torrent:
+            return False
+        try:
+            if not self._ready():
+                return False
+            dest = save_path or getattr(self._config, "save_path", "")
+            options = {"download_location": dest} if dest else {}
+            encoded = base64.b64encode(torrent).decode("ascii")
+            body = self._call("core.add_torrent_file", ["romarr.torrent", encoded, options])
+            if body.get("error") or not body.get("result"):
+                err_msg = str((body.get("error") or {}).get("message") or body.get("error") or "refused")
+                self.last_error = f"Deluge refused the torrent file: {err_msg}"
+                log.warning("Deluge refused the torrent file: %s", body.get("error"))
+                return False
+            self.last_job_id = str(body.get("result") or "").lower()
+            self._apply_label(str(body.get("result") or ""))
+            return True
+        except Exception as exc:
+            self.last_error = f"Deluge add_torrent_file failed: {exc}"
+            log.warning("Deluge add_torrent_file failed: %s", exc)
+            return False
+
+    @staticmethod
+    def _content_path(row: dict) -> str:
+        save_dir = str(row.get("save_path") or "").strip()
+        if not save_dir or chr(0) in save_dir:
+            return ""
+        sep = "\\" if ("\\" in save_dir and "/" not in save_dir) else "/"
+        base = save_dir.rstrip("/\\")
+        files = row.get("files") or []
+        if isinstance(files, list) and files:
+            parts_list = [str(f.get("path") or "").replace("\\", "/").strip("/").split("/")
+                          for f in files if isinstance(f, dict) and f.get("path")]
+            if parts_list and not any(p in ("", ".", "..") or ":" in p or chr(0) in p
+                                      for parts in parts_list for p in parts):
+                if len(parts_list) == 1:
+                    rel = "/".join(parts_list[0])
+                else:
+                    root = parts_list[0][0]
+                    rel = root if all(len(p) > 1 and p[0] == root for p in parts_list) else ""
+                if rel:
+                    return base + sep + rel.replace("/", sep)
+        name = str(row.get("name") or "").strip().replace("\\", "/")
+        if not name or "/" in name or name in (".", "..") or ":" in name or chr(0) in name:
+            return ""
+        return base + sep + name
+
+    def completed(self, timeout: float | None = None) -> list[dict]:
+        """Finished torrents from Deluge, filtered by label when the Label plugin is active."""
+        if not self.configured:
+            return []
+        try:
+            if not self._ready(_timeout=timeout):
+                return []
+            body = self._call(
+                "core.get_torrents_status",
+                [{}, ["name", "save_path", "state", "progress", "is_finished", "label", "files"]],
+                _timeout=timeout,
+            )
+        except Exception as exc:
+            log.warning("Deluge completed query failed: %s", exc)
+            return []
+        torrents = body.get("result")
+        if not isinstance(torrents, dict):
+            return []
+        category = (self._config.category or "").strip()
+        out = []
+        for raw_hash, row in torrents.items():
+            if not isinstance(row, dict):
+                continue
+            info_hash = str(raw_hash or "").strip().lower()
+            label = str(row.get("label") or "").strip()
+            if label == "romarr-soundtracks":
+                continue
+            if label and category and label != category:
+                continue
+            done = (bool(row.get("is_finished"))
+                    or float(row.get("progress") or 0) >= 100.0
+                    or str(row.get("state") or "").lower() == "seeding")
+            if not done:
+                continue
+            content_path = self._content_path(row)
+            if not content_path:
+                continue
+            out.append({
+                "id": info_hash,
+                "hash": info_hash,
+                "name": str(row.get("name") or ""),
+                "save_path": str(row.get("save_path") or ""),
+                "content_path": content_path,
+                "category": label or category,
+                "state": "done",
+            })
+        return out
 
 
 @dataclass
@@ -2173,6 +2346,11 @@ class DebridClient:
 
     protocol = "torrent"
     name = "Debrid"
+    #: Whether this service unlocks file-host links (1fichier, gofile…) as
+    #: well as magnets. The services that do override `_resolve` to unlock.
+    takes_hoster_links = False
+    #: Its own `/hosts` list, read once an hour: (monotonic time, domains).
+    _hosts_cache: tuple[float, frozenset] | None = None
 
     #: Per service, so two rows pointed at the same save path do not read each
     #: other's ids and "import" the other's downloads.
@@ -2297,6 +2475,92 @@ class DebridClient:
             self._ledger_path().write_text(json.dumps(entries))
         except OSError as err:
             log.warning("could not record the %s item id: %s", self.name, err)
+
+    # -- file-host links ----------------------------------------------------
+
+    def _host_domains(self) -> frozenset:
+        """Domains this service says it can unlock; empty when it cannot say."""
+        return frozenset()
+
+    def supports_host(self, host: str) -> bool:
+        """Whether this service unlocks links on `host`.
+
+        True when its host list could not be read: refusing a link the
+        service might well unlock would be the worse mistake, and a link it
+        cannot unlock fails at resolve time with its own reason.
+        """
+        if not self.takes_hoster_links:
+            return False
+        cached = self._hosts_cache
+        if cached is None or time.monotonic() - cached[0] > 3600:
+            try:
+                domains = frozenset(d.lower() for d in self._host_domains())
+            except Exception as err:   # a listing failure is not a refusal
+                log.warning("%s host list could not be read: %s", self.name,
+                            type(err).__name__)
+                domains = frozenset()
+            self._hosts_cache = cached = (time.monotonic(), domains)
+        domains = cached[1]
+        if not domains:
+            return True
+        host = (host or "").lower()
+        while host:
+            if host in domains:
+                return True
+            if "." not in host:
+                return False
+            host = host.split(".", 1)[1]
+        return False
+
+    @staticmethod
+    def _is_hoster_link(url: str) -> bool:
+        """An http(s) link to a file host's page -- not a .torrent file URL,
+        which these services take only as an upload and is refused."""
+        text = str(url or "")
+        if not text.lower().startswith(("http://", "https://")):
+            return False
+        try:
+            return not urlsplit(text).path.lower().endswith(".torrent")
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _job_folder_name(name: str, fallback: str) -> str:
+        """One safe folder name for a job: `completed` writes to save_path/name,
+        so a source title such as "../Game (USA)" must never leave save_path."""
+        unsafe = set("\\/:*?\"<>|") | {chr(c) for c in range(32)}
+        clean = "".join(" " if ch in unsafe else ch for ch in str(name or "")).strip(" .")
+        clean = re.sub(r"\s+", " ", clean)[:180]
+        return clean if clean and clean not in (".", "..") else fallback
+
+    def link_available(self, url: str) -> bool:
+        """Whether the service says this file-host link can be fetched now.
+
+        True when it cannot say: refusing a link the service might unlock is
+        the worse mistake. Services with a link-check call override it.
+        """
+        return True
+
+    def _add_hoster_link(self, url: str, name: str = "") -> bool:
+        """Record a file-host link as one of our jobs; `completed` unlocks it.
+
+        False when the ledger could not be written: a job nothing recorded
+        would be reported as grabbed and never fetched.
+        """
+        key = "link:" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:24]
+        folder = self._job_folder_name(name, _basename_of(url) or key[5:])
+        self._remember(key, link=url, name=folder)
+        return any(self._entry_id(e) == key for e in self._ours())
+
+    def _hoster_jobs(self) -> list[tuple[str, list]]:
+        """`(name, [link])` for every file-host link this ROMarr added."""
+        return [(self._job_folder_name(str(e.get("name") or ""), str(e.get("id"))[5:] or "download"),
+                 [str(e["link"])])
+                for e in self._ours() if isinstance(e, dict) and e.get("link")]
+
+    @staticmethod
+    def _is_hoster_entry(entry) -> bool:
+        return isinstance(entry, dict) and bool(entry.get("link"))
 
     # -- the client interface -----------------------------------------------
 
@@ -2656,6 +2920,8 @@ class RealDebrid(DebridClient):
 
     name = "Real-Debrid"
     magnet_only = True
+    takes_hoster_links = True
+    TAKES_NAME = True
 
     LEDGER = ".romarr-realdebrid.json"
     DEFAULT_URL = "https://api.real-debrid.com/rest/1.0"
@@ -2666,9 +2932,27 @@ class RealDebrid(DebridClient):
         user = self._get("/user")
         return bool(user and user.get("id"))
 
-    def add(self, magnet_or_url: str, *, save_path: str | None = None) -> bool:
+    def _host_domains(self) -> frozenset:
+        listed = self._get("/hosts/domains")
+        return frozenset(str(d) for d in listed) if isinstance(listed, list) else frozenset()
+
+    def link_available(self, url: str) -> bool:
+        """/unrestrict/check: a deleted or offline file answers an error."""
+        try:
+            checked = self._post("/unrestrict/check", {"link": url})
+        except Exception:
+            return True
+        if not isinstance(checked, dict):
+            return True
+        return not checked.get("error") and checked.get("supported", 1) != 0
+
+    def add(self, magnet_or_url: str, *, save_path: str | None = None,
+            name: str = "") -> bool:
         if not self.configured:
             return False
+        if self._is_hoster_link(magnet_or_url):
+            # A file-host link: unlocked with /unrestrict/link when fetched.
+            return self._add_hoster_link(magnet_or_url, name)
         if not magnet_or_url.startswith("magnet:"):
             # RD can ingest .torrent files too, but that is an upload flow;
             # magnets cover what indexers hand out. Saying so beats a 400.
@@ -2686,10 +2970,12 @@ class RealDebrid(DebridClient):
 
     def _finished(self) -> list[tuple[str, list]]:
         """List completed Real-Debrid torrents from our ledger."""
-        out = []
+        out = [(name, links, "") for name, links in self._hoster_jobs()]
         for entry in self._ours():
             if self._probe_timed_out():
                 break
+            if self._is_hoster_entry(entry):
+                continue
             torrent_id = self._entry_id(entry)
             info = self._get(f"/torrents/info/{torrent_id}")
             if not info or info.get("status") != "downloaded":
@@ -2737,9 +3023,33 @@ class AllDebrid(DebridClient):
             return False
         return bool(self._data(self._get("/user")).get("user"))
 
-    def add(self, magnet_or_url: str, *, save_path: str | None = None) -> bool:
+    takes_hoster_links = True
+    TAKES_NAME = True
+
+    def link_available(self, url: str) -> bool:
+        """/link/infos: a dead link comes back with an error of its own."""
+        try:
+            infos = self._data(self._post("/link/infos", {"link[]": url})).get("infos") or []
+        except Exception:
+            return True
+        first = infos[0] if isinstance(infos, list) and infos else {}
+        return not (isinstance(first, dict) and first.get("error"))
+
+    def _host_domains(self) -> frozenset:
+        hosts = self._data(self._get("/hosts")).get("hosts") or {}
+        out = set()
+        for spec in (hosts.values() if isinstance(hosts, dict) else []):
+            for domain in (spec or {}).get("domains") or []:
+                out.add(str(domain))
+        return frozenset(out)
+
+    def add(self, magnet_or_url: str, *, save_path: str | None = None,
+            name: str = "") -> bool:
         if not self.configured:
             return False
+        if self._is_hoster_link(magnet_or_url):
+            # A file-host link: unlocked with /link/unlock when fetched.
+            return self._add_hoster_link(magnet_or_url, name)
         if not magnet_or_url.startswith("magnet:"):
             # `magnets[]` takes a magnet or a bare infohash. A .torrent URL is
             # a different endpoint and a file upload; saying so beats a 400.
@@ -2757,10 +3067,12 @@ class AllDebrid(DebridClient):
 
     def _finished(self) -> list[tuple[str, list]]:
         """List completed AllDebrid magnets from our ledger."""
-        out = []
+        out = self._hoster_jobs()
         for entry in self._ours():
             if self._probe_timed_out():
                 break
+            if self._is_hoster_entry(entry):
+                continue
             ident = self._entry_id(entry)
             magnet = self._data(self._post("/magnet/status", {"id": ident})) \
                 .get("magnets") or {}
@@ -3798,7 +4110,12 @@ class SiteDownloader:
 
     # -- the client interface ----------------------------------------------
 
-    def add(self, url: str, *, save_path: str | None = None, name: str = "") -> bool:
+    #: `hosters.HosterRoute` passes the original file-host link with a job, so
+    #: an expiring download URL (1fichier: five minutes) is renewed at fetch time.
+    TAKES_SOURCE = True
+
+    def add(self, url: str, *, save_path: str | None = None, name: str = "",
+            source: str = "") -> bool:
         """Record a job. The bytes are fetched by the next `completed` sweep.
 
         Refusals that can be decided without touching the network are decided
@@ -3819,6 +4136,7 @@ class SiteDownloader:
             return True
         rows.append({
             "url": url,
+            "source": str(source or ""),
             "name": name,
             "save_path": save_path or self._config.save_path,
             "state": "pending",
@@ -3894,6 +4212,11 @@ class SiteDownloader:
     def _run(self, row: dict) -> None:
         """Fetch one job, in place, recording why if it did not work."""
         url = row.get("url", "")
+        if row.get("source"):
+            # Unlocked at grab time, but this job may have waited longer than
+            # the host's download URL lives; ask the account again now.
+            from .hosters import fresh_link
+            url = fresh_link(row["source"]) or url
         host = SitePolicy._host(url)
         if host in self._forbidden:
             row.update(state="failed",
@@ -4384,6 +4707,10 @@ def pick_client(protocol: str, clients: list) -> object | None:
     skipped rather than producing a connection error on every request.
     """
     wanted = (protocol or "torrent").lower()
+    if wanted == "hoster":
+        from .hosters import HosterRoute
+
+        return HosterRoute.for_clients(clients)
     for client in clients:
         if getattr(client, "protocol", "") != wanted:
             continue
@@ -4474,6 +4801,10 @@ CLIENT_TYPES = {
         "fields": _COMMON + [
             FIELD("username", "Username"),
             FIELD("password", "Password", "secret"),
+            FIELD("api_key", "API Key", "secret", clearable=True,
+                  help="qBittorrent 5.2+ (Tools > Options > WebUI). Used "
+                       "instead of the username and password when set; "
+                       "empty the field to remove a saved key."),
             FIELD("category", "Category", default="romarr"),
         ],
     },
@@ -4497,6 +4828,7 @@ CLIENT_TYPES = {
                   help="The WebUI password, not the daemon's. Default: deluge"),
             FIELD("category", "Label", default="romarr",
                   help="Needs the Label plugin; ignored when it is not enabled"),
+            FIELD("save_path", "Download directory"),
         ],
     },
     "rtorrent": {
@@ -4924,7 +5256,8 @@ def build_client(cfg: dict, *, data_dir: str = ""):
         from .clients import QBittorrent, QbitConfig
         client = QBittorrent(QbitConfig(
             base_url=url, username=cfg.get("username", ""),
-            password=cfg.get("password", ""), category=category))
+            password=cfg.get("password", ""), category=category,
+            api_key=cfg.get("api_key", "")))
     elif kind == "transmission":
         client = Transmission(TransmissionConfig(
             base_url=url, username=cfg.get("username", ""),
@@ -4932,7 +5265,8 @@ def build_client(cfg: dict, *, data_dir: str = ""):
             save_path=cfg.get("save_path", "")))
     elif kind == "deluge":
         client = Deluge(DelugeConfig(
-            base_url=url, password=cfg.get("password", ""), category=category))
+            base_url=url, password=cfg.get("password", ""), category=category,
+            save_path=cfg.get("save_path", "")))
     elif kind == "rtorrent":
         # Credentials ride in the URL because that is where XML-RPC over
         # basic auth expects them.
@@ -5114,6 +5448,10 @@ def merge_secrets(new: dict, old: dict | None) -> dict:
         if field["type"] != "secret":
             continue
         name = field["name"]
+        # A clearable secret takes an emptied field as "remove it"; only the
+        # placeholder or an omitted key keeps what is stored.
+        if field.get("clearable") and new.get(name) == "":
+            continue
         if new.get(name) in (SECRET_PLACEHOLDER, "", None):
             new[name] = old.get(name, "")
     return new

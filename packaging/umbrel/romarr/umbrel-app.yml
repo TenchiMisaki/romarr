@@ -2,7 +2,7 @@ manifestVersion: 1
 id: romarr
 category: media
 name: ROMarr
-version: "1.11.4"
+version: "1.13.2"
 tagline: The *arr for games
 description: >-
   Request a title and ROMarr searches your indexers through Prowlarr, hands the
@@ -46,21 +46,11 @@ dependencies:
 repo: https://github.com/BlizzHacker/romarr
 support: https://github.com/BlizzHacker/romarr/issues
 port: 6868
-gallery:
-  - 1.jpg
-  - 2.jpg
-  - 3.jpg
+gallery: []
 path: ""
 defaultUsername: ""
 defaultPassword: ""
-releaseNotes: >-
-  ROMarr 1.11.4 imports split RAR releases in the Docker image, only counts an
-  import once the file is inside the library folder, and explains why it will
-  not reuse an existing collection torrent. It includes the 1.11.3 security fix
-  for the library relay.
-
-
-  Full release notes can be found at https://github.com/BlizzHacker/romarr/releases/tag/v1.11.4
+releaseNotes: ""
 torOnly: false
 permissions:
   - STORAGE_DOWNLOADS

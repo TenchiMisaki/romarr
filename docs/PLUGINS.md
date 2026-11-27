@@ -14,7 +14,7 @@
 | Native Windows app | The Windows ZIP includes ROM Hub. Linux seccomp confinement is unavailable on Windows. |
 | Windows source helper | ROM Hub is optional. The PowerShell helper installs ROMarr's base requirements; see the command below for the additional host package. |
 
-One plugin comes preinstalled: **Compressatorium** ([rom-hub-compressatorium](https://github.com/BlizzHacker/rom-hub-compressatorium)), which holds the address of a [Compressatorium](https://github.com/pacnpal/compressatorium) container for batch decompression (see [Features](FEATURES.md#batch-decompression)). ROMarr installs it once, the first time it starts with ROM Hub available: from a copy bundled in the Docker image, otherwise from GitHub. If you disable it, it stays disabled.
+Two plugins come preinstalled: **Compressatorium** ([rom-hub-compressatorium](https://github.com/BlizzHacker/rom-hub-compressatorium)), which holds the address of a [Compressatorium](https://github.com/pacnpal/compressatorium) container for batch decompression and Switch compression (see [Features](FEATURES.md#batch-decompression)), and **Arcade Punks** ([rom-hub-arcade-punks](https://github.com/BlizzHacker/rom-hub-arcade-punks)), which searches the Arcade Punks catalogue and sits beside ROMarr's downloader for their NZB, torrent, Mega and Rapidgator links (see [Arcade Punks](ARCADE-PUNKS.md)). ROMarr installs each once, the first time it starts with ROM Hub available: from a copy bundled in the Docker image, otherwise from GitHub. If you disable one, it stays disabled.
 
 A second plugin comes preinstalled the same way: **Mister Download Manager (direct downloads)** ([rom-hub-mdm](https://github.com/BlizzHacker/rom-hub-mdm)), which holds the settings of the two standalone download clients built on [Mister Download Manager](https://github.com/anefzaoui/misterdownloadmanager) (by anefzaoui, GPL-3.0-or-later). Its card in **Hub → Plugins** takes a mode (`cli` or `remote`), the remote URL, the API token (kept in ROM Hub's secret store), the number of connections for direct HTTP, and an optional MDM category. Once a mode is set, **Standalone Direct HTTP (MDM)** and **Standalone BitTorrent (MDM)** both use these settings, and saving either client in **Settings → Download Clients** writes its settings back to the plugin, so the two always agree. With no mode set, each client keeps its own settings. The plugin's `cores` entries also offer MDM's official release archives for Linux x86_64, Windows x86_64 and macOS, each with the SHA-256 GitHub reports for it and the release's `SHA256SUMS.txt` beside it. No MDM code is included in ROMarr or the plugin.
 
@@ -30,7 +30,10 @@ A new ROMarr installs these source plugins on its first start, alongside the Com
 2. Search by name or use the `search` capability filter. Read the description and any key requirement.
 3. Click **Install**. Confirm the card shows **Enabled**; use **Enable** if needed.
 4. Open **Settings → Download Clients → Add** and choose **ROM Hub**. Set a writable save/staging directory as ROMarr sees it, such as `/downloads/rom-hub` in Docker. Test and save.
-5. Return to Plugins. It should say **Enabled plugins join search** and list the searchable plugins.
+5. Return to Plugins to see which sources are ready for search.
+
+MiNERVA Archive uses qBittorrent or Standalone BitTorrent (MDM in CLI mode)
+for exact-file selection. See [using MiNERVA to fill a set](COLLECTIONS.md#can-request-missing-use-minerva).
 6. Use **Interactive Search** with a title and platform. Plugin results can be grabbed through the ROM Hub client and then go through normal import and verification.
 
 A metadata-only plugin does not become a game search source. Other capabilities, including assets and cores, belong to ROM Hub and may require its CLI; installing them does not automatically configure an emulator or frontend. For a plugin marked **key needed**, follow that plugin's repository instructions for credentials/configuration.
@@ -42,6 +45,18 @@ On the installed Archive.org card, enter your email and password to save a login
 For headless installations, set `ROM_HUB_ARCHIVE_ORG_EMAIL_FILE` and `ROM_HUB_ARCHIVE_ORG_PASSWORD_FILE` to files readable by ROMarr. Alternatively, use `ROM_HUB_ARCHIVE_ORG_EMAIL` and `ROM_HUB_ARCHIVE_ORG_PASSWORD`. File settings take precedence for each field; an incomplete external login is an error and does not fall back to saved credentials. The legacy `ROMARR_ARCHIVE_ORG_*` names are also supported, but do not mix the two families.
 
 Credentials are stored by ROM Hub, not in ROMarr's settings or plugin configuration. Plugins run with the ROMarr service account's filesystem access, so only install plugins you trust. On headless Linux, the default store keeps its encryption key beside the encrypted file; use an externally supplied `ROM_HUB_SECRET_KEY` or an OS keyring if filesystem readers are in your threat model. Do not put passwords in the Nix store.
+
+### Network access for a self-hosted source
+
+If a plugin declares `network_from_env`, set `ROM_HUB_NETWORK_<SLUG>` on the
+ROMarr process and restart it. Replace hyphens in the plugin slug with
+underscores and use uppercase. For example, a plugin named `test-shop` can
+use `ROM_HUB_NETWORK_TEST_SHOP=http://192.168.1.12:8080` to authorize that exact
+private HTTP origin. Then enter the shop URL in the plugin's settings.
+In Docker Compose, pass the variable into the ROMarr service environment.
+For a source that uses HTTPS, grant the hostname. See
+[ROM Hub's network grant rules](https://github.com/BlizzHacker/rom-hub/blob/master/CONTRIBUTING.md#operator-run-servers).
+
 
 ## Examples in the catalogue
 
@@ -104,7 +119,16 @@ Install Git using your operating system's package manager. Then install the host
 ```bash
 # Proxmox installation path; change it for your own source checkout.
 /opt/romarr/.venv/bin/python -m pip install \
-  "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/0d4f7114db4b047bc90a78912574a823e3b10527.tar.gz"
+  "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/2936ffa8861b7768d7888670587ba6e15c8c3929.tar.gz"
+```
+
+**Upgrading an existing install:** every Hub revision reports version 0.1.0, so pip says
+`Requirement already satisfied` and keeps the old files. Force it, for `rom-hub` only, then
+restart ROMarr so it loads the new module:
+
+```bash
+/opt/romarr/.venv/bin/python -m pip install --force-reinstall --no-deps \
+  "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/2936ffa8861b7768d7888670587ba6e15c8c3929.tar.gz"
 ```
 
 For a checkout using `.venv`, use `.venv/bin/python` instead. Installing into system Python or another virtual environment will not make the package available to ROMarr. Refresh the Plugins page after installing; restart ROMarr after a package upgrade if it has already loaded an older module.
@@ -112,7 +136,13 @@ For a checkout using `.venv`, use `.venv/bin/python` instead. Installing into sy
 For the advanced [Windows source helper](INSTALL.md#windows-source-install), run from the repository directory:
 
 ```powershell
-.\.venv-windows\Scripts\python.exe -m pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/0d4f7114db4b047bc90a78912574a823e3b10527.tar.gz"
+.\.venv-windows\Scripts\python.exe -m pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/2936ffa8861b7768d7888670587ba6e15c8c3929.tar.gz"
+```
+
+To upgrade an existing Windows install, add `--force-reinstall --no-deps`, then restart ROMarr:
+
+```powershell
+.\.venv-windows\Scripts\python.exe -m pip install --force-reinstall --no-deps "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/2936ffa8861b7768d7888670587ba6e15c8c3929.tar.gz"
 ```
 
 Use your chosen virtual-environment path if you changed `-VenvDirectory`. Git must be on `PATH` when installing plugin repositories. The Hub page reports the lack of Linux sandbox support on Windows; do not assume it is confined there.
