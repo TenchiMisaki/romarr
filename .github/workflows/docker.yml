@@ -34,8 +34,11 @@ jobs:
 
       - name: Install
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools p7zip-full unar
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest "mcp==1.30.0"
+          pip install -r requirements.txt pytest "mcp==1.30.0" "playwright==1.62.0"
+          python -m playwright install --with-deps chromium
           pip install "rom-hub @ https://github.com/BlizzHacker/rom-hub/archive/0d4f7114db4b047bc90a78912574a823e3b10527.tar.gz"
 
       - uses: actions/checkout@v5
