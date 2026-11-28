@@ -16,6 +16,16 @@ on:
       - "packaging/ugreen/**"
       - "packaging/openmediavault/**"
       - ".github/workflows/nas-packages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packaging/synology/**"
+      - "packaging/qnap/**"
+      - "packaging/asustor/**"
+      - "packaging/terramaster/**"
+      - "packaging/ugreen/**"
+      - "packaging/openmediavault/**"
+      - ".github/workflows/nas-packages.yml"
   workflow_dispatch:
 
 permissions:
@@ -87,6 +97,7 @@ jobs:
       - name: Install, start, upgrade and remove it the way DSM does
         run: sudo packaging/synology/test/dsm-spk-smoke.sh dist/romarr_noarch-dsm7_*.spk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'push'
         with:
           name: synology-spk
           path: dist/*.spk
@@ -120,6 +131,7 @@ jobs:
       - name: Run it the way QTS does
         run: sudo PORT=16869 packaging/qnap/test/qts-qpkg-smoke.sh dist/romarr_*.qpkg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'push'
         with:
           name: qnap-qpkg
           path: dist/*.qpkg
@@ -145,6 +157,7 @@ jobs:
       - name: Install and run it the way ADM does
         run: sudo PORT=16870 packaging/asustor/test/adm-apk-smoke.sh dist/romarr_*_any.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'push'
         with:
           name: asustor-apk
           path: dist/*.apk
