@@ -3,7 +3,7 @@ run-name: ${{ inputs.candidate_sha && format('Windows candidate {0}', inputs.can
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'romarr-windows-candidate/**']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -34,6 +34,32 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || '' }}
+          fetch-depth: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/romarr-windows-candidate/') && 2 || 1 }}
+      - name: Verify and check out staged candidate
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/romarr-windows-candidate/') }}
+        shell: pwsh
+        env:
+          CARRIER_SHA: ${{ github.sha }}
+          CANDIDATE_REF: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = $env:CANDIDATE_REF -creplace '^romarr-windows-candidate/', ''
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid candidate ref.' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:CARRIER_SHA) { throw 'Unexpected carrier checkout.' }
+          $parents = (git show --no-patch --format=%P HEAD) -split ' '
+          if ($LASTEXITCODE -ne 0 -or $parents.Count -ne 2 -or $parents[1] -cne $expected) {
+            throw 'Carrier must point to the exact candidate.'
+          }
+          $carrierTree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the carrier tree.' }
+          $baseTree = git rev-parse "$($parents[0])^{tree}"
+          if ($LASTEXITCODE -ne 0 -or $carrierTree -cne $baseTree) { throw 'Carrier tree differs from the fork base.' }
+          git checkout --detach $expected
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check out the expected candidate.' }
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) { throw 'Unexpected candidate checkout.' }
+          Write-Output "Verified Windows candidate: $actual"
       - name: Verify exact candidate checkout
         if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
         shell: pwsh
@@ -189,6 +215,32 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || '' }}
+          fetch-depth: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/romarr-windows-candidate/') && 2 || 1 }}
+      - name: Verify and check out staged candidate
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/romarr-windows-candidate/') }}
+        shell: pwsh
+        env:
+          CARRIER_SHA: ${{ github.sha }}
+          CANDIDATE_REF: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = $env:CANDIDATE_REF -creplace '^romarr-windows-candidate/', ''
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid candidate ref.' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:CARRIER_SHA) { throw 'Unexpected carrier checkout.' }
+          $parents = (git show --no-patch --format=%P HEAD) -split ' '
+          if ($LASTEXITCODE -ne 0 -or $parents.Count -ne 2 -or $parents[1] -cne $expected) {
+            throw 'Carrier must point to the exact candidate.'
+          }
+          $carrierTree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the carrier tree.' }
+          $baseTree = git rev-parse "$($parents[0])^{tree}"
+          if ($LASTEXITCODE -ne 0 -or $carrierTree -cne $baseTree) { throw 'Carrier tree differs from the fork base.' }
+          git checkout --detach $expected
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check out the expected candidate.' }
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) { throw 'Unexpected candidate checkout.' }
+          Write-Output "Verified Windows candidate: $actual"
       - name: Verify exact candidate checkout
         if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
         shell: pwsh
