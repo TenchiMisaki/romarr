@@ -1,4 +1,5 @@
 name: NAS packaging smoke tests
+run-name: ${{ inputs.candidate_sha && format('NAS candidate {0}', inputs.candidate_sha) || github.event.head_commit.message || github.event.pull_request.title || github.ref_name }}
 
 # Build vendor packages and replay their lifecycle on hosted Ubuntu.
 #
@@ -27,6 +28,11 @@ on:
       - "packaging/openmediavault/**"
       - ".github/workflows/nas-packages.yml"
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact public fork candidate commit to validate (optional)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -47,6 +53,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
       - name: docker compose config, and a missing library refuses to start
         run: |
           set -eu
@@ -83,6 +99,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
       - name: Build with spksrc
         run: |
           set -eu
@@ -97,7 +123,7 @@ jobs:
       - name: Install, start, upgrade and remove it the way DSM does
         run: sudo packaging/synology/test/dsm-spk-smoke.sh dist/romarr_noarch-dsm7_*.spk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && inputs.candidate_sha == ''
         with:
           name: synology-spk
           path: dist/*.spk
@@ -109,6 +135,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
       - name: Build with QDK
         run: |
           set -eu
@@ -131,7 +167,7 @@ jobs:
       - name: Run it the way QTS does
         run: sudo PORT=16869 packaging/qnap/test/qts-qpkg-smoke.sh dist/romarr_*.qpkg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && inputs.candidate_sha == ''
         with:
           name: qnap-qpkg
           path: dist/*.qpkg
@@ -143,6 +179,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_CANDIDATE"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -157,7 +203,7 @@ jobs:
       - name: Install and run it the way ADM does
         run: sudo PORT=16870 packaging/asustor/test/adm-apk-smoke.sh dist/romarr_*_any.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && inputs.candidate_sha == ''
         with:
           name: asustor-apk
           path: dist/*.apk
