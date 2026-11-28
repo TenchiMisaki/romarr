@@ -1,0 +1,44 @@
+name: NAS packaging candidate checks
+
+on:
+  push:
+    branches: ['romarr-nas-candidate/**']
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Verify NAS candidate carrier
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify carrier and candidate
+        id: identity
+        shell: bash
+        env:
+          CANDIDATE_REF: ${{ github.ref_name }}
+          CARRIER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_REF" =~ ^romarr-nas-candidate/([0-9a-f]{40})$ ]]
+          candidate="${BASH_REMATCH[1]}"
+          test "$(git rev-parse HEAD)" = "$CARRIER_SHA"
+          read -r base staged extra < <(git show --no-patch --format=%P HEAD)
+          test -z "$extra"
+          test "$staged" = "$candidate"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "$base^{tree}")"
+          printf 'sha=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+
+  nas:
+    name: NAS packaging jobs
+    needs: candidate
+    uses: ./.github/workflows/nas-packages.yml
+    with:
+      candidate_sha: ${{ needs.candidate.outputs.sha }}
