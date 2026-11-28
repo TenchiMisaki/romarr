@@ -1,15 +1,21 @@
 name: Windows source and native desktop
+run-name: ${{ inputs.candidate_sha && format('Windows candidate {0}', inputs.candidate_sha) || github.event.head_commit.message || github.event.pull_request.title || github.ref_name }}
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact public fork candidate commit to validate (optional)
+        required: false
+        type: string
   release:
     types: [published]
 
 concurrency:
-  group: windows-${{ github.workflow }}-${{ github.ref }}
+  group: windows-${{ github.workflow }}-${{ inputs.candidate_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'release' }}
 
 permissions:
@@ -27,6 +33,22 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        shell: pwsh
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_CANDIDATE -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Candidate must be a full lowercase commit SHA.'
+          }
+          $checkedOut = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkedOut -cne $env:EXPECTED_CANDIDATE) {
+            throw 'Checked out commit does not match the requested candidate.'
+          }
+          Write-Output "Verified Windows candidate: $checkedOut"
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -166,6 +188,22 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha || '' }}
+      - name: Verify exact candidate checkout
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        shell: pwsh
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.candidate_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_CANDIDATE -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Candidate must be a full lowercase commit SHA.'
+          }
+          $checkedOut = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkedOut -cne $env:EXPECTED_CANDIDATE) {
+            throw 'Checked out commit does not match the requested candidate.'
+          }
+          Write-Output "Verified Windows candidate: $checkedOut"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
@@ -243,7 +281,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Upload desktop ZIP and unsigned MSIX
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.candidate_sha == '')
         uses: actions/upload-artifact@v4
         with:
           name: ROMarr-Windows-desktop-packages
