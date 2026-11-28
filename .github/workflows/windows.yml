@@ -88,6 +88,41 @@ jobs:
           $venv = Join-Path $root 'python environment'
           & .\scripts\start-windows.ps1 -PythonPath (Get-Command python).Source -DataDirectory $data -LibraryPath $library -VenvDirectory $venv -CheckOnly
           if ($LASTEXITCODE -ne 0) { throw 'Native preparation failed' }
+      - name: Test file reports without writing antivirus fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:RUNNER_TEMP 'ROMarr native smoke/python environment/Scripts/python.exe'
+          & $python -m pip install pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Report test dependency installation failed' }
+          $report = Join-Path $env:RUNNER_TEMP 'windows-source-smoke.xml'
+          $reportTests = @(
+            'tests/test_file_reports.py'
+            'tests/test_file_report_paths.py'
+            'tests/test_clamav.py'
+            'tests/test_sidecars.py'
+            'tests/test_library.py::test_staged_publication_falls_back_when_windows_denies_hardlinks'
+            'tests/test_quarantine.py::test_restore_uses_no_clobber_rename_when_hardlinks_are_denied'
+          )
+          & $python -m pytest @reportTests --collect-only -q
+          if ($LASTEXITCODE -ne 0) { throw 'Required Windows report/path tests could not be collected' }
+          & $python -m pytest @reportTests -q --junitxml=$report
+          if ($LASTEXITCODE -ne 0) { throw 'Windows report/path checks failed' }
+          [xml]$results = Get-Content -LiteralPath $report -Raw
+          $required = @(
+            'test_windows_native_rename_survives_both_parent_replacements'
+            'test_staged_publication_falls_back_when_windows_denies_hardlinks'
+            'test_restore_uses_no_clobber_rename_when_hardlinks_are_denied'
+            'test_windows_parent_handle_blocks_replacement'
+          )
+          foreach ($name in $required) {
+            $case = @($results.SelectNodes("//testcase[@name='$name']"))
+            if ($case.Count -ne 1 -or $case[0].SelectSingleNode('skipped|failure|error')) {
+              throw "Required Windows case did not pass: $name"
+            }
+            Write-Output "PASS: $name"
+          }
+
       - name: Prove loopback health, authentication and persisted settings
         shell: pwsh
         run: |
@@ -179,33 +214,10 @@ jobs:
             Get-ChildItem -LiteralPath $root -Filter '*.log' | ForEach-Object { Get-Content -LiteralPath $_.FullName }
           }
 
-      - name: Test file reports without writing antivirus fixtures
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $python = Join-Path $env:RUNNER_TEMP 'ROMarr native smoke/python environment/Scripts/python.exe'
-          & $python -m pip install pytest
-          if ($LASTEXITCODE -ne 0) { throw 'Report test dependency installation failed' }
-          $report = Join-Path $env:RUNNER_TEMP 'windows-source-smoke.xml'
-          & $python -m pytest tests/test_file_reports.py tests/test_file_report_paths.py tests/test_clamav.py tests/test_sidecars.py tests/test_library.py::test_staged_publication_falls_back_when_windows_denies_hardlinks tests/test_quarantine.py::test_restore_uses_no_clobber_rename_when_hardlinks_are_denied -q --junitxml=$report
-          if ($LASTEXITCODE -ne 0) { throw 'Windows report/path checks failed' }
-          [xml]$results = Get-Content -LiteralPath $report -Raw
-          $required = @(
-            'test_windows_native_rename_survives_both_parent_replacements'
-            'test_staged_publication_falls_back_when_windows_denies_hardlinks'
-            'test_restore_uses_no_clobber_rename_when_hardlinks_are_denied'
-            'test_windows_parent_handle_blocks_replacement'
-          )
-          foreach ($name in $required) {
-            $case = @($results.SelectNodes("//testcase[@name='$name']"))
-            if ($case.Count -ne 1 -or $case[0].SelectSingleNode('skipped|failure|error')) {
-              throw "Required Windows case did not pass: $name"
-            }
-            Write-Output "PASS: $name"
-          }
 
   desktop:
     name: Native desktop package and EXE proof
+    needs: source-smoke
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:

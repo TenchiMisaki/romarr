@@ -395,9 +395,17 @@ def test_reuse_waits_for_checking_resume_data_and_lagged_resume_retained(tmp_pat
 
 def test_manually_stopped_torrent_after_resume_fails_without_polling(tmp_path, monkeypatch):
     """A torrent stopped by the operator after running must still fail immediately with Resume guidance."""
+    from types import SimpleNamespace
+
     from romarr import clients as clients_mod
+
     sleeps = []
-    monkeypatch.setattr(clients_mod.time, "sleep", lambda s: sleeps.append(s))
+    clock = SimpleNamespace(
+        monotonic=clients_mod.time.monotonic,
+        sleep=sleeps.append,
+        time=clients_mod.time.time,
+    )
+    monkeypatch.setattr(clients_mod, "time", clock)
 
     service, client, session = service_with_retained(tmp_path)
     session.row["state"] = "stoppedUP"
